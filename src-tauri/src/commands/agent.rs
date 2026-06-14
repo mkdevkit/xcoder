@@ -42,6 +42,17 @@ async fn opencode_resolve_service_url(
     Ok(url)
 }
 
+fn opencode_workspace(
+    state: &State<'_, Mutex<OpencodeState>>,
+    override_workspace: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(workspace) = override_workspace.filter(|value| !value.is_empty()) {
+        return Ok(Some(workspace));
+    }
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    Ok(guard.workspace.clone())
+}
+
 #[tauri::command]
 pub fn codewhale_doctor() -> Result<serde_json::Value, String> {
     run_doctor()
@@ -485,6 +496,8 @@ pub async fn opencode_start_runtime(
     };
 
     if cached.0.is_some() && opencode_is_healthy(&client, &url).await {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.workspace = Some(workspace.clone());
         return Ok(RuntimeStatus {
             running: true,
             base_url: cached.0,
@@ -709,16 +722,11 @@ pub async fn opencode_send_turn(
     message: String,
     mode: String,
     model: Option<String>,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
-    };
-
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
     send_prompt(
         &client,
@@ -727,6 +735,7 @@ pub async fn opencode_send_turn(
         &mode,
         model.as_deref(),
         &message,
+        workspace.as_deref(),
     )
     .await
 }
@@ -734,18 +743,13 @@ pub async fn opencode_send_turn(
 #[tauri::command]
 pub async fn opencode_cancel_turn(
     session_id: String,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
-    };
-
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    cancel_generation(&client, &url, &session_id).await
+    cancel_generation(&client, &url, &session_id, workspace.as_deref()).await
 }
 
 #[tauri::command]
@@ -955,46 +959,47 @@ pub async fn opencode_list_sessions(
 #[tauri::command]
 pub async fn opencode_get_pending_approval(
     session_id: String,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<Option<PendingApproval>, String> {
     let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    get_pending_permission(&client, &url, &session_id).await
+    get_pending_permission(&client, &url, &session_id, workspace.as_deref()).await
 }
 
 #[tauri::command]
 pub async fn opencode_load_session_history(
     session_id: String,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<Vec<HistoryMessage>, String> {
     let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    load_session_history(&client, &url, &session_id).await
+    load_session_history(&client, &url, &session_id, workspace.as_deref()).await
 }
 
 #[tauri::command]
 pub async fn opencode_is_session_busy(
     session_id: String,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<bool, String> {
     let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    is_session_busy(&client, &url, &session_id).await
+    is_session_busy(&client, &url, &session_id, workspace.as_deref()).await
 }
 
 #[tauri::command]
 pub async fn opencode_delete_session(
     session_id: String,
+    workspace: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
-    };
-
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    delete_session(&client, &url, &session_id).await
+    delete_session(&client, &url, &session_id, workspace.as_deref()).await
 }

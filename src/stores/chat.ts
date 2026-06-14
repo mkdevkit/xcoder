@@ -23,6 +23,7 @@ import {
 import { translate } from "../i18n/locales";
 import { useSettingsStore } from "./settings";
 import { useWorkspaceStore } from "./workspace";
+import { workspacesMatch } from "../utils/path";
 import { isMeaningfulToolArgs } from "../utils/toolMessage";
 import {
   clearSavedThreadId,
@@ -425,7 +426,7 @@ async function syncMessagesFromServerOnce(
     const history = await tauriInvoke<HistoryMessage[]>(
       commands.loadThreadHistory,
       providerId === "opencode"
-        ? { sessionId: threadId }
+        ? opencodeSessionArgs(get, providerId, threadId)
         : { threadId },
     );
     const latest = getProviderSlice(get, providerId);
@@ -474,7 +475,7 @@ async function syncMessagesFromServerOnce(
     ) {
       try {
         const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-          sessionId: threadId,
+          ...opencodeSessionArgs(get, providerId, threadId),
         });
         const historyStable =
           previousSnapshot !== undefined &&
@@ -626,7 +627,7 @@ async function runPendingApprovalCheck(
       } | null>(
         commands.getPendingApproval!,
         resolvedId === "opencode"
-          ? { sessionId: slice.thread.id }
+          ? opencodeSessionArgs(get, resolvedId, slice.thread.id)
           : { threadId: slice.thread.id },
       );
       if (pending) {
@@ -676,7 +677,7 @@ function scheduleCompleteTurn(
         if (commands.isSessionBusy && slice.thread) {
           try {
             const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-              sessionId: slice.thread.id,
+              ...opencodeSessionArgs(get, resolvedId, slice.thread.id),
             });
             if (busy) {
               scheduleCompleteTurn(get, set, resolvedId, 1500);
@@ -705,6 +706,12 @@ async function hydrateProviderAfterConnect(
   ) => void,
   get: () => ChatState,
 ) {
+  if (
+    workspace &&
+    (providerId === "opencode" || providerId === "codewhale")
+  ) {
+    syncProviderWorkspace(get, set, providerId, workspace);
+  }
   const commands = getAgentCommands(providerId);
   const slice = getProviderSlice(get, providerId);
   const patch: Partial<ProviderChatSlice> = {
@@ -816,7 +823,54 @@ function resolveProviderWorkspace(
 ) {
   if (workspace) return workspace;
   const slice = getProviderSlice(get, providerId);
-  return slice.chatWorkspace ?? slice.thread?.workspace ?? undefined;
+  return (
+    slice.chatWorkspace ??
+    slice.thread?.workspace ??
+    useWorkspaceStore.getState().rootPath ??
+    undefined
+  );
+}
+
+function opencodeSessionArgs(
+  get: () => ChatState,
+  providerId: string,
+  sessionId: string,
+  workspace?: string,
+) {
+  const resolvedWorkspace = resolveProviderWorkspace(get, providerId, workspace);
+  return {
+    sessionId,
+    ...(resolvedWorkspace ? { workspace: resolvedWorkspace } : {}),
+  };
+}
+
+function syncProviderWorkspace(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  workspace: string,
+) {
+  const slice = getProviderSlice(get, providerId);
+  const threadWorkspace = slice.thread?.workspace ?? slice.chatWorkspace;
+  const patch: Partial<ProviderChatSlice> = {
+    chatWorkspace: workspace,
+  };
+  if (
+    slice.thread &&
+    threadWorkspace &&
+    !workspacesMatch(threadWorkspace, workspace)
+  ) {
+    patch.thread = null;
+    patch.messages = [];
+    patch.streaming = false;
+    patch.pendingApproval = null;
+    patch.error = null;
+  }
+  patchProvider(set, providerId, patch);
 }
 
 async function tryReattachProvider(
@@ -1085,7 +1139,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         history = await tauriInvoke<HistoryMessage[]>(
           commands.loadThreadHistory,
           providerId === "opencode"
-            ? { sessionId: threadId }
+            ? opencodeSessionArgs(get, providerId, threadId, workspace)
             : { threadId },
         );
       } catch {
@@ -1122,7 +1176,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (providerId === "opencode" && commands.isSessionBusy) {
         try {
           const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-            sessionId: threadId,
+            ...opencodeSessionArgs(get, providerId, threadId, workspace),
           });
           if (busy) {
             patchProvider(set, providerId, { streaming: true });
@@ -1229,7 +1283,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await tauriInvoke(
         commands.deleteThread,
         providerId === "opencode"
-          ? { sessionId: threadId }
+          ? {
+              ...opencodeSessionArgs(get, providerId, threadId, workspace),
+            }
           : { threadId },
       );
     } catch (e) {
@@ -1341,6 +1397,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           message: trimmed,
           mode: current.mode,
           model: current.model || null,
+          workspace: resolveProviderWorkspace(
+            get,
+            providerId,
+            current.thread.workspace,
+          ),
         });
       } else {
         await tauriInvoke(commands.sendTurn, {
@@ -1402,7 +1463,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         await tauriInvoke(
           commands.cancelTurn,
           providerId === "opencode"
-            ? { sessionId: threadId }
+            ? opencodeSessionArgs(get, providerId, threadId)
             : { threadId },
         );
       }
@@ -1438,7 +1499,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } | null>(
         commands.getPendingApproval,
         providerId === "opencode"
-          ? { sessionId: slice.thread.id }
+          ? opencodeSessionArgs(get, providerId, slice.thread.id)
           : { threadId: slice.thread.id },
       );
       if (pending) {
@@ -1732,7 +1793,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   } | null>(
                     commands.getPendingApproval!,
                     resolvedId === "opencode"
-                      ? { sessionId: slice.thread.id }
+                      ? opencodeSessionArgs(get, resolvedId, slice.thread.id)
                       : { threadId: slice.thread.id },
                   );
                   if (pending) {

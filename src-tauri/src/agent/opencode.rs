@@ -104,6 +104,16 @@ pub fn spawn_runtime(workspace: &str) -> Result<Child, String> {
     Ok(child)
 }
 
+fn with_directory(
+    builder: reqwest::RequestBuilder,
+    workspace: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match workspace.filter(|value| !value.is_empty()) {
+        Some(directory) => builder.query(&[("directory", directory)]),
+        None => builder,
+    }
+}
+
 pub async fn list_agents(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
     let response = client
         .get(format!("{url}/agent"))
@@ -470,8 +480,10 @@ pub async fn create_session(
         "title": "新会话",
     });
 
-    let response = client
-        .post(format!("{url}/session"))
+    let response = with_directory(
+        client.post(format!("{url}/session")),
+        Some(workspace),
+    )
         .json(&body)
         .send()
         .await
@@ -521,6 +533,7 @@ pub async fn send_prompt(
     agent: &str,
     model: Option<&str>,
     message: &str,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
     let mut body = serde_json::json!({
         "agent": agent,
@@ -536,8 +549,10 @@ pub async fn send_prompt(
         }
     }
 
-    let response = client
-        .post(format!("{url}/session/{session_id}/prompt_async"))
+    let response = with_directory(
+        client.post(format!("{url}/session/{session_id}/prompt_async")),
+        workspace,
+    )
         .json(&body)
         .send()
         .await
@@ -630,9 +645,9 @@ pub async fn get_pending_permission(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<Option<crate::agent::history::PendingApproval>, String> {
-    let response = client
-        .get(format!("{url}/permission"))
+    let response = with_directory(client.get(format!("{url}/permission")), workspace)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -798,9 +813,12 @@ pub async fn load_session_history(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<Vec<HistoryMessage>, String> {
-    let response = client
-        .get(format!("{url}/session/{session_id}/message"))
+    let response = with_directory(
+        client.get(format!("{url}/session/{session_id}/message")),
+        workspace,
+    )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -953,16 +971,19 @@ pub async fn is_session_busy(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<bool, String> {
-    if get_pending_permission(client, url, session_id)
+    if get_pending_permission(client, url, session_id, workspace)
         .await?
         .is_some()
     {
         return Ok(true);
     }
 
-    let response = client
-        .get(format!("{url}/session/{session_id}/message"))
+    let response = with_directory(
+        client.get(format!("{url}/session/{session_id}/message")),
+        workspace,
+    )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1004,9 +1025,12 @@ pub async fn abort_session(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
-    let response = client
-        .post(format!("{url}/session/{session_id}/abort"))
+    let response = with_directory(
+        client.post(format!("{url}/session/{session_id}/abort")),
+        workspace,
+    )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1054,9 +1078,12 @@ async fn delete_session_once(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
-    let response = client
-        .delete(format!("{url}/session/{session_id}"))
+    let response = with_directory(
+        client.delete(format!("{url}/session/{session_id}")),
+        workspace,
+    )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1105,23 +1132,25 @@ pub async fn cancel_generation(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
-    abort_session(client, url, session_id).await
+    abort_session(client, url, session_id, workspace).await
 }
 
 pub async fn delete_session(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
     let mut last_error = String::from("删除会话失败");
 
     for attempt in 0..3 {
-        let _ = abort_session(client, url, session_id).await;
+        let _ = abort_session(client, url, session_id, workspace).await;
         let wait_ms = 250 + attempt * 250;
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
 
-        match delete_session_once(client, url, session_id).await {
+        match delete_session_once(client, url, session_id, workspace).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 if delete_error_is_not_found(&err) {

@@ -8,6 +8,12 @@ export function parentPath(path: string) {
   return normalized.slice(0, index);
 }
 
+export function workspacesMatch(left: string, right: string) {
+  const normalize = (value: string) =>
+    value.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
 export function joinPath(parent: string, name: string) {
   const separator = parent.includes("\\") ? "\\" : "/";
   return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
