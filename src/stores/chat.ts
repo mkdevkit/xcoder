@@ -10,6 +10,7 @@ import type {
   RuntimeStatus,
   ThreadInfo,
   ThreadSummary,
+  OpencodeModelOption,
 } from "../types/agent";
 import { mapRuntimeEvent } from "../types/agent";
 import { mapHistoryToChatMessages } from "../utils/chatHistory";
@@ -31,6 +32,11 @@ import {
   isGenericSessionTitle,
   writeLocalActiveSessionId,
 } from "../utils/localChatHistory";
+import {
+  modelsForOpencodeVendor,
+  pickOpencodeDefaults,
+  resolveOpencodeVendor,
+} from "../utils/opencodeModels";
 
 interface ChatState {
   config: AppConfig | null;
@@ -43,6 +49,8 @@ interface ChatState {
   mode: string;
   model: string;
   dynamicModes: string[];
+  opencodeModelCatalog: OpencodeModelOption[];
+  opencodeVendor: string;
   messages: ChatMessage[];
   streaming: boolean;
   pendingApproval: { id: string; description: string } | null;
@@ -59,6 +67,7 @@ interface ChatState {
   deleteThread: (threadId: string, workspace: string) => Promise<void>;
   setMode: (mode: string) => Promise<void>;
   setModel: (model: string) => void;
+  setOpencodeVendor: (vendorId: string) => void;
   sendMessage: (text: string) => Promise<void>;
   approve: (allow: boolean) => Promise<void>;
   refreshPendingApproval: () => Promise<void>;
@@ -124,6 +133,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   mode: "agent",
   model: "",
   dynamicModes: [],
+  opencodeModelCatalog: [],
+  opencodeVendor: "",
   messages: [],
   streaming: false,
   pendingApproval: null,
@@ -163,6 +174,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingApproval: null,
       error: null,
       runtime: { running: false },
+      opencodeModelCatalog: [],
+      opencodeVendor: "",
     });
   },
 
@@ -195,6 +208,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // ignore dynamic agent fetch failures
           }
         }
+
+        if (commands.listProviderModels) {
+          try {
+            const catalog = await tauriInvoke<OpencodeModelOption[]>(
+              commands.listProviderModels,
+            );
+            if (catalog.length > 0) {
+              const { model: currentModel } = get();
+              const defaults = pickOpencodeDefaults(catalog, currentModel);
+              set({
+                opencodeModelCatalog: catalog,
+                opencodeVendor: defaults.vendor,
+                model: defaults.model,
+              });
+            }
+          } catch {
+            // fall back to config.toml ui_options.models
+          }
+        }
+
         await get().loadThreads(workspace);
         return;
       }
@@ -226,6 +259,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       streaming: false,
       pendingApproval: null,
       error: null,
+      opencodeModelCatalog: [],
+      opencodeVendor: "",
     });
   },
 
@@ -418,7 +453,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  setModel: (model) => set({ model }),
+  setModel: (model) =>
+    set((state) => ({
+      model,
+      opencodeVendor:
+        state.providerId === "opencode"
+          ? resolveOpencodeVendor(model, state.opencodeVendor)
+          : state.opencodeVendor,
+    })),
+
+  setOpencodeVendor: (vendorId) => {
+    const { opencodeModelCatalog, model } = get();
+    const vendorModels = modelsForOpencodeVendor(opencodeModelCatalog, vendorId);
+    const nextModel = vendorModels.some((item) => item.value === model)
+      ? model
+      : (vendorModels[0]?.value ?? "");
+    set({ opencodeVendor: vendorId, model: nextModel });
+  },
 
   sendMessage: async (text) => {
     const trimmed = text.trim();

@@ -1,15 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalGate } from "../../components/ApprovalGate";
 import { MessageBubble } from "../../components/MessageBubble";
+import {
+  RichChatComposer,
+  type RichChatComposerHandle,
+} from "../../components/RichChatComposer";
 import { useChatStore } from "../../stores/chat";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
+import { useChatInputDrop } from "../../hooks/useChatInputDrop";
 import { getProviderLabel } from "../../utils/agentProvider";
+import {
+  deriveOpencodeVendors,
+  modelsForOpencodeVendor,
+} from "../../utils/opencodeModels";
 import { isTauri } from "../../utils/tauri";
 
 export function ChatPanel() {
-  const [input, setInput] = useState("");
+  const composerRef = useRef<RichChatComposerHandle>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [hasContent, setHasContent] = useState(false);
   const {
     config,
     providerId,
@@ -34,6 +44,9 @@ export function ChatPanel() {
     deleteThread,
     setMode,
     setModel,
+    setOpencodeVendor,
+    opencodeModelCatalog,
+    opencodeVendor,
     sendMessage,
     approve,
     setupEventListener,
@@ -41,14 +54,52 @@ export function ChatPanel() {
   } = useChatStore();
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
+  const canChat = Boolean(rootPath && runtime.running && thread);
+  const canCompose = Boolean(rootPath && !streaming);
+
+  const handleAttachReferences = useCallback((refs: string[]) => {
+    composerRef.current?.insertReferences(refs);
+  }, []);
+
+  const {
+    dropAreaRef,
+    dragOver,
+    handleDragEnter,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+  } = useChatInputDrop({
+    rootPath,
+    onAttach: handleAttachReferences,
+    disabled: !canCompose,
+    onFocus: () => composerRef.current?.focus(),
+  });
 
   const activeProvider = getActiveProvider();
   const uiOptions = activeProvider?.ui_options;
   const modeOptions =
     dynamicModes.length > 0 ? dynamicModes : (uiOptions?.modes ?? ["agent"]);
-  const modelOptions = uiOptions?.models ?? [];
-  const showModelSelect = modelOptions.length > 0;
+  const isOpencode = providerId === "opencode";
+  const opencodeVendors = deriveOpencodeVendors(opencodeModelCatalog);
+  const opencodeModels = modelsForOpencodeVendor(
+    opencodeModelCatalog,
+    opencodeVendor,
+  );
+  const codewhaleModelOptions = uiOptions?.models ?? [];
+  const showOpencodeVendor =
+    isOpencode && runtime.running && opencodeVendors.length > 0;
+  const showModelSelect = isOpencode
+    ? opencodeModels.length > 0
+    : codewhaleModelOptions.length > 0;
   const providerLabel = getProviderLabel(providerId);
+
+  const composerPlaceholder = !rootPath
+    ? t("chat.openFolderToChat")
+    : !runtime.running
+      ? t("chat.connectFirst")
+      : !thread
+        ? t("chat.selectOrCreateSession")
+        : t("chat.inputPlaceholder");
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -76,20 +127,17 @@ export function ChatPanel() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || streaming || !runtime.running || !thread) return;
+    const message = composerRef.current?.getMessage() ?? "";
+    if (!message || streaming || !runtime.running || !thread) return;
     if (!rootPath) return;
 
-    await sendMessage(input);
-    setInput("");
+    await sendMessage(message);
+    composerRef.current?.clear();
+    setHasContent(false);
   };
 
-  const canChat = Boolean(rootPath && runtime.running && thread);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+  const handleComposerChange = () => {
+    setHasContent(!(composerRef.current?.isEmpty() ?? true));
   };
 
   return (
@@ -124,17 +172,38 @@ export function ChatPanel() {
               </option>
             ))}
           </select>
+          {showOpencodeVendor && (
+            <select
+              className="provider-vendor-select"
+              value={opencodeVendor}
+              onChange={(e) => setOpencodeVendor(e.target.value)}
+              disabled={!initialized || streaming}
+              title="Model provider"
+            >
+              {opencodeVendors.map((vendor) => (
+                <option key={vendor.id} value={vendor.id}>
+                  {vendor.name}
+                </option>
+              ))}
+            </select>
+          )}
           {showModelSelect && (
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              disabled={!initialized}
+              disabled={!initialized || streaming}
             >
-              {modelOptions.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
+              {isOpencode
+                ? opencodeModels.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.modelName}
+                    </option>
+                  ))
+                : codewhaleModelOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
             </select>
           )}
           <button
@@ -226,26 +295,28 @@ export function ChatPanel() {
         <div ref={bottomRef} />
       </div>
 
-      <div className="chat-input-area">
-        <textarea
-          rows={4}
-          placeholder={
-            !rootPath
-              ? t("chat.openFolderToChat")
-              : !runtime.running
-                ? t("chat.connectFirst")
-                : !thread
-                  ? t("chat.selectOrCreateSession")
-                  : t("chat.inputPlaceholder")
-          }
-          value={input}
-          disabled={!canChat || streaming}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
+      <div
+        ref={dropAreaRef}
+        className={`chat-input-area ${dragOver ? "drag-over" : ""}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <RichChatComposer
+          ref={composerRef}
+          placeholder={composerPlaceholder}
+          editable={canCompose}
+          onContentChange={handleComposerChange}
+          onEnter={handleSend}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
         />
         <button
           className="primary send-btn"
-          disabled={!canChat || streaming || !input.trim()}
+          disabled={!canChat || streaming || !hasContent}
           onClick={handleSend}
         >
           {streaming ? t("chat.sending") : t("chat.send")}
@@ -270,6 +341,9 @@ export function ChatPanel() {
           gap: 8px;
         }
         .provider-select {
+          min-width: 120px;
+        }
+        .provider-vendor-select {
           min-width: 120px;
         }
         .chat-controls {
@@ -315,10 +389,16 @@ export function ChatPanel() {
           display: flex;
           flex-direction: column;
           gap: 8px;
+          border-radius: 0;
+          transition: background 0.15s, box-shadow 0.15s;
         }
-        .chat-input-area textarea {
-          width: 100%;
-          padding: 10px;
+        .chat-input-area.drag-over {
+          background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
+          box-shadow: inset 0 0 0 1px var(--accent);
+        }
+        .chat-input-area.drag-over .rich-chat-composer {
+          border-color: var(--accent);
+          cursor: copy;
         }
         .send-btn {
           align-self: flex-end;

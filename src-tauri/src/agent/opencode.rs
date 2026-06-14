@@ -1,6 +1,7 @@
 use crate::agent::history::{HistoryMessage, ThreadSummary};
 use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::{Child, Output, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -123,6 +124,216 @@ pub async fn list_agents(client: &reqwest::Client, url: &str) -> Result<Vec<Stri
         .unwrap_or_default();
 
     Ok(agents)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeModelOption {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub model_name: String,
+    pub value: String,
+}
+
+fn provider_id_from(value: &Value) -> Option<String> {
+    value
+        .get("id")
+        .or_else(|| value.get("providerID"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn provider_name_from(value: &Value, provider_id: &str) -> String {
+    value
+        .get("name")
+        .or_else(|| value.get("title"))
+        .or_else(|| value.get("label"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| provider_id.to_string())
+}
+
+fn model_name_from(model_id: &str, model_value: Option<&Value>) -> String {
+    model_value
+        .and_then(|value| {
+            value
+                .get("name")
+                .or_else(|| value.get("title"))
+                .or_else(|| value.get("label"))
+                .and_then(|v| v.as_str())
+        })
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| model_id.to_string())
+}
+
+fn push_model_option(
+    options: &mut Vec<OpencodeModelOption>,
+    seen: &mut std::collections::BTreeSet<String>,
+    provider_id: &str,
+    provider_name: &str,
+    model_id: &str,
+    model_name: &str,
+) {
+    let value = format!("{provider_id}/{model_id}");
+    if !seen.insert(value.clone()) {
+        return;
+    }
+    options.push(OpencodeModelOption {
+        provider_id: provider_id.to_string(),
+        provider_name: provider_name.to_string(),
+        model_id: model_id.to_string(),
+        model_name: model_name.to_string(),
+        value,
+    });
+}
+
+fn collect_models_from_provider(
+    options: &mut Vec<OpencodeModelOption>,
+    seen: &mut std::collections::BTreeSet<String>,
+    provider: &Value,
+) {
+    let Some(provider_id) = provider_id_from(provider) else {
+        return;
+    };
+    let provider_name = provider_name_from(provider, &provider_id);
+
+    let Some(models) = provider.get("models") else {
+        return;
+    };
+
+    match models {
+        Value::Object(map) => {
+            for (model_id, model_value) in map {
+                if model_id.is_empty() {
+                    continue;
+                }
+                let model_name = model_name_from(model_id, Some(model_value));
+                push_model_option(
+                    options,
+                    seen,
+                    &provider_id,
+                    &provider_name,
+                    model_id,
+                    &model_name,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                let model_id = item
+                    .get("id")
+                    .or_else(|| item.get("modelID"))
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if model_id.is_empty() {
+                    continue;
+                }
+                let model_name = model_name_from(model_id, Some(item));
+                push_model_option(
+                    options,
+                    seen,
+                    &provider_id,
+                    &provider_name,
+                    model_id,
+                    &model_name,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn providers_array<'a>(payload: &'a Value) -> Option<&'a Vec<Value>> {
+    if let Some(items) = payload.as_array() {
+        return Some(items);
+    }
+
+    payload
+        .get("providers")
+        .or_else(|| payload.get("all"))
+        .and_then(|value| value.as_array())
+}
+
+fn connected_provider_ids(payload: &Value) -> Option<std::collections::BTreeSet<String>> {
+    let connected: std::collections::BTreeSet<String> = payload
+        .get("connected")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if connected.is_empty() {
+        None
+    } else {
+        Some(connected)
+    }
+}
+
+fn parse_provider_models(payload: &Value) -> Vec<OpencodeModelOption> {
+    let mut options = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let connected = connected_provider_ids(payload);
+
+    let Some(providers) = providers_array(payload) else {
+        return options;
+    };
+
+    for provider in providers {
+        if let Some(connected) = &connected {
+            let Some(provider_id) = provider_id_from(provider) else {
+                continue;
+            };
+            if !connected.contains(&provider_id) {
+                continue;
+            }
+        }
+        collect_models_from_provider(&mut options, &mut seen, provider);
+    }
+
+    options.sort_by(|a, b| {
+        a.provider_name
+            .cmp(&b.provider_name)
+            .then(a.model_name.cmp(&b.model_name))
+    });
+    options
+}
+
+async fn fetch_provider_models_from(
+    client: &reqwest::Client,
+    url: &str,
+    path: &str,
+) -> Result<Vec<OpencodeModelOption>, String> {
+    let response = client
+        .get(format!("{url}{path}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("List provider models failed ({path}): {text}"));
+    }
+
+    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(parse_provider_models(&json))
+}
+
+pub async fn list_provider_models(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<OpencodeModelOption>, String> {
+    match fetch_provider_models_from(client, url, "/config/providers").await {
+        Ok(options) if !options.is_empty() => Ok(options),
+        Ok(_) | Err(_) => fetch_provider_models_from(client, url, "/provider").await,
+    }
 }
 
 pub async fn create_session(

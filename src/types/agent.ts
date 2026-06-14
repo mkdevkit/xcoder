@@ -47,6 +47,14 @@ export interface RuntimeStatus {
   base_url?: string;
 }
 
+export interface OpencodeModelOption {
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+  value: string;
+}
+
 export interface UiOptions {
   modes: string[];
   default_mode: string;

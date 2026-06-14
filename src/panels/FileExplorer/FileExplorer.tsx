@@ -3,6 +3,7 @@ import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import type { ExplorerEditState } from "../../stores/workspace";
 import type { FsEntry } from "../../types/fs";
+import { startFileDrag } from "../../utils/chatFileReference";
 
 interface InlineNameInputProps {
   initialName: string;
@@ -55,6 +56,7 @@ interface TreeNodeProps {
   entry: FsEntry;
   depth: number;
   refreshKey: number;
+  rootPath: string;
   selectedPath: string | null;
   explorerEdit: ExplorerEditState | null;
   onSelect: (path: string, isDir: boolean) => void;
@@ -67,6 +69,7 @@ function TreeNode({
   entry,
   depth,
   refreshKey,
+  rootPath,
   selectedPath,
   explorerEdit,
   onSelect,
@@ -125,13 +128,22 @@ function TreeNode({
 
   return (
     <div>
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         className={`tree-item ${isSelected ? "selected" : ""}`}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
         data-path={entry.path}
         data-is-dir={entry.is_dir ? "1" : "0"}
+        draggable={!isRenaming}
+        onDragStart={(event) => startFileDrag(event, entry.path, rootPath)}
         onClick={handleClick}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            void handleClick(event as unknown as React.MouseEvent);
+          }
+        }}
         onFocus={() => onSelect(entry.path, entry.is_dir)}
       >
         <span className="tree-icon">
@@ -147,7 +159,7 @@ function TreeNode({
           <span className="tree-name">{entry.name}</span>
         )}
         {loading && <span className="tree-loading">…</span>}
-      </button>
+      </div>
       {expanded && (
         <>
           {children.map((child) => (
@@ -156,6 +168,7 @@ function TreeNode({
               entry={child}
               depth={depth + 1}
               refreshKey={refreshKey}
+              rootPath={rootPath}
               selectedPath={selectedPath}
               explorerEdit={explorerEdit}
               onSelect={onSelect}
@@ -216,7 +229,7 @@ export function FileExplorer() {
       if (!rootPath || !explorerSelectedPath || explorerEdit) return;
       if (
         (e.target as HTMLElement).closest(
-          "input, textarea, .monaco-editor, .chat-input-area",
+          "input, textarea, .monaco-editor, .rich-chat-composer, .chat-input-area",
         )
       ) {
         return;
@@ -287,6 +300,7 @@ export function FileExplorer() {
           entry={entry}
           depth={0}
           refreshKey={explorerRefreshKey}
+          rootPath={rootPath}
           selectedPath={explorerSelectedPath}
           explorerEdit={explorerEdit}
           onSelect={setExplorerSelectedPath}
@@ -351,9 +365,15 @@ const explorerStyles = `
     border-radius: 0;
     color: inherit;
     font: inherit;
+    cursor: grab;
+    user-select: none;
   }
-  button.tree-item {
-    cursor: pointer;
+  .tree-item:active {
+    cursor: grabbing;
+  }
+  .tree-item:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
   }
   .tree-item:hover,
   .tree-item.selected {

@@ -4,6 +4,7 @@ import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
 import { isPreferencesTab } from "../../utils/virtualTabs";
+import { startFileDrag } from "../../utils/chatFileReference";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
 
@@ -19,6 +20,7 @@ export function EditorPanel() {
     saveActiveFile,
     consumeEditorReveal,
     getActiveTab,
+    rootPath,
   } = useWorkspaceStore();
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -83,11 +85,18 @@ export function EditorPanel() {
       <div className="editor-tabs">
         {openTabs.map((tab) => {
           const isActive = tab.path === activeFile;
+          const isFileTab = !isPreferencesTab(tab.path);
           return (
             <div
               key={tab.path}
               className={`editor-tab ${isActive ? "active" : ""}`}
               data-path={tab.path}
+              draggable={isFileTab}
+              onDragStart={
+                isFileTab
+                  ? (event) => startFileDrag(event, tab.path, rootPath)
+                  : undefined
+              }
               onClick={() => setActiveFile(tab.path)}
             >
               <span className="editor-tab-name">
@@ -155,8 +164,11 @@ export function EditorPanel() {
           padding: 0 4px 0 12px;
           border-right: 1px solid var(--border);
           background: transparent;
-          cursor: pointer;
+          cursor: grab;
           flex-shrink: 0;
+        }
+        .editor-tab:active {
+          cursor: grabbing;
         }
         .editor-tab.active {
           background: var(--bg-editor);

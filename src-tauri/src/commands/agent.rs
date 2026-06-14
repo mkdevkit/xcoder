@@ -7,7 +7,7 @@ use crate::agent::codewhale::{
 use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
 use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, check_installed, create_session,
-    delete_session, get_pending_permission, list_agents, list_sessions, load_session_history,
+    delete_session, get_pending_permission, list_agents, list_provider_models, list_sessions, load_session_history,
     normalize_event as opencode_normalize_event, send_prompt, update_session_title,
     spawn_runtime as spawn_opencode_runtime,
     wait_for_health as wait_for_opencode_health, OpencodeState,
@@ -386,6 +386,22 @@ pub async fn opencode_list_agents(
 
     let client = reqwest::Client::new();
     list_agents(&client, &url).await
+}
+
+#[tauri::command]
+pub async fn opencode_list_provider_models(
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<Vec<crate::agent::opencode::OpencodeModelOption>, String> {
+    let url = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        guard
+            .base_url
+            .clone()
+            .ok_or_else(|| "OpenCode server is not running".to_string())?
+    };
+
+    let client = reqwest::Client::new();
+    list_provider_models(&client, &url).await
 }
 
 #[tauri::command]

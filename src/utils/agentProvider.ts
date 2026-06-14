@@ -18,6 +18,7 @@ export interface AgentCommands {
   deleteThread: string;
   updateThreadTitle?: string;
   listAgents?: string;
+  listProviderModels?: string;
 }
 
 export function getAgentCommands(providerId: string): AgentCommands {
@@ -54,6 +55,8 @@ export function getAgentCommands(providerId: string): AgentCommands {
         : undefined,
     listAgents:
       providerId === "opencode" ? "opencode_list_agents" : undefined,
+    listProviderModels:
+      providerId === "opencode" ? "opencode_list_provider_models" : undefined,
   };
 }
 

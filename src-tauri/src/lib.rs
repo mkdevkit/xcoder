@@ -49,6 +49,7 @@ pub fn run() {
             commands::agent::opencode_stop_runtime,
             commands::agent::opencode_runtime_status,
             commands::agent::opencode_list_agents,
+            commands::agent::opencode_list_provider_models,
             commands::agent::opencode_create_thread,
             commands::agent::opencode_update_session_title,
             commands::agent::opencode_send_turn,
