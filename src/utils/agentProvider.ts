@@ -6,6 +6,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
 export interface AgentCommands {
   doctor: string;
   startRuntime: string;
+  restartRuntime: string;
   stopRuntime: string;
   createThread: string;
   sendTurn: string;
@@ -25,6 +26,7 @@ export function getAgentCommands(providerId: string): AgentCommands {
   return {
     doctor: `${providerId}_doctor`,
     startRuntime: `${providerId}_start_runtime`,
+    restartRuntime: `${providerId}_restart_runtime`,
     stopRuntime: `${providerId}_stop_runtime`,
     createThread: `${providerId}_create_thread`,
     sendTurn: `${providerId}_send_turn`,
@@ -56,7 +58,11 @@ export function getAgentCommands(providerId: string): AgentCommands {
     listAgents:
       providerId === "opencode" ? "opencode_list_agents" : undefined,
     listProviderModels:
-      providerId === "opencode" ? "opencode_list_provider_models" : undefined,
+      providerId === "opencode"
+        ? "opencode_list_provider_models"
+        : providerId === "codewhale"
+          ? "codewhale_list_models"
+          : undefined,
   };
 }
 

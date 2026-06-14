@@ -3,6 +3,9 @@ use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
 use std::process::{Child, Output, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -41,6 +44,15 @@ pub fn check_installed() -> Result<Value, String> {
         "installed": true,
         "command": program.display().to_string(),
     }))
+}
+
+pub async fn is_healthy(client: &reqwest::Client, url: &str) -> bool {
+    client
+        .get(format!("{url}/global/health"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 pub async fn wait_for_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
@@ -134,6 +146,13 @@ pub struct OpencodeModelOption {
     pub model_id: String,
     pub model_name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeProviderCatalog {
+    pub models: Vec<OpencodeModelOption>,
+    pub connected_provider_ids: Vec<String>,
 }
 
 fn provider_id_from(value: &Value) -> Option<String> {
@@ -277,10 +296,26 @@ fn connected_provider_ids(payload: &Value) -> Option<std::collections::BTreeSet<
     }
 }
 
-fn parse_provider_models(payload: &Value) -> Vec<OpencodeModelOption> {
+fn merge_model_options(
+    target: &mut Vec<OpencodeModelOption>,
+    seen: &mut BTreeSet<String>,
+    incoming: Vec<OpencodeModelOption>,
+) {
+    for option in incoming {
+        if seen.insert(option.value.clone()) {
+            target.push(option);
+        }
+    }
+}
+
+fn parse_provider_models(payload: &Value, filter_connected: bool) -> Vec<OpencodeModelOption> {
     let mut options = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let connected = connected_provider_ids(payload);
+    let mut seen = BTreeSet::new();
+    let connected = if filter_connected {
+        connected_provider_ids(payload)
+    } else {
+        None
+    };
 
     let Some(providers) = providers_array(payload) else {
         return options;
@@ -298,19 +333,64 @@ fn parse_provider_models(payload: &Value) -> Vec<OpencodeModelOption> {
         collect_models_from_provider(&mut options, &mut seen, provider);
     }
 
+    options
+}
+
+fn parse_config_provider_map(payload: &Value) -> Vec<OpencodeModelOption> {
+    let mut options = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let Some(provider_map) = payload.get("provider").and_then(|value| value.as_object()) else {
+        return options;
+    };
+
+    for (provider_id, provider_value) in provider_map {
+        if provider_id.is_empty() {
+            continue;
+        }
+        let mut provider = provider_value.clone();
+        if provider.get("id").is_none() {
+            provider["id"] = Value::String(provider_id.clone());
+        }
+        collect_models_from_provider(&mut options, &mut seen, &provider);
+    }
+
+    options
+}
+
+fn local_opencode_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("opencode").join("opencode.json"))
+}
+
+fn parse_local_opencode_providers() -> Vec<OpencodeModelOption> {
+    let Some(path) = local_opencode_config_path() else {
+        return Vec::new();
+    };
+    if !path.is_file() {
+        return Vec::new();
+    }
+
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+    let json: Value = match serde_json::from_str(&content) {
+        Ok(json) => json,
+        Err(_) => return Vec::new(),
+    };
+
+    parse_config_provider_map(&json)
+}
+
+fn sort_model_options(options: &mut [OpencodeModelOption]) {
     options.sort_by(|a, b| {
         a.provider_name
             .cmp(&b.provider_name)
             .then(a.model_name.cmp(&b.model_name))
     });
-    options
 }
 
-async fn fetch_provider_models_from(
-    client: &reqwest::Client,
-    url: &str,
-    path: &str,
-) -> Result<Vec<OpencodeModelOption>, String> {
+async fn fetch_json(client: &reqwest::Client, url: &str, path: &str) -> Result<Value, String> {
     let response = client
         .get(format!("{url}{path}"))
         .send()
@@ -319,21 +399,62 @@ async fn fetch_provider_models_from(
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("List provider models failed ({path}): {text}"));
+        return Err(format!("Request failed ({path}): {text}"));
     }
 
-    let json: Value = response.json().await.map_err(|e| e.to_string())?;
-    Ok(parse_provider_models(&json))
+    response.json().await.map_err(|e| e.to_string())
 }
 
 pub async fn list_provider_models(
     client: &reqwest::Client,
     url: &str,
-) -> Result<Vec<OpencodeModelOption>, String> {
-    match fetch_provider_models_from(client, url, "/config/providers").await {
-        Ok(options) if !options.is_empty() => Ok(options),
-        Ok(_) | Err(_) => fetch_provider_models_from(client, url, "/provider").await,
+) -> Result<OpencodeProviderCatalog, String> {
+    let mut options = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut connected_ids: Vec<String> = Vec::new();
+
+    if let Ok(json) = fetch_json(client, url, "/config/providers").await {
+        merge_model_options(
+            &mut options,
+            &mut seen,
+            parse_provider_models(&json, false),
+        );
     }
+
+    if let Ok(json) = fetch_json(client, url, "/config").await {
+        merge_model_options(
+            &mut options,
+            &mut seen,
+            parse_config_provider_map(&json),
+        );
+    }
+
+    merge_model_options(
+        &mut options,
+        &mut seen,
+        parse_local_opencode_providers(),
+    );
+
+    if let Ok(json) = fetch_json(client, url, "/provider").await {
+        if let Some(connected) = connected_provider_ids(&json) {
+            connected_ids = connected.into_iter().collect();
+        }
+        merge_model_options(
+            &mut options,
+            &mut seen,
+            parse_provider_models(&json, true),
+        );
+    }
+
+    if options.is_empty() {
+        return Err("No provider models found".to_string());
+    }
+
+    sort_model_options(&mut options);
+    Ok(OpencodeProviderCatalog {
+        models: options,
+        connected_provider_ids: connected_ids,
+    })
 }
 
 pub async fn create_session(

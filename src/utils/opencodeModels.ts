@@ -6,14 +6,33 @@ export interface OpencodeModelOption {
   value: string;
 }
 
-export function deriveOpencodeVendors(catalog: OpencodeModelOption[]) {
-  const vendors = new Map<string, string>();
+export interface OpencodeVendorOption {
+  id: string;
+  name: string;
+  connected: boolean;
+}
+
+export function deriveOpencodeVendors(
+  catalog: OpencodeModelOption[],
+  connectedProviderIds: string[] = [],
+) {
+  const connected = new Set(connectedProviderIds);
+  const vendors = new Map<string, OpencodeVendorOption>();
   for (const item of catalog) {
     if (!vendors.has(item.providerId)) {
-      vendors.set(item.providerId, item.providerName);
+      vendors.set(item.providerId, {
+        id: item.providerId,
+        name: item.providerName,
+        connected: connected.has(item.providerId),
+      });
     }
   }
-  return Array.from(vendors, ([id, name]) => ({ id, name }));
+  return Array.from(vendors.values());
+}
+
+export function formatOpencodeVendorLabel(vendor: OpencodeVendorOption) {
+  const mark = vendor.connected ? "✓" : "✗";
+  return `${vendor.name}  ${mark}`;
 }
 
 export function modelsForOpencodeVendor(

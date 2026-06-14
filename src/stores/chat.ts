@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
 import { getAgentCommands } from "../utils/agentProvider";
@@ -10,12 +11,14 @@ import type {
   RuntimeStatus,
   ThreadInfo,
   ThreadSummary,
-  OpencodeModelOption,
+  OpencodeProviderCatalog,
+  CodewhaleModelOption,
 } from "../types/agent";
 import { mapRuntimeEvent } from "../types/agent";
 import { mapHistoryToChatMessages } from "../utils/chatHistory";
 import { translate } from "../i18n/locales";
 import { useSettingsStore } from "./settings";
+import { useWorkspaceStore } from "./workspace";
 import { formatToolContent } from "../utils/toolMessage";
 import {
   clearSavedThreadId,
@@ -37,31 +40,29 @@ import {
   pickOpencodeDefaults,
   resolveOpencodeVendor,
 } from "../utils/opencodeModels";
+import {
+  CODEWHALE_MODES,
+  pickCodewhaleDefaults,
+} from "../utils/codewhaleModels";
+import {
+  createProviderChatSlice,
+  ensureProviderSlice,
+  type ProviderChatSlice,
+} from "./providerChatSlice";
 
 interface ChatState {
   config: AppConfig | null;
   providerId: string;
-  runtime: RuntimeStatus;
-  thread: ThreadInfo | null;
-  chatWorkspace: string | null;
-  threads: ThreadSummary[];
-  threadsLoading: boolean;
-  mode: string;
-  model: string;
-  dynamicModes: string[];
-  opencodeModelCatalog: OpencodeModelOption[];
-  opencodeVendor: string;
-  messages: ChatMessage[];
-  streaming: boolean;
-  pendingApproval: { id: string; description: string } | null;
-  error: string | null;
+  providerStates: Record<string, ProviderChatSlice>;
   initialized: boolean;
 
   loadConfig: () => Promise<void>;
-  setProvider: (providerId: string) => Promise<void>;
+  setProvider: (providerId: string) => void;
+  onProjectOpened: (workspace: string) => Promise<void>;
   connectRuntime: (workspace?: string) => Promise<void>;
   disconnectRuntime: () => Promise<void>;
-  loadThreads: (workspace: string) => Promise<void>;
+  restartRuntime: (workspace?: string) => Promise<void>;
+  loadThreads: (workspace: string, providerId?: string) => Promise<void>;
   selectThread: (threadId: string, workspace: string) => Promise<void>;
   createNewThread: (workspace: string) => Promise<void>;
   deleteThread: (threadId: string, workspace: string) => Promise<void>;
@@ -73,23 +74,39 @@ interface ChatState {
   refreshPendingApproval: () => Promise<void>;
   setupEventListener: () => Promise<() => void>;
   getActiveProvider: () => ProviderConfig | null;
+  getActiveSlice: () => ProviderChatSlice;
 }
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function applyProviderDefaults(
-  provider: ProviderConfig | undefined,
-  providerId: string,
-) {
-  const ui = provider?.ui_options;
+function parseAgentEnvelope(raw: Record<string, unknown>) {
+  const providerId =
+    typeof raw.providerId === "string" ? raw.providerId : "";
+  const eventPayload =
+    raw.event && typeof raw.event === "object"
+      ? (raw.event as Record<string, unknown>)
+      : raw;
   return {
     providerId,
-    mode: ui?.default_mode ?? "agent",
-    model: ui?.default_model ?? "",
-    dynamicModes: ui?.modes ?? [],
+    mapped: mapRuntimeEvent(eventPayload),
   };
+}
+
+function parseAgentError(payload: unknown) {
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    return {
+      providerId:
+        typeof record.providerId === "string" ? record.providerId : "",
+      message:
+        typeof record.message === "string"
+          ? record.message
+          : String(payload),
+    };
+  }
+  return { providerId: "", message: String(payload) };
 }
 
 async function rememberActiveSession(
@@ -106,39 +123,236 @@ async function clearRememberedSession(providerId: string, workspace: string) {
   await writeLocalActiveSessionId(workspace, providerId, null);
 }
 
-async function saveCurrentChatLocally(get: () => ChatState, workspace?: string) {
-  const { thread, messages, mode, model, providerId, chatWorkspace } = get();
-  const resolvedWorkspace = workspace ?? thread?.workspace ?? chatWorkspace;
-  if (!thread || !resolvedWorkspace) return;
+function patchProvider(
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  patch: Partial<ProviderChatSlice>,
+) {
+  set((state) => ({
+    providerStates: {
+      ...state.providerStates,
+      [providerId]: {
+        ...(state.providerStates[providerId] ??
+          createProviderChatSlice(providerId)),
+        ...patch,
+      },
+    },
+  }));
+}
+
+function getProviderSlice(
+  get: () => ChatState,
+  providerId?: string,
+): ProviderChatSlice {
+  const id = providerId ?? get().providerId;
+  return get().providerStates[id] ?? createProviderChatSlice(id);
+}
+
+async function saveProviderChatLocally(
+  get: () => ChatState,
+  providerId: string,
+  workspace?: string,
+) {
+  const slice = getProviderSlice(get, providerId);
+  const resolvedWorkspace =
+    workspace ?? slice.thread?.workspace ?? slice.chatWorkspace;
+  if (!slice.thread || !resolvedWorkspace) return;
 
   await persistLocalChatSession({
     workspace: resolvedWorkspace,
     providerId,
-    sessionId: thread.id,
-    title: sessionTitleFromMessages(messages, thread.id),
-    mode,
-    model,
-    messages,
+    sessionId: slice.thread.id,
+    title: sessionTitleFromMessages(slice.messages, slice.thread.id),
+    mode: slice.mode,
+    model: slice.model,
+    messages: slice.messages,
   });
+}
+
+async function hydrateProviderAfterConnect(
+  providerId: string,
+  workspace: string | undefined,
+  runtime: RuntimeStatus,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  get: () => ChatState,
+) {
+  const commands = getAgentCommands(providerId);
+  const slice = getProviderSlice(get, providerId);
+  const patch: Partial<ProviderChatSlice> = {
+    runtime,
+    connectedIntent: true,
+    error: null,
+    ...(workspace ? { chatWorkspace: workspace } : {}),
+  };
+
+  if (providerId === "opencode") {
+    if (commands.listAgents) {
+      try {
+        const agents = await tauriInvoke<string[]>(commands.listAgents);
+        if (agents.length > 0) {
+          patch.dynamicModes = agents;
+          patch.mode = agents.includes(slice.mode) ? slice.mode : agents[0];
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (commands.listProviderModels) {
+      try {
+        const catalog = await tauriInvoke<OpencodeProviderCatalog>(
+          commands.listProviderModels,
+        );
+        if (catalog.models.length > 0) {
+          const defaults = pickOpencodeDefaults(catalog.models, slice.model);
+          patch.opencodeModelCatalog = catalog.models;
+          patch.opencodeConnectedProviders = catalog.connectedProviderIds;
+          if (slice.model) {
+            patch.opencodeVendor = resolveOpencodeVendor(
+              slice.model,
+              slice.opencodeVendor || defaults.vendor,
+            );
+          } else {
+            patch.opencodeVendor = defaults.vendor;
+            patch.model = defaults.model;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  } else if (providerId === "codewhale") {
+    patch.dynamicModes = [...CODEWHALE_MODES];
+    patch.mode = CODEWHALE_MODES.includes(
+      slice.mode as (typeof CODEWHALE_MODES)[number],
+    )
+      ? slice.mode
+      : "agent";
+    if (commands.listProviderModels) {
+      try {
+        const [catalog, doctor] = await Promise.all([
+          tauriInvoke<CodewhaleModelOption[]>(commands.listProviderModels),
+          tauriInvoke<{ default_text_model?: string }>(commands.doctor),
+        ]);
+        if (catalog.length > 0) {
+          const preferred = slice.model || doctor.default_text_model || "";
+          const defaults = pickCodewhaleDefaults(catalog, preferred);
+          patch.codewhaleModelCatalog = catalog;
+          if (!slice.model) patch.model = defaults.model;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  patchProvider(set, providerId, patch);
+
+  if (workspace) {
+    await useChatStore.getState().loadThreads(workspace, providerId);
+  }
+}
+
+async function startProviderRuntime(
+  providerId: string,
+  workspace: string | undefined,
+  spawnIfMissing: boolean,
+) {
+  const commands = getAgentCommands(providerId);
+  if (spawnIfMissing) {
+    await tauriInvoke(commands.doctor);
+  }
+  if (providerId === "opencode") {
+    if (!workspace) {
+      throw new Error("请先打开工程目录");
+    }
+    return tauriInvoke<RuntimeStatus>(commands.startRuntime, {
+      workspace,
+      spawnIfMissing,
+    });
+  }
+  return tauriInvoke<RuntimeStatus>(commands.startRuntime, {
+    spawnIfMissing,
+  });
+}
+
+function resolveProviderWorkspace(
+  get: () => ChatState,
+  providerId: string,
+  workspace?: string,
+) {
+  if (workspace) return workspace;
+  const slice = getProviderSlice(get, providerId);
+  return slice.chatWorkspace ?? slice.thread?.workspace ?? undefined;
+}
+
+async function tryReattachProvider(
+  providerId: string,
+  workspace: string | undefined,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  get: () => ChatState,
+) {
+  const slice = getProviderSlice(get, providerId);
+  if (!slice.connectedIntent || slice.runtime.running) return;
+
+  const resolvedWorkspace = resolveProviderWorkspace(get, providerId, workspace);
+  if (providerId === "opencode" && !resolvedWorkspace) return;
+
+  try {
+    const runtime = await startProviderRuntime(
+      providerId,
+      resolvedWorkspace,
+      false,
+    );
+    if (!runtime.running) return;
+    await hydrateProviderAfterConnect(
+      providerId,
+      resolvedWorkspace,
+      runtime,
+      set,
+      get,
+    );
+  } catch {
+    // service not available yet
+  }
+}
+
+async function reattachLinkedProviders(
+  workspace: string | undefined,
+  skipProviderId: string | undefined,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  get: () => ChatState,
+) {
+  const { config } = get();
+  if (!config) return;
+  for (const provider of config.providers) {
+    if (provider.id === skipProviderId) continue;
+    await tryReattachProvider(provider.id, workspace, set, get);
+  }
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   providerId: "codewhale",
-  runtime: { running: false },
-  thread: null,
-  chatWorkspace: null,
-  threads: [],
-  threadsLoading: false,
-  mode: "agent",
-  model: "",
-  dynamicModes: [],
-  opencodeModelCatalog: [],
-  opencodeVendor: "",
-  messages: [],
-  streaming: false,
-  pendingApproval: null,
-  error: null,
+  providerStates: {
+    codewhale: createProviderChatSlice("codewhale"),
+    opencode: createProviderChatSlice("opencode"),
+  },
   initialized: false,
 
   getActiveProvider: () => {
@@ -146,102 +360,81 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return config?.providers.find((p) => p.id === providerId) ?? null;
   },
 
+  getActiveSlice: () => getProviderSlice(get),
+
   loadConfig: async () => {
     const config = await tauriInvoke<AppConfig>("load_config");
     const providerId = config.app.default_provider || "codewhale";
-    const provider = config.providers.find((p) => p.id === providerId);
+    let providerStates = get().providerStates;
+    for (const provider of config.providers) {
+      providerStates = ensureProviderSlice(providerStates, provider.id);
+    }
     set({
       config,
       initialized: true,
-      ...applyProviderDefaults(provider, providerId),
+      providerId,
+      providerStates,
     });
   },
 
-  setProvider: async (providerId) => {
-    const { runtime, disconnectRuntime, config } = get();
-    if (runtime.running) {
-      await disconnectRuntime();
-    }
+  setProvider: (providerId) => {
+    set((state) => ({
+      providerId,
+      providerStates: ensureProviderSlice(state.providerStates, providerId),
+    }));
+    const workspace =
+      get().providerStates[providerId]?.chatWorkspace ??
+      get().providerStates[providerId]?.thread?.workspace ??
+      useWorkspaceStore.getState().rootPath ??
+      undefined;
+    void tryReattachProvider(providerId, workspace, set, get);
+  },
 
-    const provider = config?.providers.find((p) => p.id === providerId);
-    set({
-      ...applyProviderDefaults(provider, providerId),
-      thread: null,
-      threads: [],
-      chatWorkspace: null,
-      messages: [],
-      streaming: false,
-      pendingApproval: null,
-      error: null,
-      runtime: { running: false },
-      opencodeModelCatalog: [],
-      opencodeVendor: "",
-    });
+  onProjectOpened: async (workspace) => {
+    const { config } = get();
+    if (!config) return;
+    for (const provider of config.providers) {
+      try {
+        const runtime = await startProviderRuntime(
+          provider.id,
+          workspace,
+          false,
+        );
+        if (!runtime.running) continue;
+        await hydrateProviderAfterConnect(
+          provider.id,
+          workspace,
+          runtime,
+          set,
+          get,
+        );
+      } catch {
+        // service not running
+      }
+    }
   },
 
   connectRuntime: async (workspace) => {
     const { providerId } = get();
-    const commands = getAgentCommands(providerId);
-    set({ error: null });
+    set((state) => ({
+      providerStates: ensureProviderSlice(state.providerStates, providerId),
+    }));
+    patchProvider(set, providerId, { error: null });
 
     try {
-      await tauriInvoke(commands.doctor);
-      if (providerId === "opencode") {
-        if (!workspace) {
-          throw new Error("请先打开工程目录");
-        }
-        const runtime = await tauriInvoke<RuntimeStatus>(commands.startRuntime, {
-          workspace,
-        });
-        set({ runtime, chatWorkspace: workspace });
-
-        if (commands.listAgents) {
-          try {
-            const agents = await tauriInvoke<string[]>(commands.listAgents);
-            if (agents.length > 0) {
-              set((state) => ({
-                dynamicModes: agents,
-                mode: agents.includes(state.mode) ? state.mode : agents[0],
-              }));
-            }
-          } catch {
-            // ignore dynamic agent fetch failures
-          }
-        }
-
-        if (commands.listProviderModels) {
-          try {
-            const catalog = await tauriInvoke<OpencodeModelOption[]>(
-              commands.listProviderModels,
-            );
-            if (catalog.length > 0) {
-              const { model: currentModel } = get();
-              const defaults = pickOpencodeDefaults(catalog, currentModel);
-              set({
-                opencodeModelCatalog: catalog,
-                opencodeVendor: defaults.vendor,
-                model: defaults.model,
-              });
-            }
-          } catch {
-            // fall back to config.toml ui_options.models
-          }
-        }
-
-        await get().loadThreads(workspace);
-        return;
+      const runtime = await startProviderRuntime(providerId, workspace, true);
+      if (!runtime.running) {
+        throw new Error("AI 服务未能启动");
       }
-
-      const runtime = await tauriInvoke<RuntimeStatus>(commands.startRuntime);
-      set({
+      await hydrateProviderAfterConnect(
+        providerId,
+        workspace,
         runtime,
-        ...(workspace ? { chatWorkspace: workspace } : {}),
-      });
-      if (workspace) {
-        await get().loadThreads(workspace);
-      }
+        set,
+        get,
+      );
     } catch (e) {
-      set({ error: String(e) });
+      patchProvider(set, providerId, { error: String(e) });
       throw e;
     }
   },
@@ -250,53 +443,109 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { providerId } = get();
     const commands = getAgentCommands(providerId);
     await tauriInvoke(commands.stopRuntime);
-    set({
-      runtime: { running: false },
-      thread: null,
-      chatWorkspace: null,
-      threads: [],
-      messages: [],
+    patchProvider(set, providerId, {
+      runtime: { running: false, owned: false },
+      connectedIntent: false,
       streaming: false,
       pendingApproval: null,
       error: null,
-      opencodeModelCatalog: [],
-      opencodeVendor: "",
     });
   },
 
-  loadThreads: async (workspace) => {
-    const { providerId, runtime } = get();
-    if (!runtime.running) return;
+  restartRuntime: async (workspace) => {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    const wasLinked = slice.connectedIntent;
+    const resolvedWorkspace = resolveProviderWorkspace(
+      get,
+      providerId,
+      workspace,
+    );
 
-    const commands = getAgentCommands(providerId);
-    set({ threadsLoading: true, error: null });
+    if (providerId === "opencode" && !resolvedWorkspace) {
+      throw new Error("请先打开工程目录");
+    }
+
+    patchProvider(set, providerId, {
+      error: null,
+      streaming: false,
+      pendingApproval: null,
+    });
+
+    try {
+      const commands = getAgentCommands(providerId);
+      const runtime =
+        providerId === "opencode"
+          ? await tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
+              workspace: resolvedWorkspace,
+            })
+          : await tauriInvoke<RuntimeStatus>(commands.restartRuntime);
+
+      if (!runtime.running) {
+        throw new Error("AI 服务重启失败");
+      }
+
+      if (wasLinked) {
+        await hydrateProviderAfterConnect(
+          providerId,
+          resolvedWorkspace,
+          runtime,
+          set,
+          get,
+        );
+      } else {
+        patchProvider(set, providerId, { runtime });
+      }
+
+      await reattachLinkedProviders(resolvedWorkspace, providerId, set, get);
+    } catch (e) {
+      patchProvider(set, providerId, { error: String(e) });
+      throw e;
+    }
+  },
+
+  loadThreads: async (workspace, providerId) => {
+    const id = providerId ?? get().providerId;
+    const slice = getProviderSlice(get, id);
+    if (!slice.runtime.running) return;
+
+    const commands = getAgentCommands(id);
+    patchProvider(set, id, { threadsLoading: true, error: null });
     try {
       const [remote, local] = await Promise.all([
         tauriInvoke<ThreadSummary[]>(commands.listThreads, {
           workspace,
           limit: 50,
         }),
-        listLocalChatSessions(workspace, providerId),
+        listLocalChatSessions(workspace, id),
       ]);
-      set({
+      patchProvider(set, id, {
         threads: mergeThreadLists(remote, local),
         threadsLoading: false,
       });
     } catch (e) {
-      set({ threadsLoading: false, error: String(e) });
+      patchProvider(set, id, {
+        threadsLoading: false,
+        error: String(e),
+      });
       throw e;
     }
   },
 
   selectThread: async (threadId, workspace) => {
-    const { thread, providerId, runtime } = get();
-    if (thread?.id === threadId) return;
-    if (!runtime.running) {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (slice.thread?.id === threadId) return;
+    if (!slice.runtime.running) {
       await get().connectRuntime(workspace);
     }
 
     const commands = getAgentCommands(providerId);
-    set({ error: null, streaming: false, pendingApproval: null });
+    patchProvider(set, providerId, {
+      error: null,
+      streaming: false,
+      pendingApproval: null,
+    });
 
     try {
       let history: HistoryMessage[] = [];
@@ -326,16 +575,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         await tauriInvoke(commands.subscribeEvents, { threadId });
       } catch {
-        // Local-only restored sessions may not exist on the runtime anymore.
+        // local-only session
       }
 
+      const current = getProviderSlice(get, providerId);
       const messages = mapHistoryToChatMessages(history);
-      set({
+      patchProvider(set, providerId, {
         thread: {
           id: threadId,
           workspace,
-          mode: get().mode,
-          model: get().model || undefined,
+          mode: current.mode,
+          model: current.model || undefined,
         },
         chatWorkspace: workspace,
         messages,
@@ -347,8 +597,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         providerId,
         sessionId: threadId,
         title,
-        mode: get().mode,
-        model: get().model,
+        mode: current.mode,
+        model: current.model,
         messages,
       });
       if (
@@ -362,26 +612,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       await get().refreshPendingApproval();
     } catch (e) {
-      set({ error: String(e) });
+      patchProvider(set, providerId, { error: String(e) });
       throw e;
     }
   },
 
   createNewThread: async (workspace) => {
-    const { mode, model, providerId, runtime } = get();
-    if (!runtime.running) {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.runtime.running) {
       await get().connectRuntime(workspace);
     }
-
+    const current = getProviderSlice(get, providerId);
     const commands = getAgentCommands(providerId);
     const created = await tauriInvoke<ThreadInfo>(commands.createThread, {
       workspace,
-      mode,
-      model: providerId === "codewhale" ? model : undefined,
+      mode: current.mode,
+      model: providerId === "codewhale" ? current.model : undefined,
     });
 
     await tauriInvoke(commands.subscribeEvents, { threadId: created.id });
-    set({
+    patchProvider(set, providerId, {
       thread: {
         ...created,
         workspace: created.workspace ?? workspace,
@@ -398,19 +649,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       providerId,
       sessionId: created.id,
       title: "新会话",
-      mode,
-      model,
+      mode: current.mode,
+      model: current.model,
       messages: [],
     });
-    await get().loadThreads(workspace);
+    await get().loadThreads(workspace, providerId);
   },
 
   deleteThread: async (threadId, workspace) => {
-    const { providerId, thread } = get();
-    const current = get().threads.find((item) => item.id === threadId);
-    const label = current?.title || current?.preview || translate(useSettingsStore.getState().locale, "chat.sessionFallback");
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    const current = slice.threads.find((item) => item.id === threadId);
+    const label =
+      current?.title ||
+      current?.preview ||
+      translate(useSettingsStore.getState().locale, "chat.sessionFallback");
     const confirmed = window.confirm(
-      translate(useSettingsStore.getState().locale, "chat.deleteConfirm", { label }),
+      translate(useSettingsStore.getState().locale, "chat.deleteConfirm", {
+        label,
+      }),
     );
     if (!confirmed) return;
 
@@ -423,7 +680,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : { threadId },
       );
     } catch (e) {
-      set({ error: String(e) });
+      patchProvider(set, providerId, { error: String(e) });
       throw e;
     }
 
@@ -432,60 +689,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     await deleteLocalChatSession(workspace, providerId, threadId);
 
-    const wasCurrent = thread?.id === threadId;
-    await get().loadThreads(workspace);
+    const wasCurrent = slice.thread?.id === threadId;
+    await get().loadThreads(workspace, providerId);
 
     if (!wasCurrent) return;
 
-    set({ thread: null, messages: [], streaming: false, pendingApproval: null });
+    patchProvider(set, providerId, {
+      thread: null,
+      messages: [],
+      streaming: false,
+      pendingApproval: null,
+    });
   },
 
   setMode: async (mode) => {
-    const { thread, providerId } = get();
-    set({ mode });
-    if (thread && providerId === "codewhale") {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    patchProvider(set, providerId, { mode });
+    if (slice.thread && providerId === "codewhale") {
       const commands = getAgentCommands(providerId);
       await tauriInvoke(commands.setThreadMode, {
-        threadId: thread.id,
+        threadId: slice.thread.id,
         mode,
-        model: get().model,
+        model: getProviderSlice(get, providerId).model,
       });
     }
   },
 
-  setModel: (model) =>
-    set((state) => ({
+  setModel: (model) => {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    patchProvider(set, providerId, {
       model,
       opencodeVendor:
-        state.providerId === "opencode"
-          ? resolveOpencodeVendor(model, state.opencodeVendor)
-          : state.opencodeVendor,
-    })),
+        providerId === "opencode"
+          ? resolveOpencodeVendor(model, slice.opencodeVendor)
+          : slice.opencodeVendor,
+    });
+  },
 
   setOpencodeVendor: (vendorId) => {
-    const { opencodeModelCatalog, model } = get();
-    const vendorModels = modelsForOpencodeVendor(opencodeModelCatalog, vendorId);
-    const nextModel = vendorModels.some((item) => item.value === model)
-      ? model
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    const vendorModels = modelsForOpencodeVendor(
+      slice.opencodeModelCatalog,
+      vendorId,
+    );
+    const nextModel = vendorModels.some((item) => item.value === slice.model)
+      ? slice.model
       : (vendorModels[0]?.value ?? "");
-    set({ opencodeVendor: vendorId, model: nextModel });
+    patchProvider(set, providerId, {
+      opencodeVendor: vendorId,
+      model: nextModel,
+    });
   },
 
   sendMessage: async (text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
     const userMsg: ChatMessage = {
       id: uid(),
       role: "user",
       content: trimmed,
       timestamp: Date.now(),
     };
-
     const assistantId = uid();
-    set((state) => ({
+
+    patchProvider(set, providerId, {
       messages: [
-        ...state.messages,
+        ...slice.messages,
         userMsg,
         {
           id: assistantId,
@@ -496,39 +771,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ],
       streaming: true,
       error: null,
-    }));
+    });
 
-    const { thread, mode, model, providerId } = get();
-    if (!thread) {
-      set({ streaming: false, error: "未创建会话线程" });
+    const current = getProviderSlice(get, providerId);
+    if (!current.thread) {
+      patchProvider(set, providerId, {
+        streaming: false,
+        error: "未创建会话线程",
+      });
       return;
     }
 
-    await saveCurrentChatLocally(get).catch(() => undefined);
+    await saveProviderChatLocally(get, providerId).catch(() => undefined);
 
     const commands = getAgentCommands(providerId);
     try {
       if (providerId === "opencode") {
         await tauriInvoke(commands.sendTurn, {
-          threadId: thread.id,
+          threadId: current.thread.id,
           message: trimmed,
-          mode,
-          model: model || null,
+          mode: current.mode,
+          model: current.model || null,
         });
       } else {
         await tauriInvoke(commands.sendTurn, {
-          threadId: thread.id,
+          threadId: current.thread.id,
           message: trimmed,
         });
       }
     } catch (e) {
-      set({ streaming: false, error: String(e) });
+      patchProvider(set, providerId, {
+        streaming: false,
+        error: String(e),
+        runtime: { running: false, owned: current.runtime.owned },
+      });
     }
   },
 
   refreshPendingApproval: async () => {
-    const { thread, providerId } = get();
-    if (!thread) return;
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.thread) return;
 
     const commands = getAgentCommands(providerId);
     if (!commands.getPendingApproval) return;
@@ -540,43 +823,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } | null>(
         commands.getPendingApproval,
         providerId === "opencode"
-          ? { sessionId: thread.id }
-          : { threadId: thread.id },
+          ? { sessionId: slice.thread.id }
+          : { threadId: slice.thread.id },
       );
-      set({ pendingApproval: pending ?? null });
+      patchProvider(set, providerId, {
+        pendingApproval: pending ?? null,
+      });
     } catch {
-      // ignore fetch failures; stale UI is cleared on approve errors
+      // ignore
     }
   },
 
   approve: async (allow) => {
-    const { pendingApproval, thread, providerId } = get();
-    if (!pendingApproval || !thread) return;
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.pendingApproval || !slice.thread) return;
 
     const commands = getAgentCommands(providerId);
     try {
       if (providerId === "opencode") {
         await tauriInvoke(commands.approve, {
-          threadId: thread.id,
-          approvalId: pendingApproval.id,
+          threadId: slice.thread.id,
+          approvalId: slice.pendingApproval.id,
           allow,
         });
       } else {
         await tauriInvoke(commands.approve, {
-          approvalId: pendingApproval.id,
+          approvalId: slice.pendingApproval.id,
           allow,
         });
       }
-      set({ pendingApproval: null, error: null });
+      patchProvider(set, providerId, {
+        pendingApproval: null,
+        error: null,
+      });
     } catch (e) {
       const msg = String(e);
       if (msg.includes("404") || msg.includes("no pending approval")) {
-        set({
+        patchProvider(set, providerId, {
           pendingApproval: null,
           error: "该审批已过期或已处理，请重新发起操作。",
         });
       } else {
-        set({ error: msg });
+        patchProvider(set, providerId, { error: msg });
       }
     }
   },
@@ -586,172 +875,229 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return () => {};
     }
 
+    const applyToProvider = (
+      targetProviderId: string,
+      updater: (slice: ProviderChatSlice) => Partial<ProviderChatSlice>,
+    ) => {
+      const resolvedId = targetProviderId || get().providerId;
+      const slice = getProviderSlice(get, resolvedId);
+      patchProvider(set, resolvedId, updater(slice));
+    };
+
     const unlistenEvent = await listen<Record<string, unknown>>(
       "agent-event",
       (event) => {
         try {
-          const mapped = mapRuntimeEvent(event.payload);
+          const { providerId: eventProviderId, mapped } = parseAgentEnvelope(
+            event.payload,
+          );
           if (!mapped) return;
+          const resolvedId = eventProviderId || get().providerId;
 
-        if (mapped.type === "text_delta") {
-          set((state) => {
-            const messages = [...state.messages];
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              if (messages[i].role === "assistant") {
-                messages[i] = {
-                  ...messages[i],
-                  content: messages[i].content + mapped.content,
-                };
-                break;
-              }
-            }
-            return { messages };
-          });
-        }
-
-        if (mapped.type === "reasoning_delta") {
-          set((state) => {
-            const messages = [...state.messages];
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              if (messages[i].role === "assistant") {
-                const prefix = messages[i].content ? "\n\n" : "";
-                messages[i] = {
-                  ...messages[i],
-                  content: `${messages[i].content}${prefix}> ${mapped.content}`,
-                };
-                break;
-              }
-            }
-            return { messages };
-          });
-        }
-
-        if (mapped.type === "approval_required") {
-          const { providerId } = get();
-          const commands = getAgentCommands(providerId);
-          if (commands.getPendingApproval) {
-            get()
-              .refreshPendingApproval()
-              .then(() => {
-                if (!get().pendingApproval && mapped.id) {
-                  set({
-                    pendingApproval: {
-                      id: mapped.id,
-                      description: mapped.description,
-                    },
-                  });
+          if (mapped.type === "text_delta") {
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              for (let i = messages.length - 1; i >= 0; i -= 1) {
+                if (messages[i].role === "assistant") {
+                  messages[i] = {
+                    ...messages[i],
+                    content: messages[i].content + mapped.content,
+                  };
+                  break;
                 }
-              })
-              .catch(() => undefined);
-            return;
-          }
-          set({
-            pendingApproval: {
-              id: mapped.id,
-              description: mapped.description,
-            },
-          });
-        }
-
-        if (mapped.type === "approval_resolved") {
-          set({ pendingApproval: null });
-        }
-
-        if (mapped.type === "tool_call") {
-          set((state) => {
-            const messages = [...state.messages];
-            let insertAt = messages.length;
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              if (messages[i].role === "assistant") {
-                insertAt = i + 1;
-                break;
               }
-            }
+              return { messages };
+            });
+          }
 
-            messages.splice(insertAt, 0, {
-              id: uid(),
-              role: "tool",
-              content: formatToolContent(mapped.args),
-              toolName: mapped.name,
-              timestamp: Date.now(),
-            }, {
-              id: uid(),
-              role: "assistant",
-              content: "",
-              timestamp: Date.now(),
+          if (mapped.type === "reasoning_delta") {
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              for (let i = messages.length - 1; i >= 0; i -= 1) {
+                if (messages[i].role === "assistant") {
+                  const prefix = messages[i].content ? "\n\n" : "";
+                  messages[i] = {
+                    ...messages[i],
+                    content: `${messages[i].content}${prefix}> ${mapped.content}`,
+                  };
+                  break;
+                }
+              }
+              return { messages };
+            });
+          }
+
+          if (mapped.type === "approval_required") {
+            const commands = getAgentCommands(resolvedId);
+            if (commands.getPendingApproval) {
+              const refresh = async () => {
+                const slice = getProviderSlice(get, resolvedId);
+                if (!slice.thread) return;
+                try {
+                  const pending = await tauriInvoke<{
+                    id: string;
+                    description: string;
+                  } | null>(
+                    commands.getPendingApproval!,
+                    resolvedId === "opencode"
+                      ? { sessionId: slice.thread.id }
+                      : { threadId: slice.thread.id },
+                  );
+                  if (pending) {
+                    patchProvider(set, resolvedId, { pendingApproval: pending });
+                  } else if (mapped.id) {
+                    patchProvider(set, resolvedId, {
+                      pendingApproval: {
+                        id: mapped.id,
+                        description: mapped.description,
+                      },
+                    });
+                  }
+                } catch {
+                  if (mapped.id) {
+                    patchProvider(set, resolvedId, {
+                      pendingApproval: {
+                        id: mapped.id,
+                        description: mapped.description,
+                      },
+                    });
+                  }
+                }
+              };
+              refresh().catch(() => undefined);
+              return;
+            }
+            patchProvider(set, resolvedId, {
+              pendingApproval: {
+                id: mapped.id,
+                description: mapped.description,
+              },
+            });
+          }
+
+          if (mapped.type === "approval_resolved") {
+            patchProvider(set, resolvedId, { pendingApproval: null });
+          }
+
+          if (mapped.type === "tool_call") {
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              let insertAt = messages.length;
+              for (let i = messages.length - 1; i >= 0; i -= 1) {
+                if (messages[i].role === "assistant") {
+                  insertAt = i + 1;
+                  break;
+                }
+              }
+              messages.splice(
+                insertAt,
+                0,
+                {
+                  id: uid(),
+                  role: "tool",
+                  content: formatToolContent(mapped.args),
+                  toolName: mapped.name,
+                  timestamp: Date.now(),
+                },
+                {
+                  id: uid(),
+                  role: "assistant",
+                  content: "",
+                  timestamp: Date.now(),
+                },
+              );
+              return { messages };
+            });
+          }
+
+          if (mapped.type === "turn_completed") {
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              while (messages.length > 0) {
+                const last = messages[messages.length - 1];
+                if (last.role === "assistant" && !last.content.trim()) {
+                  messages.pop();
+                } else {
+                  break;
+                }
+              }
+              return { streaming: false, messages };
             });
 
-            return { messages };
-          });
-        }
-
-        if (mapped.type === "turn_completed") {
-          set((state) => {
-            const messages = [...state.messages];
-            while (messages.length > 0) {
-              const last = messages[messages.length - 1];
-              if (last.role === "assistant" && !last.content.trim()) {
-                messages.pop();
-              } else {
-                break;
-              }
-            }
-            return { streaming: false, messages };
-          });
-          const { thread, messages, mode, model, providerId, chatWorkspace } =
-            get();
-          const workspace = thread?.workspace ?? chatWorkspace;
-          if (workspace && thread) {
-            const title = sessionTitleFromMessages(messages, thread.id);
-            persistLocalChatSession({
-              workspace,
-              providerId,
-              sessionId: thread.id,
-              title,
-              mode,
-              model,
-              messages,
-            }).catch(() => undefined);
-            const commands = getAgentCommands(providerId);
-            if (
-              commands.updateThreadTitle &&
-              !isGenericSessionTitle(title)
-            ) {
-              tauriInvoke(commands.updateThreadTitle, {
-                sessionId: thread.id,
+            const slice = getProviderSlice(get, resolvedId);
+            const workspace = slice.thread?.workspace ?? slice.chatWorkspace;
+            if (workspace && slice.thread) {
+              const title = sessionTitleFromMessages(
+                slice.messages,
+                slice.thread.id,
+              );
+              persistLocalChatSession({
+                workspace,
+                providerId: resolvedId,
+                sessionId: slice.thread.id,
                 title,
+                mode: slice.mode,
+                model: slice.model,
+                messages: slice.messages,
               }).catch(() => undefined);
-            }
-            get().loadThreads(workspace).catch(() => undefined);
-          }
-        }
-
-        if (mapped.type === "turn_error") {
-          set((state) => {
-            const messages = [...state.messages];
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              if (messages[i].role === "assistant") {
-                const prefix = messages[i].content ? "\n\n" : "";
-                messages[i] = {
-                  ...messages[i],
-                  content: `${messages[i].content}${prefix}错误：${mapped.message}`,
-                };
-                break;
+              const commands = getAgentCommands(resolvedId);
+              if (
+                commands.updateThreadTitle &&
+                !isGenericSessionTitle(title)
+              ) {
+                tauriInvoke(commands.updateThreadTitle, {
+                  sessionId: slice.thread.id,
+                  title,
+                }).catch(() => undefined);
               }
+              get().loadThreads(workspace, resolvedId).catch(() => undefined);
             }
-            return { messages, streaming: false, error: mapped.message };
-          });
-          saveCurrentChatLocally(get).catch(() => undefined);
-        }
+          }
+
+          if (mapped.type === "turn_error") {
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              for (let i = messages.length - 1; i >= 0; i -= 1) {
+                if (messages[i].role === "assistant") {
+                  const prefix = messages[i].content ? "\n\n" : "";
+                  messages[i] = {
+                    ...messages[i],
+                    content: `${messages[i].content}${prefix}错误：${mapped.message}`,
+                  };
+                  break;
+                }
+              }
+              return {
+                messages,
+                streaming: false,
+                error: mapped.message,
+              };
+            });
+            saveProviderChatLocally(get, resolvedId).catch(() => undefined);
+          }
         } catch (e) {
           console.error("agent-event handler failed:", e);
-          set({ streaming: false, error: String(e) });
+          const { providerId } = get();
+          patchProvider(set, providerId, {
+            streaming: false,
+            error: String(e),
+          });
         }
       },
     );
 
-    const unlistenError = await listen<string>("agent-error", (event) => {
-      set({ error: event.payload, streaming: false });
+    const unlistenError = await listen<unknown>("agent-error", (event) => {
+      const { providerId: eventProviderId, message } = parseAgentError(
+        event.payload,
+      );
+      const resolvedId = eventProviderId || get().providerId;
+      const slice = getProviderSlice(get, resolvedId);
+      patchProvider(set, resolvedId, {
+        error: message,
+        streaming: false,
+        pendingApproval: null,
+        runtime: { running: false, owned: slice.runtime.owned ?? false },
+      });
     });
 
     return () => {
@@ -760,3 +1106,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
   },
 }));
+
+export function useActiveProviderChat() {
+  return useChatStore(
+    useShallow((state) => {
+      const slice =
+        state.providerStates[state.providerId] ??
+        createProviderChatSlice(state.providerId);
+      return {
+        config: state.config,
+        providerId: state.providerId,
+        initialized: state.initialized,
+        ...slice,
+      };
+    }),
+  );
+}

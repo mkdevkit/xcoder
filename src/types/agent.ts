@@ -45,6 +45,12 @@ export interface HistoryMessage {
 export interface RuntimeStatus {
   running: boolean;
   base_url?: string;
+  owned?: boolean;
+}
+
+export interface AgentEventEnvelope {
+  providerId: string;
+  event: Record<string, unknown>;
 }
 
 export interface OpencodeModelOption {
@@ -52,6 +58,18 @@ export interface OpencodeModelOption {
   providerName: string;
   modelId: string;
   modelName: string;
+  value: string;
+}
+
+export interface OpencodeProviderCatalog {
+  models: OpencodeModelOption[];
+  connectedProviderIds: string[];
+}
+
+export interface CodewhaleModelOption {
+  modelId: string;
+  provider: string;
+  label: string;
   value: string;
 }
 

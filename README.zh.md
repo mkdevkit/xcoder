@@ -111,8 +111,9 @@
 | 控件 | 说明 |
 |------|------|
 | Provider 下拉 | 在 `config.toml` 中配置了多个 Provider 时可切换 |
-| 模式 | `plan` / `agent` / `yolo`（CodeWhale）或 `build` / `plan`（OpenCode）等 |
-| 模型 | CodeWhale 可在面板选择；OpenCode 由 `opencode.json` 决定，面板不显示模型下拉 |
+| 模式 | 连接后动态获取 — CodeWhale：`plan` / `agent` / `yolo`；OpenCode：来自 `/agent` |
+| 模型商 | 仅 OpenCode — 列出已配置 provider（如 `deepseek`、`zhipu-coding`） |
+| 模型 | 连接后动态获取 — CodeWhale：`codewhale model list`；OpenCode：当前模型商下的模型 |
 | 连接 / 断开 | 启动或停止 AI Runtime |
 | 会话下拉 | 切换历史会话（合并本地与远端列表） |
 | × | 删除当前会话（需确认） |
@@ -212,11 +213,11 @@ opencode --version
 
 ## 配置说明
 
-xcoder 采用**两层配置**：应用自己的 `config.toml` 负责「连哪个后端、怎么启动」；各 AI 工具保留**原生配置文件**（API Key、模型、审批策略等），xcoder 不重复维护第二套语义。
+xcoder 采用**两层配置**：应用自己的 `config.toml` 负责「连哪个后端、怎么启动」；各 AI 工具保留**原生配置文件**（API Key、模型、审批策略等）。聊天面板的模式与模型在**连接后动态获取**。
 
 | 配置文件 | 作用 | 典型路径 |
 |----------|------|----------|
-| `config.toml` | xcoder 应用级：默认 Provider、启动命令、UI 选项 | Windows: `%APPDATA%\xcoder\config.toml`<br>Linux/macOS: `~/.config/xcoder/config.toml` |
+| `config.toml` | xcoder 应用级：默认 Provider、启动命令、健康检查 | Windows: `%APPDATA%\xcoder\config.toml`<br>Linux/macOS: `~/.config/xcoder/config.toml` |
 | `config.toml`（CodeWhale） | CodeWhale 原生：API Key、默认模型、审批模式 | `~/.codewhale/config.toml` |
 | `opencode.json` | OpenCode 原生：Provider、模型、权限 | `~/.config/opencode/opencode.json` |
 
@@ -247,13 +248,6 @@ args = ["serve", "--http", "--port", "7878", "--insecure"]
 config_path = "~/.codewhale/config.toml"
 health_cmd = ["codewhale", "doctor", "--json"]
 
-  [providers.ui_options]
-  modes = ["plan", "agent", "yolo"]
-  default_mode = "agent"
-  approval_modes = ["suggest", "auto", "never"]
-  models = ["deepseek-v4-pro", "deepseek-v4-flash", "auto"]
-  default_model = "deepseek-v4-pro"
-
 # ── OpenCode ───────────────────────────────────────────
 [[providers]]
 id = "opencode"
@@ -262,10 +256,6 @@ command = "opencode"
 args = ["serve", "--hostname", "127.0.0.1", "--port", "4096"]
 config_path = "~/.config/opencode/opencode.json"
 health_cmd = ["opencode", "--version"]
-
-  [providers.ui_options]
-  modes = ["build", "plan"]
-  default_mode = "build"
 ```
 
 字段说明：
@@ -274,7 +264,15 @@ health_cmd = ["opencode", "--version"]
 - `command` / `args`：xcoder 点击「连接」时启动的命令（需与 `config_path` 中的端口一致）
 - `config_path`：该 Provider 原生配置文件路径，支持 `~` 展开
 - `health_cmd`：连接前的健康检查命令
-- `ui_options`：聊天面板下拉框中的模式、模型列表（模型名须与原生配置一致）
+
+连接后，聊天面板的**模式**与**模型**列表会自动从运行时获取：
+
+| Provider | 模式来源 | 模型来源 | 默认模型 |
+|----------|----------|----------|----------|
+| **CodeWhale** | 固定 `plan` / `agent` / `yolo` | `codewhale model list` | `doctor --json` → `default_text_model` |
+| **OpenCode** | `GET /agent` | Provider API + `~/.config/opencode/opencode.json` | 已连接 provider 的首个模型，或 `opencode.json` 的 `model` |
+
+若在已连接状态下修改了 `opencode.json` 中的 provider，请 **断开后重新连接**，xcoder 会重启 OpenCode 进程并刷新模型列表。
 
 若系统找不到 `codewhale` / `opencode`，可在 `command` 中写绝对路径，例如：
 
@@ -326,6 +324,8 @@ codewhale doctor
 codewhale doctor --json
 ```
 
+`default_text_model` 也会在 xcoder 点击 **连接** 后作为聊天面板模型下拉的初始选中项（完整列表来自 `codewhale model list`）。
+
 ### 3. OpenCode 配置（`opencode.json`）
 
 全局配置文件路径：`~/.config/opencode/opencode.json`（也可在项目根目录放置 `opencode.json` 覆盖全局设置）。
@@ -358,7 +358,8 @@ codewhale doctor --json
 - `apiKey` 填 DeepSeek 平台的 Key（https://platform.deepseek.com）
 - `models` 中的 key 必须使用 `deepseek-v4-pro` / `deepseek-v4-flash`，**不要**写成 `v4-pro`（会导致 API 400 错误）
 - `model` 格式为 `providerID/modelID`，例如 `deepseek/deepseek-v4-pro`
-- xcoder 连接 OpenCode 时模型由 `opencode.json` 决定，聊天面板不显示模型下拉框
+- 连接后，xcoder 会从 OpenCode API 读取 provider 与模型，并合并 `opencode.json`；在聊天面板用 **模型商**、**模型** 下拉框切换
+- 自定义 provider（如 `zhipu-coding`）须写在 `opencode.json` 中且被 OpenCode 成功加载（`connected`）；若连接后修改配置，需 **断开再连接**
 
 验证：
 
@@ -370,9 +371,9 @@ opencode serve --hostname 127.0.0.1 --port 4096
 ### 配置关系一览
 
 ```
-~/.config/xcoder/config.toml          ← xcoder：选 Provider、启动参数、UI 选项
-        │
-        ├─ config_path ──→ ~/.codewhale/config.toml     ← API Key、模型、审批
+~/.config/xcoder/config.toml          ← xcoder：Provider、启动参数、健康检查
+        │                                 （连接后动态获取模式与模型）
+        ├─ config_path ──→ ~/.codewhale/config.toml     ← API Key、默认模型、审批
         │
         └─ config_path ──→ ~/.config/opencode/opencode.json  ← Provider、模型、权限
 
@@ -423,6 +424,7 @@ npm run tauri build
 | 连接时报「未找到 codewhale/opencode」 | 全局安装 CLI，或在 `config.toml` 的 `command` 写 `.cmd` / `.exe` 绝对路径 |
 | 连接时弹出 CMD 黑窗（旧版本） | 已通过 `CREATE_NO_WINDOW` 隐藏子进程控制台；请使用最新构建的 exe |
 | OpenCode 连接失败 | 须先 **打开工程**；检查 `opencode.json` 端口与 `config.toml` 的 `args` 一致 |
+| OpenCode 聊天区看不到某 provider/模型 | 修改 `opencode.json` 后 **断开再连接** 以重启 Runtime；自定义 provider 需有效 `apiKey` 或 `opencode auth login` |
 | 聊天无响应 / 400 错误 | 检查 DeepSeek 模型名是否为 `deepseek-v4-pro`，勿写成 `v4-pro` |
 | 构建下载 WiX/NSIS 超时 | 运行 `npm run tauri:setup-bundle-tools` 后重试 |
 

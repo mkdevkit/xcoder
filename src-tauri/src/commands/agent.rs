@@ -1,16 +1,18 @@
 use crate::agent::codewhale::{
     approve_tool, base_url, create_thread, delete_thread, get_pending_approval,
-    get_thread_latest_seq, list_thread_summaries, load_thread_history,
-    normalize_event as codewhale_normalize_event, patch_thread_mode, run_doctor, send_turn,
-    spawn_runtime, wait_for_health, CodewhaleState, RuntimeStatus, ThreadInfo,
+    get_thread_latest_seq, is_healthy as codewhale_is_healthy, list_models, list_thread_summaries,
+    load_thread_history, normalize_event as codewhale_normalize_event, patch_thread_mode,
+    run_doctor, send_turn, spawn_runtime, wait_for_health, CodewhaleState, RuntimeStatus,
+    ThreadInfo,
 };
 use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
 use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, check_installed, create_session,
-    delete_session, get_pending_permission, list_agents, list_provider_models, list_sessions, load_session_history,
+    delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
+    list_provider_models, list_sessions, load_session_history,
     normalize_event as opencode_normalize_event, send_prompt, update_session_title,
-    spawn_runtime as spawn_opencode_runtime,
-    wait_for_health as wait_for_opencode_health, OpencodeState,
+    spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
+    OpencodeState,
 };
 use futures_util::StreamExt;
 use std::sync::Mutex;
@@ -22,22 +24,62 @@ pub fn codewhale_doctor() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+pub fn codewhale_list_models() -> Result<Vec<crate::agent::codewhale::CodewhaleModelOption>, String> {
+    list_models()
+}
+
+#[tauri::command]
 pub async fn codewhale_start_runtime(
+    spawn_if_missing: Option<bool>,
     state: State<'_, Mutex<CodewhaleState>>,
 ) -> Result<RuntimeStatus, String> {
-    {
+    let spawn_if_missing = spawn_if_missing.unwrap_or(true);
+    let url = base_url();
+    let client = reqwest::Client::new();
+
+    let cached = {
         let guard = state.lock().map_err(|e| e.to_string())?;
-        if guard.child.is_some() {
-            return Ok(RuntimeStatus {
-                running: true,
-                base_url: guard.base_url.clone(),
-            });
+        (guard.base_url.clone(), guard.child.is_some())
+    };
+
+    if cached.0.is_some() && codewhale_is_healthy(&client, &url).await {
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: cached.0,
+            owned: cached.1,
+        });
+    }
+
+    if codewhale_is_healthy(&client, &url).await {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        guard.base_url = Some(url.clone());
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: Some(url),
+            owned: false,
+        });
+    }
+
+    if !spawn_if_missing {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
+    }
+
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut child) = guard.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        guard.base_url = None;
     }
 
     let child = spawn_runtime()?;
-    let url = base_url();
-    let client = reqwest::Client::new();
     wait_for_health(&client, &url).await?;
 
     {
@@ -49,6 +91,52 @@ pub async fn codewhale_start_runtime(
     Ok(RuntimeStatus {
         running: true,
         base_url: Some(url),
+        owned: true,
+    })
+}
+
+#[tauri::command]
+pub async fn codewhale_restart_runtime(
+    state: State<'_, Mutex<CodewhaleState>>,
+) -> Result<RuntimeStatus, String> {
+    let url = base_url();
+    let client = reqwest::Client::new();
+
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut child) = guard.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        guard.base_url = None;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    if codewhale_is_healthy(&client, &url).await {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.base_url = Some(url.clone());
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: Some(url),
+            owned: false,
+        });
+    }
+
+    let child = spawn_runtime()?;
+    wait_for_health(&client, &url).await?;
+
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.child = Some(child);
+        guard.base_url = Some(url.clone());
+    }
+
+    Ok(RuntimeStatus {
+        running: true,
+        base_url: Some(url),
+        owned: true,
     })
 }
 
@@ -66,13 +154,34 @@ pub fn codewhale_stop_runtime(state: State<'_, Mutex<CodewhaleState>>) -> Result
 }
 
 #[tauri::command]
-pub fn codewhale_runtime_status(
+pub async fn codewhale_runtime_status(
     state: State<'_, Mutex<CodewhaleState>>,
 ) -> Result<RuntimeStatus, String> {
-    let guard = state.lock().map_err(|e| e.to_string())?;
+    let cached = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        (guard.base_url.clone(), guard.child.is_some())
+    };
+    let Some(url) = cached.0 else {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
+    };
+
+    let client = reqwest::Client::new();
+    if !codewhale_is_healthy(&client, &url).await {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
+    }
+
     Ok(RuntimeStatus {
-        running: guard.child.is_some(),
-        base_url: guard.base_url.clone(),
+        running: true,
+        base_url: Some(url),
+        owned: cached.1,
     })
 }
 
@@ -184,7 +293,13 @@ pub async fn codewhale_subscribe_events(
         let response = match client.get(&events_url).send().await {
             Ok(r) => r,
             Err(e) => {
-                let _ = app.emit("agent-error", format!("SSE connect failed: {e}"));
+                let _ = app.emit(
+                    "agent-error",
+                    serde_json::json!({
+                        "providerId": "codewhale",
+                        "message": format!("SSE connect failed: {e}"),
+                    }),
+                );
                 return;
             }
         };
@@ -210,7 +325,11 @@ pub async fn codewhale_subscribe_events(
                                     if let Some(normalized) =
                                         codewhale_normalize_event(&event, &thread_id)
                                     {
-                                        let _ = app.emit("agent-event", normalized);
+                                        let payload = serde_json::json!({
+                                            "providerId": "codewhale",
+                                            "event": normalized,
+                                        });
+                                        let _ = app.emit("agent-event", payload);
                                     }
                                 }
                             }
@@ -218,7 +337,13 @@ pub async fn codewhale_subscribe_events(
                     }
                 }
                 Some(Err(e)) => {
-                    let _ = app.emit("agent-error", format!("SSE stream error: {e}"));
+                    let _ = app.emit(
+                        "agent-error",
+                        serde_json::json!({
+                            "providerId": "codewhale",
+                            "message": format!("SSE stream error: {e}"),
+                        }),
+                    );
                     break;
                 }
                 None => break,
@@ -306,16 +431,44 @@ pub fn opencode_doctor() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn opencode_start_runtime(
     workspace: String,
+    spawn_if_missing: Option<bool>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<RuntimeStatus, String> {
-    {
+    let spawn_if_missing = spawn_if_missing.unwrap_or(true);
+    let url = opencode_base_url();
+    let client = reqwest::Client::new();
+
+    let cached = {
         let guard = state.lock().map_err(|e| e.to_string())?;
-        if guard.child.is_some() && guard.workspace.as_deref() == Some(workspace.as_str()) {
-            return Ok(RuntimeStatus {
-                running: true,
-                base_url: guard.base_url.clone(),
-            });
-        }
+        (guard.base_url.clone(), guard.child.is_some())
+    };
+
+    if cached.0.is_some() && opencode_is_healthy(&client, &url).await {
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: cached.0,
+            owned: cached.1,
+        });
+    }
+
+    if opencode_is_healthy(&client, &url).await {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        guard.base_url = Some(url.clone());
+        guard.workspace = Some(workspace);
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: Some(url),
+            owned: false,
+        });
+    }
+
+    if !spawn_if_missing {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
     }
 
     {
@@ -330,8 +483,6 @@ pub async fn opencode_start_runtime(
     }
 
     let child = spawn_opencode_runtime(&workspace)?;
-    let url = opencode_base_url();
-    let client = reqwest::Client::new();
     wait_for_opencode_health(&client, &url).await?;
 
     {
@@ -344,6 +495,56 @@ pub async fn opencode_start_runtime(
     Ok(RuntimeStatus {
         running: true,
         base_url: Some(url),
+        owned: true,
+    })
+}
+
+#[tauri::command]
+pub async fn opencode_restart_runtime(
+    workspace: String,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<RuntimeStatus, String> {
+    let url = opencode_base_url();
+    let client = reqwest::Client::new();
+
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut child) = guard.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        guard.base_url = None;
+        guard.workspace = None;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    if opencode_is_healthy(&client, &url).await {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.base_url = Some(url.clone());
+        guard.workspace = Some(workspace);
+        return Ok(RuntimeStatus {
+            running: true,
+            base_url: Some(url),
+            owned: false,
+        });
+    }
+
+    let child = spawn_opencode_runtime(&workspace)?;
+    wait_for_opencode_health(&client, &url).await?;
+
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.child = Some(child);
+        guard.base_url = Some(url.clone());
+        guard.workspace = Some(workspace);
+    }
+
+    Ok(RuntimeStatus {
+        running: true,
+        base_url: Some(url),
+        owned: true,
     })
 }
 
@@ -362,13 +563,34 @@ pub fn opencode_stop_runtime(state: State<'_, Mutex<OpencodeState>>) -> Result<(
 }
 
 #[tauri::command]
-pub fn opencode_runtime_status(
+pub async fn opencode_runtime_status(
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<RuntimeStatus, String> {
-    let guard = state.lock().map_err(|e| e.to_string())?;
+    let cached = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        (guard.base_url.clone(), guard.child.is_some())
+    };
+    let Some(url) = cached.0 else {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
+    };
+
+    let client = reqwest::Client::new();
+    if !opencode_is_healthy(&client, &url).await {
+        return Ok(RuntimeStatus {
+            running: false,
+            base_url: None,
+            owned: false,
+        });
+    }
+
     Ok(RuntimeStatus {
-        running: guard.child.is_some(),
-        base_url: guard.base_url.clone(),
+        running: true,
+        base_url: Some(url),
+        owned: cached.1,
     })
 }
 
@@ -391,7 +613,7 @@ pub async fn opencode_list_agents(
 #[tauri::command]
 pub async fn opencode_list_provider_models(
     state: State<'_, Mutex<OpencodeState>>,
-) -> Result<Vec<crate::agent::opencode::OpencodeModelOption>, String> {
+) -> Result<crate::agent::opencode::OpencodeProviderCatalog, String> {
     let url = {
         let guard = state.lock().map_err(|e| e.to_string())?;
         guard
@@ -520,7 +742,13 @@ pub async fn opencode_subscribe_events(
         let response = match client.get(&events_url).send().await {
             Ok(r) => r,
             Err(e) => {
-                let _ = app.emit("agent-error", format!("SSE connect failed: {e}"));
+                let _ = app.emit(
+                    "agent-error",
+                    serde_json::json!({
+                        "providerId": "opencode",
+                        "message": format!("SSE connect failed: {e}"),
+                    }),
+                );
                 return;
             }
         };
@@ -546,7 +774,11 @@ pub async fn opencode_subscribe_events(
                                     if let Some(normalized) =
                                         opencode_normalize_event(&event, &thread_id)
                                     {
-                                        let _ = app.emit("agent-event", normalized);
+                                        let payload = serde_json::json!({
+                                            "providerId": "opencode",
+                                            "event": normalized,
+                                        });
+                                        let _ = app.emit("agent-event", payload);
                                     }
                                 }
                             }
@@ -554,7 +786,13 @@ pub async fn opencode_subscribe_events(
                     }
                 }
                 Some(Err(e)) => {
-                    let _ = app.emit("agent-error", format!("SSE stream error: {e}"));
+                    let _ = app.emit(
+                        "agent-error",
+                        serde_json::json!({
+                            "providerId": "opencode",
+                            "message": format!("SSE stream error: {e}"),
+                        }),
+                    );
                     break;
                 }
                 None => break,

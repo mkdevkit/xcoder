@@ -17,6 +17,8 @@ pub struct CodewhaleState {
 pub struct RuntimeStatus {
     pub running: bool,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +45,15 @@ fn resolve_codewhale_command() -> Result<std::path::PathBuf, String> {
 
 pub fn base_url() -> String {
     "http://127.0.0.1:7878".to_string()
+}
+
+pub async fn is_healthy(client: &reqwest::Client, url: &str) -> bool {
+    client
+        .get(format!("{url}/health"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 pub async fn wait_for_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
@@ -99,6 +110,65 @@ pub fn run_doctor() -> Result<serde_json::Value, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout).map_err(|e| format!("Invalid doctor JSON: {e}"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodewhaleModelOption {
+    pub model_id: String,
+    pub provider: String,
+    pub label: String,
+    pub value: String,
+}
+
+fn parse_model_line(line: &str) -> Option<CodewhaleModelOption> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let open_paren = line.rfind(" (")?;
+    let model_id = line[..open_paren].trim();
+    let provider = line[open_paren + 2..].strip_suffix(')')?.trim();
+    if model_id.is_empty() || provider.is_empty() {
+        return None;
+    }
+
+    Some(CodewhaleModelOption {
+        model_id: model_id.to_string(),
+        provider: provider.to_string(),
+        label: line.to_string(),
+        value: model_id.to_string(),
+    })
+}
+
+pub fn list_models() -> Result<Vec<CodewhaleModelOption>, String> {
+    let program = resolve_codewhale_command()?;
+    let output = run_command(&program, &["model", "list"])?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("codewhale model list failed: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut options = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for line in stdout.lines() {
+        let Some(option) = parse_model_line(line) else {
+            continue;
+        };
+        if seen.insert(option.value.clone()) {
+            options.push(option);
+        }
+    }
+
+    if options.is_empty() {
+        return Err("codewhale model list returned no models".to_string());
+    }
+
+    Ok(options)
 }
 
 fn run_command(program: &std::path::Path, args: &[&str]) -> Result<Output, String> {

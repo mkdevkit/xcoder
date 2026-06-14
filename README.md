@@ -111,8 +111,9 @@ Editor tab **right-click**:
 | Control | Description |
 |---------|-------------|
 | Provider dropdown | Switch when multiple providers are configured in `config.toml` |
-| Mode | e.g. `plan` / `agent` / `yolo` (CodeWhale) or `build` / `plan` (OpenCode) |
-| Model | Selectable for CodeWhale; OpenCode uses `opencode.json` (no model dropdown) |
+| Mode | Fetched at runtime — CodeWhale: `plan` / `agent` / `yolo`; OpenCode: from `/agent` |
+| Model provider | OpenCode only — lists configured providers (e.g. `deepseek`, `zhipu-coding`) |
+| Model | Fetched at runtime — CodeWhale: `codewhale model list`; OpenCode: models for the selected provider |
 | Connect / Disconnect | Start or stop the AI runtime |
 | Session dropdown | Switch sessions (merged local + remote list) |
 | × | Delete current session (with confirmation) |
@@ -212,11 +213,11 @@ opencode --version
 
 ## Configuration
 
-xcoder uses a **two-layer configuration model**: its own `config.toml` controls which backend to use and how to start it; each AI tool keeps its **native config file** (API keys, models, approval policy, etc.). xcoder does not duplicate that semantics in a second format.
+xcoder uses a **two-layer configuration model**: its own `config.toml` controls which backend to use and how to start it; each AI tool keeps its **native config file** (API keys, models, approval policy, etc.). Chat panel modes and models are **fetched at runtime** after you connect.
 
 | Config file | Purpose | Typical path |
 |-------------|---------|--------------|
-| `config.toml` | xcoder app: default provider, launch command, UI options | Windows: `%APPDATA%\xcoder\config.toml`<br>Linux/macOS: `~/.config/xcoder/config.toml` |
+| `config.toml` | xcoder app: default provider, launch command, health check | Windows: `%APPDATA%\xcoder\config.toml`<br>Linux/macOS: `~/.config/xcoder/config.toml` |
 | `config.toml` (CodeWhale) | CodeWhale native: API key, default model, approval mode | `~/.codewhale/config.toml` |
 | `opencode.json` | OpenCode native: providers, models, permissions | `~/.config/opencode/opencode.json` |
 
@@ -247,13 +248,6 @@ args = ["serve", "--http", "--port", "7878", "--insecure"]
 config_path = "~/.codewhale/config.toml"
 health_cmd = ["codewhale", "doctor", "--json"]
 
-  [providers.ui_options]
-  modes = ["plan", "agent", "yolo"]
-  default_mode = "agent"
-  approval_modes = ["suggest", "auto", "never"]
-  models = ["deepseek-v4-pro", "deepseek-v4-flash", "auto"]
-  default_model = "deepseek-v4-pro"
-
 # ── OpenCode ───────────────────────────────────────────
 [[providers]]
 id = "opencode"
@@ -262,10 +256,6 @@ command = "opencode"
 args = ["serve", "--hostname", "127.0.0.1", "--port", "4096"]
 config_path = "~/.config/opencode/opencode.json"
 health_cmd = ["opencode", "--version"]
-
-  [providers.ui_options]
-  modes = ["build", "plan"]
-  default_mode = "build"
 ```
 
 Field reference:
@@ -274,7 +264,15 @@ Field reference:
 - `command` / `args`: command xcoder runs when you click Connect (ports must match `config_path`)
 - `config_path`: native config path for that provider; `~` is expanded
 - `health_cmd`: health check before connecting
-- `ui_options`: modes and models shown in chat dropdowns (names must match native config)
+
+After connecting, **modes** and **models** in the chat panel are fetched at runtime:
+
+| Provider | Mode source | Model source | Default model |
+|----------|-------------|--------------|---------------|
+| **CodeWhale** | Fixed `plan` / `agent` / `yolo` | `codewhale model list` | `doctor --json` → `default_text_model` |
+| **OpenCode** | `GET /agent` | Provider API + `~/.config/opencode/opencode.json` | First connected provider/model, or `opencode.json` `model` |
+
+If you add or change providers in `opencode.json`, click **Disconnect** then **Connect** so xcoder restarts the OpenCode runtime and refreshes the model list.
 
 If `codewhale` / `opencode` is not on PATH, use an absolute path in `command`, for example:
 
@@ -326,6 +324,8 @@ codewhale doctor
 codewhale doctor --json
 ```
 
+`default_text_model` is also used as the initial model in xcoder's chat panel after you click **Connect** (the full list comes from `codewhale model list`).
+
 ### 3. OpenCode config (`opencode.json`)
 
 Global config path: `~/.config/opencode/opencode.json` (you can also place `opencode.json` in the project root to override global settings).
@@ -358,7 +358,8 @@ Notes:
 - Set `apiKey` to your DeepSeek platform key (https://platform.deepseek.com)
 - Model keys must be `deepseek-v4-pro` / `deepseek-v4-flash` — **not** `v4-pro` (that causes API 400 errors)
 - `model` format is `providerID/modelID`, e.g. `deepseek/deepseek-v4-pro`
-- When connected to OpenCode, the model comes from `opencode.json`; the chat panel does not show a model dropdown
+- After connecting, xcoder reads providers and models from the OpenCode API and merges `opencode.json`; use the **provider** and **model** dropdowns in the chat panel to switch
+- Custom providers (e.g. `zhipu-coding`) must appear in `opencode.json` **and** be loaded by OpenCode (`connected`); reconnect if you edit the config while xcoder is already connected
 
 Verify:
 
@@ -370,9 +371,9 @@ opencode serve --hostname 127.0.0.1 --port 4096
 ### Configuration overview
 
 ```
-~/.config/xcoder/config.toml          ← xcoder: provider, launch args, UI options
-        │
-        ├─ config_path ──→ ~/.codewhale/config.toml     ← API key, models, approval
+~/.config/xcoder/config.toml          ← xcoder: provider, launch args, health check
+        │                                 (modes/models fetched at runtime after connect)
+        ├─ config_path ──→ ~/.codewhale/config.toml     ← API key, default model, approval
         │
         └─ config_path ──→ ~/.config/opencode/opencode.json  ← providers, models, permissions
 
@@ -423,6 +424,7 @@ This pre-installs NSIS tools to `%LOCALAPPDATA%\tauri\NSIS`. You can also use th
 | "codewhale/opencode not found" on connect | Install the CLI globally, or set an absolute `.cmd` / `.exe` path in `config.toml` `command` |
 | CMD window flashes on connect (older builds) | Fixed via `CREATE_NO_WINDOW` for child processes; rebuild with the latest code |
 | OpenCode connect fails | **Open a project** first; ensure `opencode.json` port matches `config.toml` `args` |
+| OpenCode provider/model missing in chat | Edit `opencode.json`, then **Disconnect → Connect** to restart the runtime; custom providers need valid `apiKey` / `opencode auth login` |
 | Chat errors / API 400 | Use model id `deepseek-v4-pro`, not `v4-pro` |
 | WiX/NSIS download timeout on build | Run `npm run tauri:setup-bundle-tools`, then build again |
 

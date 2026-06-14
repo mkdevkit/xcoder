@@ -11,8 +11,13 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const providerId = useChatStore((state) => state.providerId);
-  const streaming = useChatStore((state) => state.streaming);
-  const messages = useChatStore((state) => state.messages);
+  const streaming = useChatStore(
+    (state) =>
+      state.providerStates[state.providerId]?.streaming ?? false,
+  );
+  const messages = useChatStore(
+    (state) => state.providerStates[state.providerId]?.messages ?? [],
+  );
   const assistantLabel = getProviderLabel(providerId);
   const isUser = message.role === "user";
   const isTool = message.role === "tool";

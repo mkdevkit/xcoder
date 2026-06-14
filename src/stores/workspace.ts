@@ -258,6 +258,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       explorerRefreshKey: get().explorerRefreshKey + 1,
     });
     await get().startWorkspaceWatch(selected);
+    const { useChatStore } = await import("./chat");
+    void useChatStore.getState().onProjectOpened(selected);
   },
 
   openFile: async (path) => {

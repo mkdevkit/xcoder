@@ -89,25 +89,7 @@ impl Default for AppConfig {
                         "doctor".to_string(),
                         "--json".to_string(),
                     ],
-                    ui_options: Some(UiOptions {
-                        modes: vec![
-                            "plan".to_string(),
-                            "agent".to_string(),
-                            "yolo".to_string(),
-                        ],
-                        default_mode: "agent".to_string(),
-                        approval_modes: vec![
-                            "suggest".to_string(),
-                            "auto".to_string(),
-                            "never".to_string(),
-                        ],
-                        models: vec![
-                            "deepseek-v4-pro".to_string(),
-                            "deepseek-v4-flash".to_string(),
-                            "auto".to_string(),
-                        ],
-                        default_model: "deepseek-v4-pro".to_string(),
-                    }),
+                    ui_options: None,
                 },
                 ProviderConfig {
                     id: "opencode".to_string(),
@@ -122,16 +104,7 @@ impl Default for AppConfig {
                     ],
                     config_path: Some("~/.config/opencode/opencode.json".to_string()),
                     health_cmd: vec!["opencode".to_string(), "--version".to_string()],
-                    ui_options: Some(UiOptions {
-                        modes: vec![
-                            "build".to_string(),
-                            "plan".to_string(),
-                        ],
-                        default_mode: "build".to_string(),
-                        approval_modes: vec![],
-                        models: vec![],
-                        default_model: "".to_string(),
-                    }),
+                    ui_options: None,
                 },
             ],
         }

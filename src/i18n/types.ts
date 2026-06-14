@@ -45,6 +45,7 @@ export type TranslationKey =
   | "explorer.noFolder"
   | "chat.connect"
   | "chat.disconnect"
+  | "chat.restart"
   | "chat.send"
   | "chat.sending"
   | "chat.newSession"

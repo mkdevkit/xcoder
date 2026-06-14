@@ -5,13 +5,14 @@ import {
   RichChatComposer,
   type RichChatComposerHandle,
 } from "../../components/RichChatComposer";
-import { useChatStore } from "../../stores/chat";
+import { useChatStore, useActiveProviderChat } from "../../stores/chat";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useChatInputDrop } from "../../hooks/useChatInputDrop";
 import { getProviderLabel } from "../../utils/agentProvider";
 import {
   deriveOpencodeVendors,
+  formatOpencodeVendorLabel,
   modelsForOpencodeVendor,
 } from "../../utils/opencodeModels";
 import { isTauri } from "../../utils/tauri";
@@ -35,27 +36,31 @@ export function ChatPanel() {
     pendingApproval,
     error,
     initialized,
+    opencodeModelCatalog,
+    opencodeConnectedProviders,
+    opencodeVendor,
+    codewhaleModelCatalog,
+  } = useActiveProviderChat();
+  const {
     loadConfig,
     setProvider,
     connectRuntime,
     disconnectRuntime,
+    restartRuntime,
     selectThread,
     createNewThread,
     deleteThread,
     setMode,
     setModel,
     setOpencodeVendor,
-    opencodeModelCatalog,
-    opencodeVendor,
     sendMessage,
     approve,
     setupEventListener,
-    getActiveProvider,
   } = useChatStore();
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
   const canChat = Boolean(rootPath && runtime.running && thread);
-  const canCompose = Boolean(rootPath && !streaming);
+  const canCompose = Boolean(rootPath && runtime.running && !streaming);
 
   const handleAttachReferences = useCallback((refs: string[]) => {
     composerRef.current?.insertReferences(refs);
@@ -75,22 +80,25 @@ export function ChatPanel() {
     onFocus: () => composerRef.current?.focus(),
   });
 
-  const activeProvider = getActiveProvider();
-  const uiOptions = activeProvider?.ui_options;
   const modeOptions =
-    dynamicModes.length > 0 ? dynamicModes : (uiOptions?.modes ?? ["agent"]);
+    dynamicModes.length > 0 ? dynamicModes : ["agent"];
   const isOpencode = providerId === "opencode";
-  const opencodeVendors = deriveOpencodeVendors(opencodeModelCatalog);
+  const isCodewhale = providerId === "codewhale";
+  const opencodeVendors = deriveOpencodeVendors(
+    opencodeModelCatalog,
+    opencodeConnectedProviders,
+  );
   const opencodeModels = modelsForOpencodeVendor(
     opencodeModelCatalog,
     opencodeVendor,
   );
-  const codewhaleModelOptions = uiOptions?.models ?? [];
   const showOpencodeVendor =
     isOpencode && runtime.running && opencodeVendors.length > 0;
   const showModelSelect = isOpencode
     ? opencodeModels.length > 0
-    : codewhaleModelOptions.length > 0;
+    : isCodewhale
+      ? codewhaleModelCatalog.length > 0
+      : false;
   const providerLabel = getProviderLabel(providerId);
 
   const composerPlaceholder = !rootPath
@@ -149,7 +157,7 @@ export function ChatPanel() {
             <select
               className="provider-select"
               value={providerId}
-              onChange={(e) => setProvider(e.target.value).catch(console.error)}
+              onChange={(e) => setProvider(e.target.value)}
               disabled={streaming}
             >
               {config.providers.map((provider) => (
@@ -161,57 +169,75 @@ export function ChatPanel() {
           )}
         </div>
         <div className="chat-controls">
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
-            disabled={!initialized}
-          >
-            {modeOptions.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-          {showOpencodeVendor && (
-            <select
-              className="provider-vendor-select"
-              value={opencodeVendor}
-              onChange={(e) => setOpencodeVendor(e.target.value)}
-              disabled={!initialized || streaming}
-              title="Model provider"
+          <div className="chat-runtime-actions">
+            <button
+              className={runtime.running ? "" : "primary"}
+              onClick={handleConnect}
+              disabled={streaming}
             >
-              {opencodeVendors.map((vendor) => (
-                <option key={vendor.id} value={vendor.id}>
-                  {vendor.name}
+              {runtime.running ? t("chat.disconnect") : t("chat.connect")}
+            </button>
+            {runtime.running && (
+              <button
+                type="button"
+                onClick={() => restartRuntime(rootPath ?? undefined).catch(console.error)}
+                disabled={streaming}
+                title={t("chat.restart")}
+              >
+                {t("chat.restart")}
+              </button>
+            )}
+          </div>
+          <div className="chat-controls-selects">
+            <select
+              className="chat-mode-select"
+              value={mode}
+              onChange={(e) => setMode(e.target.value)}
+              disabled={!initialized}
+            >
+              {modeOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
                 </option>
               ))}
             </select>
-          )}
-          {showModelSelect && (
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={!initialized || streaming}
-            >
-              {isOpencode
-                ? opencodeModels.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.modelName}
-                    </option>
-                  ))
-                : codewhaleModelOptions.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-            </select>
-          )}
-          <button
-            className={runtime.running ? "" : "primary"}
-            onClick={handleConnect}
-          >
-            {runtime.running ? t("chat.disconnect") : t("chat.connect")}
-          </button>
+            {showOpencodeVendor && (
+              <select
+                className="chat-vendor-select"
+                value={opencodeVendor}
+                onChange={(e) => setOpencodeVendor(e.target.value)}
+                disabled={!initialized || streaming}
+                title="Model provider"
+              >
+                {opencodeVendors.map((vendor) => (
+                  <option key={vendor.id} value={vendor.id}>
+                    {formatOpencodeVendorLabel(vendor)}
+                  </option>
+                ))}
+              </select>
+            )}
+            {showModelSelect && (
+              <select
+                className="chat-model-select"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={!initialized || streaming}
+                title={model}
+              >
+                {isOpencode
+                  ? opencodeModels.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.modelName}
+                      </option>
+                    ))
+                  : codewhaleModelCatalog.map((item) => (
+                      <option key={`${item.value}-${item.provider}`} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+              </select>
+            )}
+          </div>
         </div>
         {runtime.running && (
           <div className="chat-thread-row">
@@ -343,15 +369,38 @@ export function ChatPanel() {
         .provider-select {
           min-width: 120px;
         }
-        .provider-vendor-select {
-          min-width: 120px;
-        }
         .chat-controls {
           display: flex;
+          flex-direction: column;
           gap: 8px;
           margin-top: 8px;
+          min-width: 0;
+        }
+        .chat-controls-selects {
+          display: flex;
+          gap: 8px;
+          min-width: 0;
           flex-wrap: wrap;
-          align-items: center;
+        }
+        .chat-controls-selects select {
+          flex: 1 1 0;
+          min-width: 72px;
+          max-width: 100%;
+          text-overflow: ellipsis;
+        }
+        .chat-mode-select {
+          flex: 0 1 96px;
+        }
+        .chat-vendor-select {
+          flex: 1 1 120px;
+        }
+        .chat-model-select {
+          flex: 2 1 160px;
+        }
+        .chat-runtime-actions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
         }
         .chat-thread-row {
           display: flex;

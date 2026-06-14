@@ -217,40 +217,16 @@ args = ["serve", "--http", "--port", "7878"]
 config_path = "~/.codewhale/config.toml"
 health_cmd = ["codewhale", "doctor", "--json"]
 
-  [providers.ui_options]
-  modes = ["plan", "agent", "yolo"]
-  default_mode = "agent"
-  approval_modes = ["suggest", "auto", "never"]
-  models = ["deepseek-v4-pro", "deepseek-v4-flash", "auto"]
-
 [[providers]]
 id = "opencode"
-type = "acp"
+type = "http"
 command = "opencode"
-args = ["acp"]
+args = ["serve", "--hostname", "127.0.0.1", "--port", "4096"]
 config_path = "~/.config/opencode/opencode.json"
-
-  [providers.ui_options]
-  agents = ["build", "plan", "coder"]
-  default_agent = "build"
-
-[[providers]]
-id = "cursor"
-type = "cli"
-command = "cursor-agent"
-env = { CURSOR_API_KEY = "${CURSOR_API_KEY}" }
+health_cmd = ["opencode", "--version"]
 ```
 
-### 项目级 `.xcoder/config.toml`（可选）
-
-```toml
-provider = "codewhale"
-mode = "agent"
-model = "deepseek-v4-pro"
-rules = ["AGENTS.md", ".cursor/rules/*"]
-```
-
-UI 上的选项（Agent 模式、模型、审批策略）从 `providers.ui_options` 渲染；修改时写回对应工具的原生配置文件，而不是维护第二套语义。
+连接后，聊天面板的模式与模型从运行时动态获取（CodeWhale：`codewhale model list` + `doctor --json`；OpenCode：`/agent` + provider API）。
 
 ---
 
