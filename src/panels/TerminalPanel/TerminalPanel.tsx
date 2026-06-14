@@ -125,6 +125,7 @@ export function TerminalPanel() {
         }
         .terminal-instance,
         .terminal-instance .xterm {
+          width: 100%;
           height: 100%;
         }
         .terminal-sidebar {

@@ -10,7 +10,7 @@ use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
     delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
     list_provider_models, list_sessions, load_session_history, is_session_busy,
-    normalize_event as opencode_normalize_event, send_prompt, update_session_title,
+    normalize_event as opencode_normalize_event, poll_turn_state, send_prompt, update_session_title,
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
 };
@@ -972,12 +972,40 @@ pub async fn opencode_get_pending_approval(
 pub async fn opencode_load_session_history(
     session_id: String,
     workspace: Option<String>,
+    limit: Option<u32>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<Vec<HistoryMessage>, String> {
     let url = opencode_resolve_service_url(&state).await?;
     let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
-    load_session_history(&client, &url, &session_id, workspace.as_deref()).await
+    load_session_history(
+        &client,
+        &url,
+        &session_id,
+        workspace.as_deref(),
+        limit,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn opencode_poll_turn(
+    session_id: String,
+    workspace: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<crate::agent::opencode::OpencodeTurnPoll, String> {
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
+    let client = crate::agent::opencode::http_client()?;
+    poll_turn_state(
+        &client,
+        &url,
+        &session_id,
+        workspace.as_deref(),
+        limit,
+    )
+    .await
 }
 
 #[tauri::command]

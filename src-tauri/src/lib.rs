@@ -64,6 +64,7 @@ pub fn run() {
             commands::agent::opencode_subscribe_events,
             commands::agent::opencode_list_sessions,
             commands::agent::opencode_load_session_history,
+            commands::agent::opencode_poll_turn,
             commands::agent::opencode_is_session_busy,
             commands::agent::opencode_get_pending_approval,
             commands::agent::opencode_delete_session,

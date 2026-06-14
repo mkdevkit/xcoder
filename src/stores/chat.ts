@@ -338,12 +338,37 @@ async function saveProviderChatLocally(
   });
 }
 
+const STREAMING_POLL_MS: Record<string, number> = {
+  opencode: 300,
+};
+const DEFAULT_STREAMING_POLL_MS = 1000;
+const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 50;
+const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 120;
+
+function streamingPollIntervalMs(providerId: string) {
+  return STREAMING_POLL_MS[providerId] ?? DEFAULT_STREAMING_POLL_MS;
+}
+
+function opencodeStreamingMessageLimit(messages: ChatMessage[]) {
+  const estimatedEntries = Math.max(
+    12,
+    Math.ceil(messages.length / 3) + 10,
+  );
+  return Math.min(
+    OPENCODE_STREAMING_MESSAGE_LIMIT_MAX,
+    Math.max(OPENCODE_STREAMING_MESSAGE_LIMIT_MIN, estimatedEntries),
+  );
+}
 const historySyncTimers = new Map<string, ReturnType<typeof setInterval>>();
-const historySyncChains = new Map<string, Promise<void>>();
+const historySyncInFlight = new Set<string>();
 const historySyncSnapshots = new Map<
   string,
   { count: number; textLen: number }
 >();
+const historyStableCounts = new Map<string, number>();
+const completeTurnAttemptCounts = new Map<string, number>();
+const historyIdleSince = new Map<string, number>();
+const finishingTurnProviders = new Set<string>();
 
 function historySnapshot(history: HistoryMessage[]) {
   return {
@@ -354,6 +379,18 @@ function historySnapshot(history: HistoryMessage[]) {
 
 function isPollOnlyMessageProvider(providerId: string) {
   return providerId === "opencode";
+}
+
+function isPollOnlyContentEvent(type: string) {
+  return (
+    type === "text_delta" ||
+    type === "text_snapshot" ||
+    type === "reasoning_delta" ||
+    type === "reasoning_snapshot" ||
+    type === "tool_call" ||
+    type === "tool_result" ||
+    type === "file_change"
+  );
 }
 
 function finalizeTurnMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -370,7 +407,7 @@ function finalizeTurnMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 async function ensureEventSubscription(providerId: string, _threadId: string) {
-  if (!isTauri() || isPollOnlyMessageProvider(providerId)) return;
+  if (!isTauri()) return;
   try {
     await tauriInvoke(getAgentCommands(providerId).subscribeEvents, {
       threadId: _threadId,
@@ -390,19 +427,12 @@ async function syncMessagesFromServer(
   providerId: string,
   force = false,
 ) {
-  const previous = historySyncChains.get(providerId) ?? Promise.resolve();
-  const current = previous
-    .catch(() => undefined)
-    .then(() =>
-      syncMessagesFromServerOnce(get, set, providerId, force),
-    );
-  historySyncChains.set(providerId, current);
+  if (historySyncInFlight.has(providerId)) return;
+  historySyncInFlight.add(providerId);
   try {
-    await current;
+    await syncMessagesFromServerOnce(get, set, providerId, force);
   } finally {
-    if (historySyncChains.get(providerId) === current) {
-      historySyncChains.delete(providerId);
-    }
+    historySyncInFlight.delete(providerId);
   }
 }
 
@@ -422,18 +452,42 @@ async function syncMessagesFromServerOnce(
 
   const commands = getAgentCommands(providerId);
   const threadId = slice.thread.id;
+  const useLimitedOpencodePoll =
+    providerId === "opencode" && slice.streaming;
+  const syncStartedAt = import.meta.env.DEV ? performance.now() : 0;
   try {
-    const history = await tauriInvoke<HistoryMessage[]>(
-      commands.loadThreadHistory,
-      providerId === "opencode"
-        ? opencodeSessionArgs(get, providerId, threadId)
-        : { threadId },
-    );
+    let history: HistoryMessage[] = [];
+    let polledBusy: boolean | undefined;
+    let polledPending: { id: string; description: string } | null | undefined;
+
+    if (useLimitedOpencodePoll) {
+      const poll = await tauriInvoke<{
+        messages: HistoryMessage[];
+        busy: boolean;
+        pending: { id: string; description: string } | null;
+      }>("opencode_poll_turn", {
+        sessionId: threadId,
+        ...opencodeSessionArgs(get, providerId, threadId),
+        limit: opencodeStreamingMessageLimit(slice.messages),
+      });
+      history = poll.messages;
+      polledBusy = poll.busy;
+      polledPending = poll.pending;
+    } else {
+      history = await tauriInvoke<HistoryMessage[]>(
+        commands.loadThreadHistory,
+        providerId === "opencode"
+          ? opencodeSessionArgs(get, providerId, threadId)
+          : { threadId },
+      );
+    }
+
     const latest = getProviderSlice(get, providerId);
     if (!latest.thread || latest.thread.id !== threadId) return;
 
     const merged = mergeServerMessagesWithLocal(latest.messages, history, {
       pollOnly: isPollOnlyMessageProvider(providerId),
+      limitedRemote: useLimitedOpencodePoll,
     });
     const changed =
       merged.length !== latest.messages.length ||
@@ -458,9 +512,25 @@ async function syncMessagesFromServerOnce(
     const previousSnapshot = historySyncSnapshots.get(providerId);
     historySyncSnapshots.set(providerId, snapshot);
 
-    if (providerId === "opencode" && commands.getPendingApproval) {
+    if (providerId === "opencode") {
+      if (polledPending?.id) {
+        cancelScheduledCompleteTurn(providerId);
+        historyStableCounts.delete(providerId);
+        patchProvider(set, providerId, {
+          pendingApproval: polledPending,
+          streaming: true,
+        });
+        ensureStreamingHistorySync(get, set, providerId);
+        return;
+      }
+      const afterPendingCheck = getProviderSlice(get, providerId);
+      if (afterPendingCheck.pendingApproval) {
+        patchProvider(set, providerId, { pendingApproval: null });
+      }
+    } else if (commands.getPendingApproval) {
       if (await runPendingApprovalCheck(get, set, providerId)) {
         cancelScheduledCompleteTurn(providerId);
+        historyStableCounts.delete(providerId);
         ensureStreamingHistorySync(get, set, providerId);
         return;
       }
@@ -470,23 +540,54 @@ async function syncMessagesFromServerOnce(
     if (
       active.streaming &&
       providerId === "opencode" &&
-      commands.isSessionBusy &&
-      active.thread?.id === threadId
+      active.thread?.id === threadId &&
+      !finishingTurnProviders.has(providerId)
     ) {
       try {
-        const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-          ...opencodeSessionArgs(get, providerId, threadId),
-        });
+        const busy =
+          polledBusy ??
+          (await tauriInvoke<boolean>(commands.isSessionBusy!, {
+            ...opencodeSessionArgs(get, providerId, threadId),
+          }));
         const historyStable =
           previousSnapshot !== undefined &&
           previousSnapshot.count === snapshot.count &&
           previousSnapshot.textLen === snapshot.textLen;
-        if (!busy && historyStable) {
-          scheduleCompleteTurn(get, set, providerId, 600);
+        const stableCount = historyStable
+          ? (historyStableCounts.get(providerId) ?? 0) + 1
+          : 0;
+        historyStableCounts.set(providerId, stableCount);
+
+        if (historyStable) {
+          if (!historyIdleSince.has(providerId)) {
+            historyIdleSince.set(providerId, Date.now());
+          }
+        } else {
+          historyIdleSince.delete(providerId);
         }
-      } catch {
-        // ignore
+
+        if (!busy) {
+          historyIdleSince.delete(providerId);
+          await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+          return;
+        }
+
+        const idleSince = historyIdleSince.get(providerId);
+        if (idleSince !== undefined && Date.now() - idleSince >= 2000) {
+          await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+          return;
+        }
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn(`[chat sync] ${providerId} busy check failed:`, error);
+        }
       }
+    }
+
+    if (import.meta.env.DEV && providerId === "opencode" && syncStartedAt > 0) {
+      console.debug(
+        `[chat sync] opencode ${Math.round(performance.now() - syncStartedAt)}ms`,
+      );
     }
   } catch (error) {
     if (import.meta.env.DEV) {
@@ -510,7 +611,7 @@ function startStreamingHistorySync(
     providerId,
     setInterval(() => {
       void syncMessagesFromServer(get, set, providerId, true);
-    }, 1000),
+    }, streamingPollIntervalMs(providerId)),
   );
 }
 
@@ -535,7 +636,29 @@ function stopStreamingHistorySync(providerId: string) {
     clearInterval(timer);
     historySyncTimers.delete(providerId);
   }
+  historySyncInFlight.delete(providerId);
   historySyncSnapshots.delete(providerId);
+  historyStableCounts.delete(providerId);
+  historyIdleSince.delete(providerId);
+  completeTurnAttemptCounts.delete(providerId);
+}
+
+async function tryFinishOpencodeTurn(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  options?: { force?: boolean },
+) {
+  cancelScheduledCompleteTurn(providerId);
+  if (await runPendingApprovalCheck(get, set, providerId)) {
+    ensureStreamingHistorySync(get, set, providerId);
+    return;
+  }
+  await completeTurnForProvider(get, set, providerId, options);
 }
 
 const completeTurnTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -558,50 +681,57 @@ async function completeTurnForProvider(
   resolvedId: string,
   options?: { force?: boolean },
 ) {
-  if (!options?.force && (await runPendingApprovalCheck(get, set, resolvedId))) {
+  if (finishingTurnProviders.has(resolvedId)) return;
+  finishingTurnProviders.add(resolvedId);
+  try {
+    if (!options?.force && (await runPendingApprovalCheck(get, set, resolvedId))) {
+      cancelScheduledCompleteTurn(resolvedId);
+      patchProvider(set, resolvedId, { streaming: true });
+      ensureStreamingHistorySync(get, set, resolvedId);
+      return;
+    }
+
+    const before = getProviderSlice(get, resolvedId);
+    if (before.thread && before.streaming) {
+      await syncMessagesFromServer(get, set, resolvedId, true);
+    }
+    stopStreamingHistorySync(resolvedId);
     cancelScheduledCompleteTurn(resolvedId);
-    patchProvider(set, resolvedId, { streaming: true });
-    ensureStreamingHistorySync(get, set, resolvedId);
-    return;
-  }
+    const current = getProviderSlice(get, resolvedId);
+    patchProvider(set, resolvedId, {
+      streaming: false,
+      messages: finalizeTurnMessages(current.messages),
+      error: null,
+      pendingApproval: null,
+    });
 
-  const before = getProviderSlice(get, resolvedId);
-  if (before.thread && before.streaming) {
-    await syncMessagesFromServer(get, set, resolvedId, true);
-  }
-  stopStreamingHistorySync(resolvedId);
-  const current = getProviderSlice(get, resolvedId);
-  patchProvider(set, resolvedId, {
-    streaming: false,
-    messages: finalizeTurnMessages(current.messages),
-    error: null,
-    pendingApproval: null,
-  });
-
-  const updated = getProviderSlice(get, resolvedId);
-  const workspace = updated.thread?.workspace ?? updated.chatWorkspace;
-  if (workspace && updated.thread) {
-    const title = sessionTitleFromMessages(
-      updated.messages,
-      updated.thread.id,
-    );
-    persistLocalChatSession({
-      workspace,
-      providerId: resolvedId,
-      sessionId: updated.thread.id,
-      title,
-      mode: updated.mode,
-      model: updated.model,
-      messages: updated.messages,
-    }).catch(() => undefined);
-    const commands = getAgentCommands(resolvedId);
-    if (commands.updateThreadTitle && !isGenericSessionTitle(title)) {
-      tauriInvoke(commands.updateThreadTitle, {
+    const updated = getProviderSlice(get, resolvedId);
+    const workspace = updated.thread?.workspace ?? updated.chatWorkspace;
+    if (workspace && updated.thread) {
+      const title = sessionTitleFromMessages(
+        updated.messages,
+        updated.thread.id,
+      );
+      persistLocalChatSession({
+        workspace,
+        providerId: resolvedId,
         sessionId: updated.thread.id,
         title,
+        mode: updated.mode,
+        model: updated.model,
+        messages: updated.messages,
       }).catch(() => undefined);
+      const commands = getAgentCommands(resolvedId);
+      if (commands.updateThreadTitle && !isGenericSessionTitle(title)) {
+        tauriInvoke(commands.updateThreadTitle, {
+          sessionId: updated.thread.id,
+          title,
+        }).catch(() => undefined);
+      }
+      get().loadThreads(workspace, resolvedId).catch(() => undefined);
     }
-    get().loadThreads(workspace, resolvedId).catch(() => undefined);
+  } finally {
+    finishingTurnProviders.delete(resolvedId);
   }
 }
 
@@ -616,7 +746,6 @@ async function runPendingApprovalCheck(
 ) {
   const slice = getProviderSlice(get, resolvedId);
   if (!slice.streaming) return false;
-  if (slice.pendingApproval) return true;
 
   const commands = getAgentCommands(resolvedId);
   if (commands.getPendingApproval && slice.thread) {
@@ -630,7 +759,7 @@ async function runPendingApprovalCheck(
           ? opencodeSessionArgs(get, resolvedId, slice.thread.id)
           : { threadId: slice.thread.id },
       );
-      if (pending) {
+      if (pending?.id) {
         cancelScheduledCompleteTurn(resolvedId);
         patchProvider(set, resolvedId, {
           pendingApproval: pending,
@@ -638,9 +767,17 @@ async function runPendingApprovalCheck(
         });
         return true;
       }
+      if (slice.pendingApproval) {
+        patchProvider(set, resolvedId, { pendingApproval: null });
+      }
+      return false;
     } catch {
-      // ignore
+      return Boolean(slice.pendingApproval?.id);
     }
+  }
+
+  if (slice.pendingApproval) {
+    patchProvider(set, resolvedId, { pendingApproval: null });
   }
   return false;
 }
@@ -668,6 +805,26 @@ function scheduleCompleteTurn(
           last?.role === "assistant" &&
           !last.content.trim()
         ) {
+          const commands = getAgentCommands(resolvedId);
+          if (commands.isSessionBusy && slice.thread) {
+            try {
+              const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
+                ...opencodeSessionArgs(get, resolvedId, slice.thread.id),
+              });
+              if (!busy) {
+                await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
+                return;
+              }
+            } catch {
+              // keep waiting for server history to catch up
+            }
+          }
+          const attempts = (completeTurnAttemptCounts.get(resolvedId) ?? 0) + 1;
+          completeTurnAttemptCounts.set(resolvedId, attempts);
+          if (attempts >= 6) {
+            await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
+            return;
+          }
           scheduleCompleteTurn(get, set, resolvedId, 1500);
           patchProvider(set, resolvedId, { streaming: true });
           return;
@@ -680,6 +837,15 @@ function scheduleCompleteTurn(
               ...opencodeSessionArgs(get, resolvedId, slice.thread.id),
             });
             if (busy) {
+              const attempts =
+                (completeTurnAttemptCounts.get(resolvedId) ?? 0) + 1;
+              completeTurnAttemptCounts.set(resolvedId, attempts);
+              if (attempts >= 6) {
+                await tryFinishOpencodeTurn(get, set, resolvedId, {
+                  force: true,
+                });
+                return;
+              }
               scheduleCompleteTurn(get, set, resolvedId, 1500);
               patchProvider(set, resolvedId, { streaming: true });
               return;
@@ -688,8 +854,8 @@ function scheduleCompleteTurn(
             // ignore
           }
         }
-        if (await runPendingApprovalCheck(get, set, resolvedId)) return;
-        await completeTurnForProvider(get, set, resolvedId);
+        completeTurnAttemptCounts.delete(resolvedId);
+        await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
       })();
     }, delayMs),
   );
@@ -1352,6 +1518,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const { providerId } = get();
     cancelScheduledCompleteTurn(providerId);
+    completeTurnAttemptCounts.delete(providerId);
+    historyStableCounts.delete(providerId);
+    historyIdleSince.delete(providerId);
     const slice = getProviderSlice(get, providerId);
     const userMsg: ChatMessage = {
       id: uid(),
@@ -1589,7 +1758,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           );
           if (!mapped) return;
           const resolvedId = eventProviderId || get().providerId;
-          if (isPollOnlyMessageProvider(resolvedId)) return;
+          if (
+            isPollOnlyMessageProvider(resolvedId) &&
+            isPollOnlyContentEvent(mapped.type)
+          ) {
+            return;
+          }
 
           if (mapped.type === "text_delta") {
             cancelScheduledCompleteTurn(resolvedId);
@@ -1815,18 +1989,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           if (mapped.type === "session_busy") {
+            const activeSlice = getProviderSlice(get, resolvedId);
+            if (!activeSlice.streaming) return;
             cancelScheduledCompleteTurn(resolvedId);
             patchProvider(set, resolvedId, { streaming: true });
             ensureStreamingHistorySync(get, set, resolvedId);
           }
 
           if (mapped.type === "session_idle" || mapped.type === "turn_completed") {
-            scheduleCompleteTurn(
-              get,
-              set,
-              resolvedId,
-              mapped.type === "session_idle" ? 400 : 1500,
-            );
+            const activeSlice = getProviderSlice(get, resolvedId);
+            if (!activeSlice.streaming) return;
+            cancelScheduledCompleteTurn(resolvedId);
+            void tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
           }
 
           if (mapped.type === "turn_aborted") {
@@ -1876,7 +2050,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         event.payload,
       );
       const resolvedId = eventProviderId || get().providerId;
-      if (isPollOnlyMessageProvider(resolvedId)) return;
       const slice = getProviderSlice(get, resolvedId);
       if (
         message.includes("SSE stream error") ||
@@ -1887,6 +2060,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         return;
       }
+      if (isPollOnlyMessageProvider(resolvedId)) return;
       patchProvider(set, resolvedId, {
         error: message,
         streaming: false,
@@ -1901,6 +2075,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
   },
 }));
+
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  const debugWindow = window as Window & {
+    __xcoderChat?: {
+      getState: typeof useChatStore.getState;
+      diagnoseOpencode: () => Promise<Record<string, unknown>>;
+    };
+  };
+  debugWindow.__xcoderChat = {
+    getState: useChatStore.getState,
+    diagnoseOpencode: async () => {
+      const slice = useChatStore.getState().providerStates.opencode;
+      const sessionId = slice?.thread?.id;
+      if (!sessionId) {
+        return { error: "no thread" };
+      }
+      const workspace =
+        slice.thread?.workspace ?? slice.chatWorkspace ?? undefined;
+      try {
+        const [poll, pending] = await Promise.all([
+          tauriInvoke<{
+            messages: HistoryMessage[];
+            busy: boolean;
+            pending: { id: string; description: string } | null;
+          }>("opencode_poll_turn", {
+            sessionId,
+            workspace,
+            limit: 40,
+          }),
+          tauriInvoke<{ id: string; description: string } | null>(
+            "opencode_get_pending_approval",
+            { sessionId, workspace },
+          ),
+        ]);
+        return {
+          streaming: slice.streaming,
+          pendingApproval: slice.pendingApproval,
+          busy: poll.busy,
+          pending: poll.pending ?? pending,
+          pollMs: historyIdleSince.get("opencode")
+            ? Date.now() - (historyIdleSince.get("opencode") ?? Date.now())
+            : null,
+          messageCount: slice.messages.length,
+          polledMessages: poll.messages.length,
+        };
+      } catch (error) {
+        return {
+          streaming: slice.streaming,
+          pendingApproval: slice.pendingApproval,
+          error: String(error),
+        };
+      }
+    },
+  };
+}
 
 export function useActiveProviderChat() {
   return useChatStore(

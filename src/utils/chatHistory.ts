@@ -63,9 +63,51 @@ function latestAssistantText(messages: ChatMessage[]) {
 export function mergeServerMessagesWithLocal(
   local: ChatMessage[],
   history: HistoryMessage[],
-  options?: { pollOnly?: boolean },
+  options?: { pollOnly?: boolean; limitedRemote?: boolean },
 ): ChatMessage[] {
   const remote = mapHistoryToChatMessages(history);
+
+  if (options?.pollOnly && options?.limitedRemote && remote.length > 0) {
+    const anchorIndex = local.findIndex((msg) => msg.id === remote[0]?.id);
+    if (anchorIndex > 0) {
+      const mergedTail = mergeServerMessagesWithLocal(
+        local.slice(anchorIndex),
+        history,
+        { pollOnly: true },
+      );
+      return [...local.slice(0, anchorIndex), ...mergedTail];
+    }
+    if (anchorIndex < 0) {
+      const localUser = lastUserMessage(local);
+      const remoteUserIndex = localUser
+        ? remote.findIndex(
+            (msg) =>
+              msg.role === "user" &&
+              msg.content.trim() === localUser.content.trim(),
+          )
+        : -1;
+      if (remoteUserIndex > 0) {
+        let localUserIndex = -1;
+        for (let i = local.length - 1; i >= 0; i -= 1) {
+          if (local[i].role === "user") {
+            localUserIndex = i;
+            break;
+          }
+        }
+        if (localUserIndex >= 0) {
+          const anchor = Math.max(0, localUserIndex - remoteUserIndex);
+          const mergedTail = mergeServerMessagesWithLocal(
+            local.slice(anchor),
+            history,
+            { pollOnly: true },
+          );
+          return [...local.slice(0, anchor), ...mergedTail];
+        }
+      }
+      return local;
+    }
+  }
+
   const localUser = lastUserMessage(local);
 
   if (options?.pollOnly) {
@@ -112,6 +154,17 @@ function appendStreamingPlaceholder(
 ): ChatMessage[] {
   const lastLocal = local[local.length - 1];
   const lastRemote = remote[remote.length - 1];
+  const localTrailingPlaceholder =
+    lastLocal?.role === "assistant" && !lastLocal.content.trim();
+  if (!localTrailingPlaceholder) {
+    return remote;
+  }
+  if (
+    lastRemote &&
+    (lastRemote.role !== "assistant" || lastRemote.content.trim())
+  ) {
+    return remote;
+  }
   if (
     lastLocal?.role === "assistant" &&
     !lastLocal.content.trim() &&

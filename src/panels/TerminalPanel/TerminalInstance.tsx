@@ -3,6 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 import { useTerminalStore } from "../../stores/terminal";
+import {
+  safeFitTerminal,
+  scheduleTerminalFit,
+} from "../../utils/terminalFit";
 import { attachTerminalLinks } from "../../utils/terminalLinks";
 import { registerTerminal, unregisterTerminal } from "../../utils/terminalRegistry";
 import { tauriInvoke } from "../../utils/tauri";
@@ -18,10 +22,27 @@ export function TerminalInstance({ id, active }: TerminalInstanceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const activeRef = useRef(active);
   const markTerminalExited = useTerminalStore((state) => state.markTerminalExited);
 
+  activeRef.current = active;
+
+  const syncTerminalSize = () => {
+    const container = containerRef.current;
+    const fitAddon = fitAddonRef.current;
+    const term = terminalRef.current;
+    if (!container || !fitAddon || !term) return;
+    if (!safeFitTerminal(fitAddon, container)) return;
+    tauriInvoke("terminal_resize", {
+      id,
+      cols: term.cols,
+      rows: term.rows,
+    }).catch(() => undefined);
+  };
+
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -37,28 +58,26 @@ export function TerminalInstance({ id, active }: TerminalInstanceProps) {
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    fitAddon.fit();
+    term.open(container);
 
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
     registerTerminal(id, () => term.getSelection());
     const linkDisposables = attachTerminalLinks(term);
 
+    if (activeRef.current) {
+      scheduleTerminalFit(fitAddon, container, syncTerminalSize);
+    }
+
     const dataDisposable = term.onData((data) => {
       tauriInvoke("terminal_write", { id, data }).catch(console.error);
     });
 
     const resizeObserver = new ResizeObserver(() => {
-      if (!active) return;
-      fitAddon.fit();
-      tauriInvoke("terminal_resize", {
-        id,
-        cols: term.cols,
-        rows: term.rows,
-      }).catch(() => undefined);
+      if (!activeRef.current) return;
+      syncTerminalSize();
     });
-    resizeObserver.observe(containerRef.current);
+    resizeObserver.observe(container);
 
     const unlistenOutput = listen<TerminalOutputPayload>("terminal-output", (event) => {
       if (event.payload.id !== id) return;
@@ -85,19 +104,22 @@ export function TerminalInstance({ id, active }: TerminalInstanceProps) {
   }, [id, markTerminalExited]);
 
   useEffect(() => {
-    if (!active || !fitAddonRef.current || !terminalRef.current) return;
-    fitAddonRef.current.fit();
-    tauriInvoke("terminal_resize", {
-      id,
-      cols: terminalRef.current.cols,
-      rows: terminalRef.current.rows,
-    }).catch(() => undefined);
+    if (!active) return;
+    const container = containerRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!container || !fitAddon) return;
+    scheduleTerminalFit(fitAddon, container, syncTerminalSize);
   }, [active, id]);
 
   return (
     <div
       className="terminal-instance"
-      style={{ display: active ? "block" : "none" }}
+      style={{
+        position: "absolute",
+        inset: 0,
+        visibility: active ? "visible" : "hidden",
+        pointerEvents: active ? "auto" : "none",
+      }}
       ref={containerRef}
     />
   );

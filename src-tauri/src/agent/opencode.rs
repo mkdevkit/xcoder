@@ -114,6 +114,14 @@ fn with_directory(
     }
 }
 
+pub fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 pub async fn list_agents(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
     let response = client
         .get(format!("{url}/agent"))
@@ -814,14 +822,17 @@ pub async fn load_session_history(
     url: &str,
     session_id: &str,
     workspace: Option<&str>,
+    limit: Option<u32>,
 ) -> Result<Vec<HistoryMessage>, String> {
-    let response = with_directory(
+    let mut request = with_directory(
         client.get(format!("{url}/session/{session_id}/message")),
         workspace,
-    )
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    );
+    if let Some(limit) = limit {
+        request = request.query(&[("limit", limit.to_string())]);
+    }
+
+    let response = request.send().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -957,14 +968,154 @@ pub async fn load_session_history(
 }
 
 fn tool_part_is_active(part: &Value) -> bool {
-    if part.get("type").and_then(|v| v.as_str()) != Some("tool") {
+    let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if part_type != "tool" && part_type != "tool-call" {
         return false;
     }
     part.get("state")
         .and_then(|state| state.get("status"))
         .and_then(|v| v.as_str())
-        .map(|status| status == "running" || status == "pending")
+        .map(|status| {
+            matches!(
+                status,
+                "running" | "pending" | "in_progress" | "executing"
+            )
+        })
         .unwrap_or(false)
+}
+
+async fn session_status_type(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<Option<String>, String> {
+    let response = with_directory(
+        client.get(format!("{url}/session/status")),
+        workspace,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(json
+        .get(session_id)
+        .and_then(|status| status.get("type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
+}
+
+fn assistant_entry_is_active(entry: &Value) -> bool {
+    let info = entry.get("info").cloned().unwrap_or(Value::Null);
+    if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return false;
+    }
+
+    let parts = entry
+        .get("parts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if parts.iter().any(tool_part_is_active) {
+        return true;
+    }
+
+    if info
+        .get("time")
+        .and_then(|t| t.get("completed"))
+        .is_some()
+    {
+        return false;
+    }
+
+    let has_tool_part = parts.iter().any(|part| {
+        matches!(
+            part.get("type").and_then(|v| v.as_str()),
+            Some("tool") | Some("tool-call")
+        )
+    });
+    if has_tool_part {
+        return false;
+    }
+
+    let has_text = parts.iter().any(|part| {
+        part.get("type").and_then(|v| v.as_str()) == Some("text")
+            && part
+                .get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|text| !text.is_empty())
+    });
+    if has_text {
+        return false;
+    }
+
+    let has_reasoning = parts.iter().any(|part| {
+        part.get("type").and_then(|v| v.as_str()) == Some("reasoning")
+            && part
+                .get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|text| !text.is_empty())
+    });
+    if has_reasoning {
+        return false;
+    }
+
+    true
+}
+
+fn messages_indicate_busy(entries: &[Value]) -> bool {
+    for entry in entries.iter().rev() {
+        let info = entry.get("info").cloned().unwrap_or(Value::Null);
+        if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        return assistant_entry_is_active(entry);
+    }
+    false
+}
+
+#[derive(Serialize)]
+pub struct OpencodeTurnPoll {
+    pub messages: Vec<HistoryMessage>,
+    pub busy: bool,
+    pub pending: Option<crate::agent::history::PendingApproval>,
+}
+
+pub async fn poll_turn_state(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+    limit: Option<u32>,
+) -> Result<OpencodeTurnPoll, String> {
+    let history_fut = load_session_history(client, url, session_id, workspace, limit);
+    let status_fut = session_status_type(client, url, session_id, workspace);
+    let permission_fut = get_pending_permission(client, url, session_id, workspace);
+
+    let (history_res, status_res, permission_res) =
+        tokio::join!(history_fut, status_fut, permission_fut);
+
+    let messages = history_res?;
+    let pending = permission_res?;
+    let busy = if pending.is_some() {
+        true
+    } else if let Some(status) = status_res? {
+        matches!(status.as_str(), "busy" | "retry")
+    } else {
+        false
+    };
+
+    Ok(OpencodeTurnPoll {
+        messages,
+        busy,
+        pending,
+    })
 }
 
 pub async fn is_session_busy(
@@ -973,20 +1124,26 @@ pub async fn is_session_busy(
     session_id: &str,
     workspace: Option<&str>,
 ) -> Result<bool, String> {
-    if get_pending_permission(client, url, session_id, workspace)
-        .await?
-        .is_some()
-    {
+    if let Ok(Some(_)) = get_pending_permission(client, url, session_id, workspace).await {
         return Ok(true);
+    }
+
+    if let Some(status) = session_status_type(client, url, session_id, workspace).await? {
+        match status.as_str() {
+            "idle" => return Ok(false),
+            "busy" | "retry" => return Ok(true),
+            _ => {}
+        }
     }
 
     let response = with_directory(
         client.get(format!("{url}/session/{session_id}/message")),
         workspace,
     )
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    .query(&[("limit", "8")])
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         return Ok(false);
@@ -994,31 +1151,7 @@ pub async fn is_session_busy(
 
     let json: Value = response.json().await.map_err(|e| e.to_string())?;
     let entries = json.as_array().cloned().unwrap_or_default();
-    let Some(last) = entries.last() else {
-        return Ok(false);
-    };
-
-    let info = last.get("info").cloned().unwrap_or(Value::Null);
-    if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
-        return Ok(true);
-    }
-
-    if info.get("time").and_then(|t| t.get("completed")).is_none() {
-        return Ok(true);
-    }
-
-    let parts = last
-        .get("parts")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for part in parts {
-        if tool_part_is_active(&part) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    Ok(messages_indicate_busy(&entries))
 }
 
 pub async fn abort_session(
