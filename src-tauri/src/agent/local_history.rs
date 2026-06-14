@@ -1,0 +1,322 @@
+use crate::agent::history::HistoryMessage;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MANIFEST_FILE: &str = "manifest.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSessionMeta {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub markdown_file: String,
+    pub data_file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalHistoryManifest {
+    pub version: u32,
+    pub provider: String,
+    pub workspace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_session_id: Option<String>,
+    pub sessions: Vec<LocalSessionMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalChatSession {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub messages: Vec<HistoryMessage>,
+    pub updated_at: String,
+}
+
+pub fn history_root(workspace: &str, provider: &str) -> Result<PathBuf, String> {
+    let folder = match provider {
+        "codewhale" => ".codewhale/history",
+        "opencode" => ".opencode/history",
+        _ => return Err(format!("Unsupported provider for local history: {provider}")),
+    };
+    Ok(Path::new(workspace).join(folder))
+}
+
+fn manifest_path(workspace: &str, provider: &str) -> Result<PathBuf, String> {
+    Ok(history_root(workspace, provider)?.join(MANIFEST_FILE))
+}
+
+fn ensure_history_dir(workspace: &str, provider: &str) -> Result<PathBuf, String> {
+    let dir = history_root(workspace, provider)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn read_manifest(workspace: &str, provider: &str) -> Result<LocalHistoryManifest, String> {
+    let path = manifest_path(workspace, provider)?;
+    if !path.exists() {
+        return Ok(LocalHistoryManifest {
+            version: 1,
+            provider: provider.to_string(),
+            workspace: workspace.to_string(),
+            active_session_id: None,
+            sessions: Vec::new(),
+        });
+    }
+
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("Invalid history manifest: {e}"))
+}
+
+fn write_manifest(manifest: &LocalHistoryManifest) -> Result<(), String> {
+    let path = manifest_path(&manifest.workspace, &manifest.provider)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    fs::write(path, text).map_err(|e| e.to_string())
+}
+
+fn session_stem(updated_at: &str, session_id: &str) -> String {
+    let safe_id = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let stamp = updated_at
+        .replace(':', "-")
+        .replace('.', "-")
+        .chars()
+        .take(19)
+        .collect::<String>();
+    format!("{stamp}_{safe_id}")
+}
+
+fn preview_from_messages(messages: &[HistoryMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == "assistant" && !msg.content.trim().is_empty())
+        .or_else(|| {
+            messages
+                .iter()
+                .rev()
+                .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
+        })
+        .map(|msg| {
+            let trimmed = msg.content.trim().replace('\n', " ");
+            if trimmed.chars().count() > 120 {
+                trimmed.chars().take(120).collect::<String>() + "…"
+            } else {
+                trimmed
+            }
+        })
+}
+
+fn title_from_messages(messages: &[HistoryMessage], session_id: &str) -> String {
+    messages
+        .iter()
+        .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
+        .map(|msg| {
+            let trimmed = msg.content.trim().replace('\n', " ");
+            if trimmed.chars().count() > 48 {
+                trimmed.chars().take(48).collect::<String>() + "…"
+            } else {
+                trimmed
+            }
+        })
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+fn role_label(role: &str, tool_name: Option<&str>) -> String {
+    match role {
+        "user" => "User".to_string(),
+        "assistant" => "Assistant".to_string(),
+        "tool" => format!("Tool · {}", tool_name.unwrap_or("unknown")),
+        _ => role.to_string(),
+    }
+}
+
+fn render_markdown(session: &LocalChatSession) -> String {
+    let mut lines = vec![
+        "<!-- Generated by xcoder -->".to_string(),
+        String::new(),
+        format!("# {}", session.title),
+        String::new(),
+        format!(
+            "<!-- Session {} ({}) -->",
+            session.id, session.updated_at
+        ),
+        String::new(),
+    ];
+
+    for message in &session.messages {
+        if message.content.trim().is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "_**{}**_",
+            role_label(&message.role, message.tool_name.as_deref())
+        ));
+        lines.push(String::new());
+        lines.push(message.content.clone());
+        lines.push(String::new());
+        lines.push("---".to_string());
+        lines.push(String::new());
+    }
+
+    lines.join("\n")
+}
+
+pub fn save_session(
+    workspace: &str,
+    provider: &str,
+    session: LocalChatSession,
+    set_active: bool,
+) -> Result<LocalSessionMeta, String> {
+    let dir = ensure_history_dir(workspace, provider)?;
+    let mut manifest = read_manifest(workspace, provider)?;
+
+    let title = if session.title.trim().is_empty() {
+        title_from_messages(&session.messages, &session.id)
+    } else {
+        session.title
+    };
+    let preview = preview_from_messages(&session.messages);
+    let stem = session_stem(&session.updated_at, &session.id);
+    let markdown_file = format!("{stem}.md");
+    let data_file = format!("{stem}.json");
+
+    let persisted = LocalChatSession {
+        title: title.clone(),
+        ..session
+    };
+
+    fs::write(
+        dir.join(&markdown_file),
+        render_markdown(&persisted),
+    )
+    .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
+    fs::write(dir.join(&data_file), json).map_err(|e| e.to_string())?;
+
+    let meta = LocalSessionMeta {
+        id: persisted.id.clone(),
+        title,
+        updated_at: persisted.updated_at.clone(),
+        markdown_file,
+        data_file,
+        preview,
+    };
+
+    if let Some(existing) = manifest
+        .sessions
+        .iter_mut()
+        .find(|item| item.id == meta.id)
+    {
+        if Path::new(&dir.join(&existing.markdown_file)).exists()
+            && existing.markdown_file != meta.markdown_file
+        {
+            let _ = fs::remove_file(dir.join(&existing.markdown_file));
+        }
+        if Path::new(&dir.join(&existing.data_file)).exists()
+            && existing.data_file != meta.data_file
+        {
+            let _ = fs::remove_file(dir.join(&existing.data_file));
+        }
+        *existing = meta.clone();
+    } else {
+        manifest.sessions.insert(0, meta.clone());
+    }
+
+    manifest
+        .sessions
+        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    if set_active {
+        manifest.active_session_id = Some(persisted.id);
+    }
+    manifest.workspace = workspace.to_string();
+    manifest.provider = provider.to_string();
+    write_manifest(&manifest)?;
+
+    Ok(meta)
+}
+
+pub fn list_sessions(workspace: &str, provider: &str) -> Result<Vec<LocalSessionMeta>, String> {
+    let manifest = read_manifest(workspace, provider)?;
+    Ok(manifest.sessions)
+}
+
+pub fn load_session(
+    workspace: &str,
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<LocalChatSession>, String> {
+    let manifest = read_manifest(workspace, provider)?;
+    let Some(meta) = manifest.sessions.iter().find(|item| item.id == session_id) else {
+        return Ok(None);
+    };
+
+    let path = history_root(workspace, provider)?.join(&meta.data_file);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let session = serde_json::from_str::<LocalChatSession>(&text)
+        .map_err(|e| format!("Invalid session history: {e}"))?;
+    Ok(Some(session))
+}
+
+pub fn get_active_session_id(workspace: &str, provider: &str) -> Result<Option<String>, String> {
+    let manifest = read_manifest(workspace, provider)?;
+    Ok(manifest.active_session_id)
+}
+
+pub fn set_active_session(
+    workspace: &str,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let mut manifest = read_manifest(workspace, provider)?;
+    manifest.active_session_id = session_id.map(|value| value.to_string());
+    write_manifest(&manifest)
+}
+
+pub fn delete_session(workspace: &str, provider: &str, session_id: &str) -> Result<(), String> {
+    let dir = history_root(workspace, provider)?;
+    let mut manifest = read_manifest(workspace, provider)?;
+    let Some(index) = manifest.sessions.iter().position(|item| item.id == session_id) else {
+        return Ok(());
+    };
+
+    let meta = manifest.sessions.remove(index);
+    let _ = fs::remove_file(dir.join(&meta.markdown_file));
+    let _ = fs::remove_file(dir.join(&meta.data_file));
+
+    if manifest.active_session_id.as_deref() == Some(session_id) {
+        manifest.active_session_id = manifest.sessions.first().map(|item| item.id.clone());
+    }
+
+    write_manifest(&manifest)
+}
+
+pub fn now_iso() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("{millis}")
+}

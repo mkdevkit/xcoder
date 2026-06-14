@@ -1,0 +1,392 @@
+import { useEffect, useRef, useState } from "react";
+import { useWorkspaceStore } from "../../stores/workspace";
+import { useTranslation } from "../../i18n";
+import type { ExplorerEditState } from "../../stores/workspace";
+import type { FsEntry } from "../../types/fs";
+
+interface InlineNameInputProps {
+  initialName: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}
+
+function InlineNameInput({ initialName, onCommit, onCancel }: InlineNameInputProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [value, setValue] = useState(initialName);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    const dot = initialName.lastIndexOf(".");
+    if (dot > 0) {
+      input.setSelectionRange(0, dot);
+    } else {
+      input.select();
+    }
+  }, [initialName]);
+
+  const commit = () => onCommit(value);
+
+  return (
+    <input
+      ref={inputRef}
+      className="tree-rename-input"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    />
+  );
+}
+
+interface TreeNodeProps {
+  entry: FsEntry;
+  depth: number;
+  refreshKey: number;
+  selectedPath: string | null;
+  explorerEdit: ExplorerEditState | null;
+  onSelect: (path: string, isDir: boolean) => void;
+  onOpen: (entry: FsEntry) => void;
+  onCommitEdit: (name: string) => void;
+  onCancelEdit: () => void;
+}
+
+function TreeNode({
+  entry,
+  depth,
+  refreshKey,
+  selectedPath,
+  explorerEdit,
+  onSelect,
+  onOpen,
+  onCommitEdit,
+  onCancelEdit,
+}: TreeNodeProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [children, setChildren] = useState<FsEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const { listDirectory } = useWorkspaceStore();
+
+  const isRenaming =
+    explorerEdit?.mode === "rename" && explorerEdit.targetPath === entry.path;
+  const isCreatingHere =
+    explorerEdit?.mode === "create" && explorerEdit.parentDir === entry.path;
+  const isSelected = selectedPath === entry.path;
+
+  const loadChildren = async (expand = true) => {
+    if (!entry.is_dir) return;
+    setLoading(true);
+    try {
+      const items = await listDirectory(entry.path);
+      setChildren(items);
+      if (expand) setExpanded(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (expanded) {
+      loadChildren(false).catch(console.error);
+    }
+  }, [refreshKey]);
+
+  useEffect(() => {
+    if (isCreatingHere && entry.is_dir) {
+      loadChildren().catch(console.error);
+    }
+  }, [isCreatingHere, entry.is_dir, entry.path]);
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect(entry.path, entry.is_dir);
+    if (entry.is_dir) {
+      if (expanded) {
+        setExpanded(false);
+      } else {
+        await loadChildren();
+      }
+      return;
+    }
+    await onOpen(entry);
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        className={`tree-item ${isSelected ? "selected" : ""}`}
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        data-path={entry.path}
+        data-is-dir={entry.is_dir ? "1" : "0"}
+        onClick={handleClick}
+        onFocus={() => onSelect(entry.path, entry.is_dir)}
+      >
+        <span className="tree-icon">
+          {entry.is_dir ? (expanded ? "▾" : "▸") : "·"}
+        </span>
+        {isRenaming ? (
+          <InlineNameInput
+            initialName={explorerEdit.initialName}
+            onCommit={onCommitEdit}
+            onCancel={onCancelEdit}
+          />
+        ) : (
+          <span className="tree-name">{entry.name}</span>
+        )}
+        {loading && <span className="tree-loading">…</span>}
+      </button>
+      {expanded && (
+        <>
+          {children.map((child) => (
+            <TreeNode
+              key={child.path}
+              entry={child}
+              depth={depth + 1}
+              refreshKey={refreshKey}
+              selectedPath={selectedPath}
+              explorerEdit={explorerEdit}
+              onSelect={onSelect}
+              onOpen={onOpen}
+              onCommitEdit={onCommitEdit}
+              onCancelEdit={onCancelEdit}
+            />
+          ))}
+          {isCreatingHere && (
+            <div
+              className="tree-item create-row"
+              style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}
+            >
+              <span className="tree-icon">·</span>
+              <InlineNameInput
+                initialName={explorerEdit.initialName}
+                onCommit={onCommitEdit}
+                onCancel={onCancelEdit}
+              />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function FileExplorer() {
+  const {
+    rootPath,
+    listDirectory,
+    explorerRefreshKey,
+    explorerSelectedPath,
+    explorerSelectedIsDir,
+    explorerEdit,
+    explorerError,
+    setExplorerSelectedPath,
+    beginExplorerRename,
+    cancelExplorerEdit,
+    commitExplorerEdit,
+    deleteExplorerEntry,
+    openFile,
+  } = useWorkspaceStore();
+  const { t } = useTranslation();
+  const [entries, setEntries] = useState<FsEntry[]>([]);
+  const explorerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!rootPath) {
+      setEntries([]);
+      return;
+    }
+    listDirectory(rootPath).then(setEntries).catch(console.error);
+  }, [rootPath, explorerRefreshKey, listDirectory]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!rootPath || !explorerSelectedPath || explorerEdit) return;
+      if (
+        (e.target as HTMLElement).closest(
+          "input, textarea, .monaco-editor, .chat-input-area",
+        )
+      ) {
+        return;
+      }
+
+      if (e.key === "F2") {
+        e.preventDefault();
+        beginExplorerRename(explorerSelectedPath);
+      }
+      if (e.key === "Delete") {
+        e.preventDefault();
+        deleteExplorerEntry(
+          explorerSelectedPath,
+          explorerSelectedIsDir ?? undefined,
+        ).catch(console.error);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    rootPath,
+    explorerSelectedPath,
+    explorerSelectedIsDir,
+    explorerEdit,
+    beginExplorerRename,
+    deleteExplorerEntry,
+  ]);
+
+  const handleOpen = async (entry: FsEntry) => {
+    if (!entry.is_dir) {
+      await openFile(entry.path);
+    }
+  };
+
+  const isCreatingAtRoot =
+    explorerEdit?.mode === "create" && explorerEdit.parentDir === rootPath;
+
+  if (!rootPath) {
+    return (
+      <div className="file-explorer empty">
+        <p>{t("explorer.empty")}</p>
+        <style>{explorerStyles}</style>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={explorerRef}
+      className="file-explorer"
+      data-zone="explorer"
+      tabIndex={0}
+      onClick={() => explorerRef.current?.focus()}
+      onFocus={() => {
+        if (!explorerSelectedPath && entries[0]) {
+          setExplorerSelectedPath(entries[0].path, entries[0].is_dir);
+        }
+      }}
+    >
+      <div className="explorer-root" title={rootPath}>
+        {rootPath.split(/[\\/]/).pop()}
+      </div>
+      {explorerError && <div className="explorer-error">{explorerError}</div>}
+      {entries.map((entry) => (
+        <TreeNode
+          key={entry.path}
+          entry={entry}
+          depth={0}
+          refreshKey={explorerRefreshKey}
+          selectedPath={explorerSelectedPath}
+          explorerEdit={explorerEdit}
+          onSelect={setExplorerSelectedPath}
+          onOpen={handleOpen}
+          onCommitEdit={(name) => commitExplorerEdit(name).catch(console.error)}
+          onCancelEdit={cancelExplorerEdit}
+        />
+      ))}
+      {isCreatingAtRoot && (
+        <div className="tree-item create-row" style={{ paddingLeft: "8px" }}>
+          <span className="tree-icon">·</span>
+          <InlineNameInput
+            initialName={explorerEdit.initialName}
+            onCommit={(name) => commitExplorerEdit(name).catch(console.error)}
+            onCancel={cancelExplorerEdit}
+          />
+        </div>
+      )}
+      <style>{explorerStyles}</style>
+    </div>
+  );
+}
+
+const explorerStyles = `
+  .file-explorer {
+    height: 100%;
+    overflow: auto;
+    padding: 8px 0;
+    background: var(--bg-sidebar);
+    outline: none;
+  }
+  .file-explorer.empty {
+    padding: 16px;
+    color: var(--text-muted);
+  }
+  .explorer-root {
+    padding: 4px 12px 8px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .explorer-error {
+    margin: 0 8px 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: #f48771;
+    background: rgba(244, 135, 113, 0.1);
+    border-radius: 4px;
+  }
+  .tree-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    padding-right: 8px;
+    border-radius: 0;
+    color: inherit;
+    font: inherit;
+  }
+  button.tree-item {
+    cursor: pointer;
+  }
+  .tree-item:hover,
+  .tree-item.selected {
+    background: var(--bg-hover);
+  }
+  .tree-item.create-row {
+    background: var(--bg-hover);
+  }
+  .tree-icon {
+    width: 12px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .tree-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .tree-rename-input {
+    flex: 1;
+    min-width: 0;
+    padding: 1px 4px;
+    border: 1px solid var(--accent, #0078d4);
+    border-radius: 2px;
+    background: var(--bg-editor);
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+  }
+  .tree-loading {
+    color: var(--text-muted);
+    margin-left: auto;
+  }
+`;

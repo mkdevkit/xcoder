@@ -1,0 +1,199 @@
+import { useEffect, useRef } from "react";
+import { useTranslation } from "../../i18n";
+import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
+import { useWorkspaceStore } from "../../stores/workspace";
+import { languageFromPath } from "../../utils/language";
+import { isPreferencesTab } from "../../utils/virtualTabs";
+import Editor, { type OnMount } from "@monaco-editor/react";
+import type { editor as MonacoEditor } from "monaco-editor";
+
+export function EditorPanel() {
+  const { t } = useTranslation();
+  const {
+    openTabs,
+    activeFile,
+    editorReveal,
+    setActiveFile,
+    closeTab,
+    setFileContent,
+    saveActiveFile,
+    consumeEditorReveal,
+    getActiveTab,
+  } = useWorkspaceStore();
+
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const activeTab = getActiveTab();
+  const showingPreferences = activeFile ? isPreferencesTab(activeFile) : false;
+
+  const handleEditorMount: OnMount = (editor) => {
+    editorRef.current = editor;
+  };
+
+  useEffect(() => {
+    if (!editorReveal || !activeFile || editorReveal.path !== activeFile) {
+      return;
+    }
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const line = Math.max(1, editorReveal.line);
+    const column = Math.max(1, editorReveal.column ?? 1);
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column });
+    editor.focus();
+    consumeEditorReveal();
+  }, [activeFile, activeTab?.content, consumeEditorReveal, editorReveal]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveActiveFile().catch(console.error);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [saveActiveFile]);
+
+  if (!activeFile || !activeTab) {
+    return (
+      <div className="editor-empty">
+        <p>{t("editor.empty")}</p>
+        <style>{`
+          .editor-empty {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  const tabLabel = (path: string) => {
+    if (isPreferencesTab(path)) return t("panel.preferences");
+    return path.split(/[\\/]/).pop() ?? path;
+  };
+
+  return (
+    <div className="editor-panel" data-zone="editor">
+      <div className="editor-tabs">
+        {openTabs.map((tab) => {
+          const isActive = tab.path === activeFile;
+          return (
+            <div
+              key={tab.path}
+              className={`editor-tab ${isActive ? "active" : ""}`}
+              data-path={tab.path}
+              onClick={() => setActiveFile(tab.path)}
+            >
+              <span className="editor-tab-name">
+                {tabLabel(tab.path)}
+                {tab.dirty && <span className="dirty-dot">●</span>}
+              </span>
+              <button
+                type="button"
+                className="editor-tab-close"
+                title={t("editor.close")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  closeTab(tab.path);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <div className="editor-body">
+        {showingPreferences ? (
+          <PreferencesPanel />
+        ) : (
+          <Editor
+            key={activeFile}
+            height="100%"
+            language={languageFromPath(activeFile)}
+            theme="vs-dark"
+            value={activeTab.content}
+            onMount={handleEditorMount}
+            onChange={(value) => setFileContent(value ?? "")}
+            options={{
+              minimap: { enabled: true },
+              fontSize: 14,
+              fontFamily: "Cascadia Code, Consolas, Monaco, monospace",
+              wordWrap: "on",
+              automaticLayout: true,
+              contextmenu: false,
+            }}
+          />
+        )}
+      </div>
+      <style>{`
+        .editor-panel {
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+          background: var(--bg-editor);
+        }
+        .editor-tabs {
+          display: flex;
+          align-items: stretch;
+          height: 36px;
+          overflow-x: auto;
+          border-bottom: 1px solid var(--border);
+          background: var(--bg-sidebar);
+        }
+        .editor-tab {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          max-width: 220px;
+          padding: 0 4px 0 12px;
+          border-right: 1px solid var(--border);
+          background: transparent;
+          cursor: pointer;
+          flex-shrink: 0;
+        }
+        .editor-tab.active {
+          background: var(--bg-editor);
+          border-top: 2px solid var(--accent);
+        }
+        .editor-tab-name {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 12px;
+        }
+        .dirty-dot {
+          color: var(--warning);
+          font-size: 10px;
+        }
+        .editor-tab-close {
+          width: 20px;
+          height: 20px;
+          padding: 0;
+          border: none;
+          background: transparent;
+          border-radius: 4px;
+          font-size: 14px;
+          line-height: 1;
+          flex-shrink: 0;
+        }
+        .editor-tab-close:hover {
+          background: var(--bg-hover);
+        }
+        .editor-body {
+          flex: 1;
+          min-height: 0;
+        }
+      `}</style>
+    </div>
+  );
+}
