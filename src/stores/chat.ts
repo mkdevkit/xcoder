@@ -15,11 +15,15 @@ import type {
   CodewhaleModelOption,
 } from "../types/agent";
 import { mapRuntimeEvent } from "../types/agent";
-import { mapHistoryToChatMessages } from "../utils/chatHistory";
+import {
+  mapHistoryToChatMessages,
+  mergeServerMessagesWithLocal,
+  normalizePlanningMessageOrder,
+} from "../utils/chatHistory";
 import { translate } from "../i18n/locales";
 import { useSettingsStore } from "./settings";
 import { useWorkspaceStore } from "./workspace";
-import { formatToolContent } from "../utils/toolMessage";
+import { isMeaningfulToolArgs } from "../utils/toolMessage";
 import {
   clearSavedThreadId,
   readSavedThreadId,
@@ -70,6 +74,7 @@ interface ChatState {
   setModel: (model: string) => void;
   setOpencodeVendor: (vendorId: string) => void;
   sendMessage: (text: string) => Promise<void>;
+  cancelGeneration: () => Promise<void>;
   approve: (allow: boolean) => Promise<void>;
   refreshPendingApproval: () => Promise<void>;
   setupEventListener: () => Promise<() => void>;
@@ -79,6 +84,124 @@ interface ChatState {
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function lastUserMessageText(messages: ChatMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      return messages[i].content;
+    }
+  }
+  return undefined;
+}
+
+function mergeAssistantText(
+  current: string,
+  incoming: string,
+  lastUserText?: string,
+): string {
+  if (!incoming) return current;
+  const trimmedIncoming = incoming.trim();
+  if (lastUserText && trimmedIncoming === lastUserText.trim()) {
+    return current;
+  }
+  if (!current) return incoming;
+  if (incoming === current) return current;
+  if (incoming.startsWith(current)) return incoming;
+  if (current.startsWith(incoming)) return current;
+  if (current.endsWith(incoming)) return current;
+  if (incoming.length > 20 && current.includes(incoming)) return current;
+  return current + incoming;
+}
+
+function mergeReasoningText(current: string, incoming: string): string {
+  const chunk = incoming.trim();
+  if (!chunk) return current;
+  if (!current) return `> ${chunk}`;
+  if (current.includes(chunk) && chunk.length > 16) return current;
+
+  const lines = current.split("\n");
+  const lastLine = lines[lines.length - 1] ?? "";
+  if (lastLine.startsWith("> ")) {
+    const existingReasoning = lastLine.slice(2);
+    if (chunk.startsWith(existingReasoning)) {
+      lines[lines.length - 1] = `> ${chunk}`;
+      return lines.join("\n");
+    }
+    if (existingReasoning.endsWith(chunk)) return current;
+    lines[lines.length - 1] = `${lastLine}${incoming}`;
+    return lines.join("\n");
+  }
+
+  const prefix = current ? "\n\n" : "";
+  return `${current}${prefix}> ${chunk}`;
+}
+
+function isUserCancellation(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  return (
+    normalized === "aborted" ||
+    normalized === "abort" ||
+    normalized.includes("cancelled") ||
+    normalized.includes("canceled") ||
+    normalized.includes("已取消") ||
+    normalized.includes("用户取消")
+  );
+}
+
+function shouldSkipAssistantSnapshot(
+  text: string,
+  lastUserText?: string,
+): boolean {
+  if (!text.trim()) return true;
+  if (lastUserText && text.trim() === lastUserText.trim()) return true;
+  return false;
+}
+
+function findAssistantTextTargetIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") return -1;
+    if (messages[i].role === "assistant") {
+      if (!messages[i].content.trim()) {
+        for (let j = i - 1; j >= 0; j -= 1) {
+          if (messages[j].role === "user") break;
+          if (messages[j].role === "assistant" && messages[j].content.trim()) {
+            return i;
+          }
+          if (messages[j].role === "tool") continue;
+        }
+      }
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findToolInsertIndex(
+  messages: ChatMessage[],
+  toolName: string,
+): number {
+  if (toolName === "task") {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "user") break;
+      if (messages[i].role === "assistant") return i;
+    }
+    return messages.length;
+  }
+
+  let lastAssistant = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") break;
+    if (messages[i].role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
+  }
+  if (lastAssistant < 0) return messages.length;
+  if (!messages[lastAssistant].content.trim()) {
+    return lastAssistant;
+  }
+  return lastAssistant + 1;
 }
 
 function parseAgentEnvelope(raw: Record<string, unknown>) {
@@ -107,6 +230,47 @@ function parseAgentError(payload: unknown) {
     };
   }
   return { providerId: "", message: String(payload) };
+}
+
+function isRemoteSessionNotFound(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return (
+    message.includes("notfounderror") ||
+    message.includes("not found") ||
+    message.includes("session not found") ||
+    message.includes("404")
+  );
+}
+
+async function clearDeletedThreadLocally(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  threadId: string,
+  workspace: string,
+) {
+  if (readSavedThreadId(providerId, workspace) === threadId) {
+    await clearRememberedSession(providerId, workspace);
+  }
+  await deleteLocalChatSession(workspace, providerId, threadId);
+
+  const slice = getProviderSlice(get, providerId);
+  const wasCurrent = slice.thread?.id === threadId;
+  await get().loadThreads(workspace, providerId);
+
+  if (!wasCurrent) return;
+
+  patchProvider(set, providerId, {
+    thread: null,
+    messages: [],
+    streaming: false,
+    pendingApproval: null,
+    error: null,
+  });
 }
 
 async function rememberActiveSession(
@@ -171,6 +335,363 @@ async function saveProviderChatLocally(
     model: slice.model,
     messages: slice.messages,
   });
+}
+
+const historySyncTimers = new Map<string, ReturnType<typeof setInterval>>();
+const historySyncChains = new Map<string, Promise<void>>();
+const historySyncSnapshots = new Map<
+  string,
+  { count: number; textLen: number }
+>();
+
+function historySnapshot(history: HistoryMessage[]) {
+  return {
+    count: history.length,
+    textLen: history.reduce((sum, item) => sum + item.content.length, 0),
+  };
+}
+
+function isPollOnlyMessageProvider(providerId: string) {
+  return providerId === "opencode";
+}
+
+function finalizeTurnMessages(messages: ChatMessage[]): ChatMessage[] {
+  const result = [...messages];
+  while (result.length > 0) {
+    const last = result[result.length - 1];
+    if (last.role === "assistant" && !last.content.trim()) {
+      result.pop();
+    } else {
+      break;
+    }
+  }
+  return normalizePlanningMessageOrder(result);
+}
+
+async function ensureEventSubscription(providerId: string, _threadId: string) {
+  if (!isTauri() || isPollOnlyMessageProvider(providerId)) return;
+  try {
+    await tauriInvoke(getAgentCommands(providerId).subscribeEvents, {
+      threadId: _threadId,
+    });
+  } catch {
+    // local-only session
+  }
+}
+
+async function syncMessagesFromServer(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  force = false,
+) {
+  const previous = historySyncChains.get(providerId) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(() =>
+      syncMessagesFromServerOnce(get, set, providerId, force),
+    );
+  historySyncChains.set(providerId, current);
+  try {
+    await current;
+  } finally {
+    if (historySyncChains.get(providerId) === current) {
+      historySyncChains.delete(providerId);
+    }
+  }
+}
+
+async function syncMessagesFromServerOnce(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  force = false,
+) {
+  const slice = getProviderSlice(get, providerId);
+  if (!slice.thread) return;
+  if (!slice.streaming && !force) return;
+
+  const commands = getAgentCommands(providerId);
+  const threadId = slice.thread.id;
+  try {
+    const history = await tauriInvoke<HistoryMessage[]>(
+      commands.loadThreadHistory,
+      providerId === "opencode"
+        ? { sessionId: threadId }
+        : { threadId },
+    );
+    const latest = getProviderSlice(get, providerId);
+    if (!latest.thread || latest.thread.id !== threadId) return;
+
+    const merged = mergeServerMessagesWithLocal(latest.messages, history, {
+      pollOnly: isPollOnlyMessageProvider(providerId),
+    });
+    const changed =
+      merged.length !== latest.messages.length ||
+      merged.some((msg, index) => {
+        const prev = latest.messages[index];
+        return (
+          !prev ||
+          prev.id !== msg.id ||
+          prev.content !== msg.content ||
+          prev.role !== msg.role ||
+          prev.toolName !== msg.toolName
+        );
+      });
+    if (changed) {
+      patchProvider(set, providerId, {
+        messages: merged,
+        streaming: true,
+      });
+    }
+
+    const snapshot = historySnapshot(history);
+    const previousSnapshot = historySyncSnapshots.get(providerId);
+    historySyncSnapshots.set(providerId, snapshot);
+
+    if (providerId === "opencode" && commands.getPendingApproval) {
+      if (await runPendingApprovalCheck(get, set, providerId)) {
+        cancelScheduledCompleteTurn(providerId);
+        ensureStreamingHistorySync(get, set, providerId);
+        return;
+      }
+    }
+
+    const active = getProviderSlice(get, providerId);
+    if (
+      active.streaming &&
+      providerId === "opencode" &&
+      commands.isSessionBusy &&
+      active.thread?.id === threadId
+    ) {
+      try {
+        const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
+          sessionId: threadId,
+        });
+        const historyStable =
+          previousSnapshot !== undefined &&
+          previousSnapshot.count === snapshot.count &&
+          previousSnapshot.textLen === snapshot.textLen;
+        if (!busy && historyStable) {
+          scheduleCompleteTurn(get, set, providerId, 600);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      console.warn(`[chat sync] ${providerId} failed:`, error);
+    }
+  }
+}
+
+function startStreamingHistorySync(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+) {
+  stopStreamingHistorySync(providerId);
+  void syncMessagesFromServer(get, set, providerId, true);
+  historySyncTimers.set(
+    providerId,
+    setInterval(() => {
+      void syncMessagesFromServer(get, set, providerId, true);
+    }, 1000),
+  );
+}
+
+function ensureStreamingHistorySync(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+) {
+  const slice = getProviderSlice(get, providerId);
+  if (!slice.thread || !slice.streaming) return;
+  if (historySyncTimers.has(providerId)) return;
+  startStreamingHistorySync(get, set, providerId);
+}
+
+function stopStreamingHistorySync(providerId: string) {
+  const timer = historySyncTimers.get(providerId);
+  if (timer !== undefined) {
+    clearInterval(timer);
+    historySyncTimers.delete(providerId);
+  }
+  historySyncSnapshots.delete(providerId);
+}
+
+const completeTurnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelScheduledCompleteTurn(resolvedId: string) {
+  const existing = completeTurnTimers.get(resolvedId);
+  if (existing !== undefined) {
+    clearTimeout(existing);
+    completeTurnTimers.delete(resolvedId);
+  }
+}
+
+async function completeTurnForProvider(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  resolvedId: string,
+  options?: { force?: boolean },
+) {
+  if (!options?.force && (await runPendingApprovalCheck(get, set, resolvedId))) {
+    cancelScheduledCompleteTurn(resolvedId);
+    patchProvider(set, resolvedId, { streaming: true });
+    ensureStreamingHistorySync(get, set, resolvedId);
+    return;
+  }
+
+  const before = getProviderSlice(get, resolvedId);
+  if (before.thread && before.streaming) {
+    await syncMessagesFromServer(get, set, resolvedId, true);
+  }
+  stopStreamingHistorySync(resolvedId);
+  const current = getProviderSlice(get, resolvedId);
+  patchProvider(set, resolvedId, {
+    streaming: false,
+    messages: finalizeTurnMessages(current.messages),
+    error: null,
+    pendingApproval: null,
+  });
+
+  const updated = getProviderSlice(get, resolvedId);
+  const workspace = updated.thread?.workspace ?? updated.chatWorkspace;
+  if (workspace && updated.thread) {
+    const title = sessionTitleFromMessages(
+      updated.messages,
+      updated.thread.id,
+    );
+    persistLocalChatSession({
+      workspace,
+      providerId: resolvedId,
+      sessionId: updated.thread.id,
+      title,
+      mode: updated.mode,
+      model: updated.model,
+      messages: updated.messages,
+    }).catch(() => undefined);
+    const commands = getAgentCommands(resolvedId);
+    if (commands.updateThreadTitle && !isGenericSessionTitle(title)) {
+      tauriInvoke(commands.updateThreadTitle, {
+        sessionId: updated.thread.id,
+        title,
+      }).catch(() => undefined);
+    }
+    get().loadThreads(workspace, resolvedId).catch(() => undefined);
+  }
+}
+
+async function runPendingApprovalCheck(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  resolvedId: string,
+) {
+  const slice = getProviderSlice(get, resolvedId);
+  if (!slice.streaming) return false;
+  if (slice.pendingApproval) return true;
+
+  const commands = getAgentCommands(resolvedId);
+  if (commands.getPendingApproval && slice.thread) {
+    try {
+      const pending = await tauriInvoke<{
+        id: string;
+        description: string;
+      } | null>(
+        commands.getPendingApproval!,
+        resolvedId === "opencode"
+          ? { sessionId: slice.thread.id }
+          : { threadId: slice.thread.id },
+      );
+      if (pending) {
+        cancelScheduledCompleteTurn(resolvedId);
+        patchProvider(set, resolvedId, {
+          pendingApproval: pending,
+          streaming: true,
+        });
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+function scheduleCompleteTurn(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  resolvedId: string,
+  delayMs: number,
+) {
+  cancelScheduledCompleteTurn(resolvedId);
+  completeTurnTimers.set(
+    resolvedId,
+    setTimeout(() => {
+      completeTurnTimers.delete(resolvedId);
+      void (async () => {
+        const slice = getProviderSlice(get, resolvedId);
+        const last = slice.messages[slice.messages.length - 1];
+        if (
+          slice.streaming &&
+          last?.role === "assistant" &&
+          !last.content.trim()
+        ) {
+          scheduleCompleteTurn(get, set, resolvedId, 1500);
+          patchProvider(set, resolvedId, { streaming: true });
+          return;
+        }
+
+        const commands = getAgentCommands(resolvedId);
+        if (commands.isSessionBusy && slice.thread) {
+          try {
+            const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
+              sessionId: slice.thread.id,
+            });
+            if (busy) {
+              scheduleCompleteTurn(get, set, resolvedId, 1500);
+              patchProvider(set, resolvedId, { streaming: true });
+              return;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        if (await runPendingApprovalCheck(get, set, resolvedId)) return;
+        await completeTurnForProvider(get, set, resolvedId);
+      })();
+    }, delayMs),
+  );
 }
 
 async function hydrateProviderAfterConnect(
@@ -256,7 +777,12 @@ async function hydrateProviderAfterConnect(
   patchProvider(set, providerId, patch);
 
   if (workspace) {
-    await useChatStore.getState().loadThreads(workspace, providerId);
+    await get().loadThreads(workspace, providerId);
+  }
+
+  const updated = getProviderSlice(get, providerId);
+  if (updated.thread?.id) {
+    await ensureEventSubscription(providerId, updated.thread.id);
   }
 }
 
@@ -535,7 +1061,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectThread: async (threadId, workspace) => {
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
-    if (slice.thread?.id === threadId) return;
+    if (slice.thread?.id === threadId) {
+      if (!slice.runtime.running) {
+        await get().connectRuntime(workspace);
+      }
+      await ensureEventSubscription(providerId, threadId);
+      return;
+    }
     if (!slice.runtime.running) {
       await get().connectRuntime(workspace);
     }
@@ -572,11 +1104,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       }
 
-      try {
-        await tauriInvoke(commands.subscribeEvents, { threadId });
-      } catch {
-        // local-only session
-      }
+      await ensureEventSubscription(providerId, threadId);
 
       const current = getProviderSlice(get, providerId);
       const messages = mapHistoryToChatMessages(history);
@@ -590,6 +1118,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         chatWorkspace: workspace,
         messages,
       });
+
+      if (providerId === "opencode" && commands.isSessionBusy) {
+        try {
+          const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
+            sessionId: threadId,
+          });
+          if (busy) {
+            patchProvider(set, providerId, { streaming: true });
+            startStreamingHistorySync(get, set, providerId);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       await rememberActiveSession(providerId, workspace, threadId);
       const title = sessionTitleFromMessages(messages, threadId);
       await persistLocalChatSession({
@@ -631,7 +1174,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       model: providerId === "codewhale" ? current.model : undefined,
     });
 
-    await tauriInvoke(commands.subscribeEvents, { threadId: created.id });
+    await ensureEventSubscription(providerId, created.id);
     patchProvider(set, providerId, {
       thread: {
         ...created,
@@ -672,6 +1215,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!confirmed) return;
 
     const commands = getAgentCommands(providerId);
+    const deletingCurrent = slice.thread?.id === threadId;
+
+    if (deletingCurrent) {
+      patchProvider(set, providerId, {
+        streaming: false,
+        pendingApproval: null,
+        error: null,
+      });
+    }
+
     try {
       await tauriInvoke(
         commands.deleteThread,
@@ -680,26 +1233,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : { threadId },
       );
     } catch (e) {
-      patchProvider(set, providerId, { error: String(e) });
-      throw e;
+      if (!isRemoteSessionNotFound(e)) {
+        patchProvider(set, providerId, { error: String(e) });
+        throw e;
+      }
     }
 
-    if (readSavedThreadId(providerId, workspace) === threadId) {
-      await clearRememberedSession(providerId, workspace);
-    }
-    await deleteLocalChatSession(workspace, providerId, threadId);
-
-    const wasCurrent = slice.thread?.id === threadId;
-    await get().loadThreads(workspace, providerId);
-
-    if (!wasCurrent) return;
-
-    patchProvider(set, providerId, {
-      thread: null,
-      messages: [],
-      streaming: false,
-      pendingApproval: null,
-    });
+    await clearDeletedThreadLocally(
+      get,
+      set,
+      providerId,
+      threadId,
+      workspace,
+    );
   },
 
   setMode: async (mode) => {
@@ -749,6 +1295,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!trimmed) return;
 
     const { providerId } = get();
+    cancelScheduledCompleteTurn(providerId);
     const slice = getProviderSlice(get, providerId);
     const userMsg: ChatMessage = {
       id: uid(),
@@ -786,6 +1333,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const commands = getAgentCommands(providerId);
     try {
+      await ensureEventSubscription(providerId, current.thread.id);
+
       if (providerId === "opencode") {
         await tauriInvoke(commands.sendTurn, {
           threadId: current.thread.id,
@@ -799,7 +1348,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           message: trimmed,
         });
       }
+
+      startStreamingHistorySync(get, set, providerId);
+
+      if (providerId === "opencode" || providerId === "codewhale") {
+        window.setTimeout(() => {
+          get().refreshPendingApproval().catch(() => undefined);
+        }, 400);
+      }
     } catch (e) {
+      stopStreamingHistorySync(providerId);
       patchProvider(set, providerId, {
         streaming: false,
         error: String(e),
@@ -808,10 +1366,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  cancelGeneration: async () => {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.streaming || !slice.thread) return;
+
+    const threadId = slice.thread.id;
+    const pendingId = slice.pendingApproval?.id;
+    const commands = getAgentCommands(providerId);
+
+    stopStreamingHistorySync(providerId);
+    cancelScheduledCompleteTurn(providerId);
+    patchProvider(set, providerId, {
+      streaming: false,
+      pendingApproval: null,
+      error: null,
+    });
+
+    try {
+      if (pendingId && commands.approve) {
+        if (providerId === "opencode") {
+          await tauriInvoke(commands.approve, {
+            threadId,
+            approvalId: pendingId,
+            allow: false,
+          });
+        } else {
+          await tauriInvoke(commands.approve, {
+            approvalId: pendingId,
+            allow: false,
+          });
+        }
+      }
+      if (commands.cancelTurn) {
+        await tauriInvoke(
+          commands.cancelTurn,
+          providerId === "opencode"
+            ? { sessionId: threadId }
+            : { threadId },
+        );
+      }
+    } catch (e) {
+      const message = String(e);
+      if (!isUserCancellation(message)) {
+        patchProvider(set, providerId, { error: message });
+      }
+    }
+
+    await syncMessagesFromServer(get, set, providerId, true);
+    const current = getProviderSlice(get, providerId);
+    patchProvider(set, providerId, {
+      messages: finalizeTurnMessages(current.messages),
+      streaming: false,
+      pendingApproval: null,
+    });
+    await saveProviderChatLocally(get, providerId).catch(() => undefined);
+  },
+
   refreshPendingApproval: async () => {
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
-    if (!slice.thread) return;
+    if (!slice.thread || !slice.streaming) return;
 
     const commands = getAgentCommands(providerId);
     if (!commands.getPendingApproval) return;
@@ -826,9 +1441,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? { sessionId: slice.thread.id }
           : { threadId: slice.thread.id },
       );
-      patchProvider(set, providerId, {
-        pendingApproval: pending ?? null,
-      });
+      if (pending) {
+        cancelScheduledCompleteTurn(providerId);
+        patchProvider(set, providerId, {
+          pendingApproval: pending,
+          streaming: true,
+        });
+        ensureStreamingHistorySync(get, set, providerId);
+      }
     } catch {
       // ignore
     }
@@ -838,25 +1458,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     if (!slice.pendingApproval || !slice.thread) return;
+    if (!slice.pendingApproval.id) {
+      await get().refreshPendingApproval();
+      const refreshed = getProviderSlice(get, providerId);
+      if (!refreshed.pendingApproval?.id) {
+        patchProvider(set, providerId, {
+          error: "无法获取审批 ID，请稍后重试。",
+        });
+        return;
+      }
+    }
 
+    const active = getProviderSlice(get, providerId);
     const commands = getAgentCommands(providerId);
     try {
       if (providerId === "opencode") {
         await tauriInvoke(commands.approve, {
-          threadId: slice.thread.id,
-          approvalId: slice.pendingApproval.id,
+          threadId: active.thread!.id,
+          approvalId: active.pendingApproval!.id,
           allow,
         });
       } else {
         await tauriInvoke(commands.approve, {
-          approvalId: slice.pendingApproval.id,
+          approvalId: active.pendingApproval!.id,
           allow,
         });
       }
       patchProvider(set, providerId, {
         pendingApproval: null,
+        streaming: allow,
         error: null,
       });
+      if (allow) {
+        ensureStreamingHistorySync(get, set, providerId);
+      }
     } catch (e) {
       const msg = String(e);
       if (msg.includes("404") || msg.includes("no pending approval")) {
@@ -893,41 +1528,198 @@ export const useChatStore = create<ChatState>((set, get) => ({
           );
           if (!mapped) return;
           const resolvedId = eventProviderId || get().providerId;
+          if (isPollOnlyMessageProvider(resolvedId)) return;
 
           if (mapped.type === "text_delta") {
+            cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
-              for (let i = messages.length - 1; i >= 0; i -= 1) {
-                if (messages[i].role === "assistant") {
-                  messages[i] = {
-                    ...messages[i],
-                    content: messages[i].content + mapped.content,
-                  };
-                  break;
-                }
+              const lastUserText = lastUserMessageText(messages);
+              const targetIndex = findAssistantTextTargetIndex(messages);
+              if (targetIndex >= 0) {
+                messages[targetIndex] = {
+                  ...messages[targetIndex],
+                  content: mergeAssistantText(
+                    messages[targetIndex].content,
+                    mapped.content,
+                    lastUserText,
+                  ),
+                };
+                return { messages, streaming: true };
               }
-              return { messages };
-            });
-          }
 
-          if (mapped.type === "reasoning_delta") {
+              const content = mergeAssistantText("", mapped.content, lastUserText);
+              if (content) {
+                messages.push({
+                  id: uid(),
+                  role: "assistant",
+                  content,
+                  timestamp: Date.now(),
+                });
+              }
+              return { messages, streaming: true };
+            });
+          } else if (mapped.type === "text_snapshot") {
+            cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
-              for (let i = messages.length - 1; i >= 0; i -= 1) {
-                if (messages[i].role === "assistant") {
-                  const prefix = messages[i].content ? "\n\n" : "";
-                  messages[i] = {
-                    ...messages[i],
-                    content: `${messages[i].content}${prefix}> ${mapped.content}`,
-                  };
-                  break;
-                }
+              const lastUserText = lastUserMessageText(messages);
+              if (shouldSkipAssistantSnapshot(mapped.content, lastUserText)) {
+                return { messages, streaming: true };
               }
-              return { messages };
+              const targetIndex = findAssistantTextTargetIndex(messages);
+              if (targetIndex >= 0) {
+                const current = messages[targetIndex].content;
+                if (
+                  current === mapped.content ||
+                  current.trim() === mapped.content.trim()
+                ) {
+                  return { messages, streaming: true };
+                }
+                messages[targetIndex] = {
+                  ...messages[targetIndex],
+                  content:
+                    mapped.content.startsWith(current) || !current.trim()
+                      ? mapped.content
+                      : mergeAssistantText(
+                          current,
+                          mapped.content,
+                          lastUserText,
+                        ),
+                };
+                return { messages, streaming: true };
+              }
+
+              messages.push({
+                id: uid(),
+                role: "assistant",
+                content: mapped.content,
+                timestamp: Date.now(),
+              });
+              return { messages, streaming: true };
+            });
+          } else if (mapped.type === "reasoning_delta") {
+            cancelScheduledCompleteTurn(resolvedId);
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              const targetIndex = findAssistantTextTargetIndex(messages);
+              if (targetIndex >= 0) {
+                messages[targetIndex] = {
+                  ...messages[targetIndex],
+                  content: mergeReasoningText(
+                    messages[targetIndex].content,
+                    mapped.content,
+                  ),
+                };
+                return { messages, streaming: true };
+              }
+
+              messages.push({
+                id: uid(),
+                role: "assistant",
+                content: mergeReasoningText("", mapped.content),
+                timestamp: Date.now(),
+              });
+              return { messages, streaming: true };
+            });
+          } else if (mapped.type === "reasoning_snapshot") {
+            cancelScheduledCompleteTurn(resolvedId);
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              const targetIndex = findAssistantTextTargetIndex(messages);
+              const block = mapped.content.trim();
+              if (!block) {
+                return { messages, streaming: true };
+              }
+              if (targetIndex >= 0) {
+                messages[targetIndex] = {
+                  ...messages[targetIndex],
+                  content: mergeReasoningText(
+                    messages[targetIndex].content,
+                    block,
+                  ),
+                };
+                return { messages, streaming: true };
+              }
+
+              messages.push({
+                id: uid(),
+                role: "assistant",
+                content: mergeReasoningText("", block),
+                timestamp: Date.now(),
+              });
+              return { messages, streaming: true };
+            });
+          } else if (mapped.type === "tool_call") {
+            if (!isMeaningfulToolArgs(mapped.args, mapped.name)) {
+              return;
+            }
+
+            cancelScheduledCompleteTurn(resolvedId);
+            applyToProvider(resolvedId, (slice) => {
+              const messages = [...slice.messages];
+              const toolContent =
+                typeof mapped.args === "string"
+                  ? mapped.args
+                  : JSON.stringify(mapped.args, null, 2);
+              const toolId = mapped.partId || uid();
+              const existingIndex = mapped.partId
+                ? messages.findIndex(
+                    (msg) => msg.role === "tool" && msg.id === mapped.partId,
+                  )
+                : -1;
+
+              if (existingIndex >= 0) {
+                messages[existingIndex] = {
+                  ...messages[existingIndex],
+                  content: toolContent,
+                  toolName: mapped.name,
+                };
+                return { messages, streaming: true };
+              }
+
+              const insertAt = findToolInsertIndex(messages, mapped.name);
+
+              const last = messages[messages.length - 1];
+              const hasTrailingEmptyAssistant =
+                last?.role === "assistant" && !last.content.trim();
+
+              messages.splice(insertAt, 0, {
+                id: toolId,
+                role: "tool",
+                content: toolContent,
+                toolName: mapped.name,
+                timestamp: Date.now(),
+              });
+
+              if (!hasTrailingEmptyAssistant) {
+                messages.push({
+                  id: uid(),
+                  role: "assistant",
+                  content: "",
+                  timestamp: Date.now(),
+                });
+              }
+
+              return { messages, streaming: true };
             });
           }
 
           if (mapped.type === "approval_required") {
+            const activeSlice = getProviderSlice(get, resolvedId);
+            if (!activeSlice.streaming) {
+              return;
+            }
+            cancelScheduledCompleteTurn(resolvedId);
+            patchProvider(set, resolvedId, {
+              pendingApproval: {
+                id: mapped.id,
+                description: mapped.description,
+              },
+              streaming: true,
+            });
+            ensureStreamingHistorySync(get, set, resolvedId);
+
             const commands = getAgentCommands(resolvedId);
             if (commands.getPendingApproval) {
               const refresh = async () => {
@@ -945,116 +1737,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   );
                   if (pending) {
                     patchProvider(set, resolvedId, { pendingApproval: pending });
-                  } else if (mapped.id) {
-                    patchProvider(set, resolvedId, {
-                      pendingApproval: {
-                        id: mapped.id,
-                        description: mapped.description,
-                      },
-                    });
                   }
                 } catch {
-                  if (mapped.id) {
-                    patchProvider(set, resolvedId, {
-                      pendingApproval: {
-                        id: mapped.id,
-                        description: mapped.description,
-                      },
-                    });
-                  }
+                  // keep event-derived approval card
                 }
               };
               refresh().catch(() => undefined);
-              return;
             }
-            patchProvider(set, resolvedId, {
-              pendingApproval: {
-                id: mapped.id,
-                description: mapped.description,
-              },
-            });
           }
 
           if (mapped.type === "approval_resolved") {
-            patchProvider(set, resolvedId, { pendingApproval: null });
-          }
-
-          if (mapped.type === "tool_call") {
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              let insertAt = messages.length;
-              for (let i = messages.length - 1; i >= 0; i -= 1) {
-                if (messages[i].role === "assistant") {
-                  insertAt = i + 1;
-                  break;
-                }
-              }
-              messages.splice(
-                insertAt,
-                0,
-                {
-                  id: uid(),
-                  role: "tool",
-                  content: formatToolContent(mapped.args),
-                  toolName: mapped.name,
-                  timestamp: Date.now(),
-                },
-                {
-                  id: uid(),
-                  role: "assistant",
-                  content: "",
-                  timestamp: Date.now(),
-                },
-              );
-              return { messages };
+            patchProvider(set, resolvedId, {
+              pendingApproval: null,
+              streaming: true,
             });
           }
 
-          if (mapped.type === "turn_completed") {
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              while (messages.length > 0) {
-                const last = messages[messages.length - 1];
-                if (last.role === "assistant" && !last.content.trim()) {
-                  messages.pop();
-                } else {
-                  break;
-                }
-              }
-              return { streaming: false, messages };
-            });
+          if (mapped.type === "session_busy") {
+            cancelScheduledCompleteTurn(resolvedId);
+            patchProvider(set, resolvedId, { streaming: true });
+            ensureStreamingHistorySync(get, set, resolvedId);
+          }
 
-            const slice = getProviderSlice(get, resolvedId);
-            const workspace = slice.thread?.workspace ?? slice.chatWorkspace;
-            if (workspace && slice.thread) {
-              const title = sessionTitleFromMessages(
-                slice.messages,
-                slice.thread.id,
-              );
-              persistLocalChatSession({
-                workspace,
-                providerId: resolvedId,
-                sessionId: slice.thread.id,
-                title,
-                mode: slice.mode,
-                model: slice.model,
-                messages: slice.messages,
-              }).catch(() => undefined);
-              const commands = getAgentCommands(resolvedId);
-              if (
-                commands.updateThreadTitle &&
-                !isGenericSessionTitle(title)
-              ) {
-                tauriInvoke(commands.updateThreadTitle, {
-                  sessionId: slice.thread.id,
-                  title,
-                }).catch(() => undefined);
-              }
-              get().loadThreads(workspace, resolvedId).catch(() => undefined);
-            }
+          if (mapped.type === "session_idle" || mapped.type === "turn_completed") {
+            scheduleCompleteTurn(
+              get,
+              set,
+              resolvedId,
+              mapped.type === "session_idle" ? 400 : 1500,
+            );
+          }
+
+          if (mapped.type === "turn_aborted") {
+            cancelScheduledCompleteTurn(resolvedId);
+            void completeTurnForProvider(get, set, resolvedId);
           }
 
           if (mapped.type === "turn_error") {
+            if (isUserCancellation(mapped.message)) {
+              cancelScheduledCompleteTurn(resolvedId);
+              void completeTurnForProvider(get, set, resolvedId);
+              return;
+            }
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
               for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1091,12 +1815,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         event.payload,
       );
       const resolvedId = eventProviderId || get().providerId;
+      if (isPollOnlyMessageProvider(resolvedId)) return;
       const slice = getProviderSlice(get, resolvedId);
+      if (
+        message.includes("SSE stream error") ||
+        message.includes("SSE connect failed")
+      ) {
+        if (slice.thread?.id) {
+          void ensureEventSubscription(resolvedId, slice.thread.id);
+        }
+        return;
+      }
       patchProvider(set, resolvedId, {
         error: message,
         streaming: false,
         pendingApproval: null,
-        runtime: { running: false, owned: slice.runtime.owned ?? false },
+        runtime: { running: slice.runtime.running, owned: slice.runtime.owned ?? false },
       });
     });
 

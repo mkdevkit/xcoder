@@ -19,9 +19,19 @@ export interface LocalChatSession {
   updated_at: string;
 }
 
+import { isMeaningfulToolArgs, parseToolContent } from "./toolMessage";
+
 function toHistoryMessages(messages: ChatMessage[]) {
   return messages
-    .filter((msg) => msg.content.trim().length > 0 || msg.role === "tool")
+    .filter((msg) => {
+      if (msg.role === "tool") {
+        return isMeaningfulToolArgs(
+          parseToolContent(msg.content),
+          msg.toolName,
+        );
+      }
+      return msg.content.trim().length > 0;
+    })
     .map((msg) => ({
       id: msg.id,
       role: msg.role,

@@ -10,12 +10,14 @@ export interface AgentCommands {
   stopRuntime: string;
   createThread: string;
   sendTurn: string;
+  cancelTurn?: string;
   setThreadMode: string;
   approve: string;
   subscribeEvents: string;
   listThreads: string;
   loadThreadHistory: string;
   getPendingApproval?: string;
+  isSessionBusy?: string;
   deleteThread: string;
   updateThreadTitle?: string;
   listAgents?: string;
@@ -30,6 +32,10 @@ export function getAgentCommands(providerId: string): AgentCommands {
     stopRuntime: `${providerId}_stop_runtime`,
     createThread: `${providerId}_create_thread`,
     sendTurn: `${providerId}_send_turn`,
+    cancelTurn:
+      providerId === "opencode" || providerId === "codewhale"
+        ? `${providerId}_cancel_turn`
+        : undefined,
     setThreadMode: `${providerId}_set_thread_mode`,
     approve: `${providerId}_approve`,
     subscribeEvents: `${providerId}_subscribe_events`,
@@ -47,6 +53,8 @@ export function getAgentCommands(providerId: string): AgentCommands {
         : providerId === "codewhale"
           ? "codewhale_get_pending_approval"
           : undefined,
+    isSessionBusy:
+      providerId === "opencode" ? "opencode_is_session_busy" : undefined,
     deleteThread:
       providerId === "opencode"
         ? "opencode_delete_session"

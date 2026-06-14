@@ -1,12 +1,13 @@
 import { create } from "zustand";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
+import { safeConfirm, safePickDirectory } from "../utils/tauriDialog";
 import {
   parseFileLinkText,
   resolveTerminalFilePath,
 } from "../utils/terminalFileLinks";
 import { parentPath } from "../utils/path";
+import { resolveDroppedOpenPath } from "../utils/externalFileDrop";
 import { PREFERENCES_TAB_PATH } from "../utils/virtualTabs";
 import type { FsEntry } from "../types/fs";
 
@@ -60,6 +61,11 @@ interface WorkspaceState {
   reloadActiveFile: () => Promise<void>;
   saveActiveFile: () => Promise<void>;
   listDirectory: (path: string) => Promise<FsEntry[]>;
+  importPathsIntoExplorer: (
+    targetDir: string,
+    sources: string[],
+  ) => Promise<string[]>;
+  openDroppedPaths: (paths: string[]) => Promise<void>;
   startWorkspaceWatch: (path: string) => Promise<void>;
   stopWorkspaceWatch: () => Promise<void>;
   setupWorkspaceListener: () => Promise<() => void>;
@@ -209,14 +215,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const label = fileName(path);
     const kind = resolvedIsDir ? "文件夹" : "文件";
     const message = `确定删除${kind}「${label}」吗？此操作不可撤销。`;
-    const confirmed = isTauri()
-      ? await confirm(message, {
-          title: "确认删除",
-          kind: "warning",
-          okLabel: "删除",
-          cancelLabel: "取消",
-        })
-      : window.confirm(message);
+    const confirmed = await safeConfirm(message, {
+      title: "确认删除",
+      kind: "warning",
+      okLabel: "删除",
+      cancelLabel: "取消",
+    });
     if (!confirmed) return;
 
     try {
@@ -246,8 +250,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   openFolder: async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== "string") return;
+    const selected = await safePickDirectory();
+    if (!selected) return;
 
     await get().stopWorkspaceWatch();
     set({
@@ -386,6 +390,43 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   listDirectory: async (path) => {
     return tauriInvoke<FsEntry[]>("list_directory", { path });
+  },
+
+  importPathsIntoExplorer: async (targetDir, sources) => {
+    const uniqueSources = Array.from(new Set(sources.map((item) => item.trim()))).filter(
+      (item) => item.length > 0,
+    );
+    if (uniqueSources.length === 0) return [];
+
+    try {
+      const copied = await tauriInvoke<string[]>("copy_paths_into_directory", {
+        sources: uniqueSources,
+        destinationDir: targetDir,
+      });
+      set((state) => ({
+        explorerError: null,
+        explorerRefreshKey: state.explorerRefreshKey + 1,
+        explorerSelectedPath: copied[copied.length - 1] ?? state.explorerSelectedPath,
+      }));
+      return copied;
+    } catch (error) {
+      set({ explorerError: String(error) });
+      throw error;
+    }
+  },
+
+  openDroppedPaths: async (paths) => {
+    const { rootPath } = get();
+
+    for (const raw of paths) {
+      const path = resolveDroppedOpenPath(raw, rootPath);
+      if (!path) continue;
+      try {
+        await get().openFile(path);
+      } catch {
+        // skip folders or unreadable paths
+      }
+    }
   },
 
   startWorkspaceWatch: async (path) => {

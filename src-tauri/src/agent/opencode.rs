@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Output, Stdio};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use crate::agent::codewhale::ThreadInfo;
 
@@ -18,6 +18,9 @@ pub struct OpencodeState {
     pub child: Option<Child>,
     pub listening: Arc<AtomicBool>,
     pub workspace: Option<String>,
+    pub subscribed_session_id: Arc<Mutex<Option<String>>>,
+    pub sse_task_active: Arc<AtomicBool>,
+    pub sse_reconnect: Arc<AtomicBool>,
 }
 
 fn provider_config() -> Result<ProviderConfig, String> {
@@ -549,24 +552,40 @@ pub async fn send_prompt(
 }
 
 fn permission_request_id(properties: &Value) -> Option<String> {
-    if let Some(request_id) = properties.get("requestID").and_then(|v| v.as_str()) {
-        if !request_id.is_empty() {
-            return Some(request_id.to_string());
+    for key in ["requestID", "id", "permissionID"] {
+        let Some(id) = properties.get(key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !id.is_empty() {
+            return Some(id.to_string());
         }
     }
 
-    let id = properties.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let call_id = properties
+    properties
         .get("tool")
         .and_then(|tool| tool.get("callID"))
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+}
 
-    if !id.is_empty() && id != call_id && !id.starts_with("call_") {
-        return Some(id.to_string());
+fn permission_event_for_session(properties: &Value, session_id: &str, strict: bool) -> bool {
+    match properties.get("sessionID").and_then(|v| v.as_str()) {
+        Some(sid) => sid == session_id,
+        None => !strict,
     }
+}
 
-    None
+fn permission_entries(json: &Value) -> Vec<Value> {
+    if let Some(items) = json.as_array() {
+        return items.clone();
+    }
+    for key in ["data", "permissions", "items", "requests"] {
+        if let Some(items) = json.get(key).and_then(|v| v.as_array()) {
+            return items.clone();
+        }
+    }
+    Vec::new()
 }
 
 fn permission_description(properties: &Value) -> String {
@@ -624,7 +643,7 @@ pub async fn get_pending_permission(
     }
 
     let json: Value = response.json().await.map_err(|e| e.to_string())?;
-    let entries = json.as_array().cloned().unwrap_or_default();
+    let entries = permission_entries(&json);
 
     for entry in entries {
         let sid = entry.get("sessionID").and_then(|v| v.as_str());
@@ -651,8 +670,30 @@ pub async fn approve_permission(
     session_id: &str,
     permission_id: &str,
     allow: bool,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
     let reply = if allow { "once" } else { "reject" };
+
+    let mut session_request = client.post(format!(
+        "{url}/session/{session_id}/permissions/{permission_id}"
+    ));
+    if let Some(dir) = workspace.filter(|value| !value.is_empty()) {
+        session_request = session_request.query(&[("directory", dir)]);
+    }
+    let session_response = session_request
+        .json(&serde_json::json!({
+            "response": reply,
+            "remember": false,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if session_response.status().is_success() {
+        return Ok(());
+    }
+
+    let session_text = session_response.text().await.unwrap_or_default();
 
     let response = client
         .post(format!("{url}/permission/{permission_id}/reply"))
@@ -666,24 +707,9 @@ pub async fn approve_permission(
     }
 
     let text = response.text().await.unwrap_or_default();
-    let fallback = client
-        .post(format!(
-            "{url}/session/{session_id}/permissions/{permission_id}"
-        ))
-        .json(&serde_json::json!({
-            "response": reply,
-            "remember": false,
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !fallback.status().is_success() {
-        let fallback_text = fallback.text().await.unwrap_or_default();
-        return Err(format!("Approval failed: {text}; fallback: {fallback_text}"));
-    }
-
-    Ok(())
+    Err(format!(
+        "Approval failed: session={session_text}; permission={text}"
+    ))
 }
 
 fn workspaces_match(left: &str, right: &str) -> bool {
@@ -701,6 +727,29 @@ fn part_text(part: &Value) -> Option<String> {
     part.get("text")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn part_timestamp(part: &Value, fallback: i64) -> i64 {
+    part.get("time")
+        .and_then(|time| time.get("start").or_else(|| time.get("created")))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(fallback)
+}
+
+fn normalize_planning_message_order(batch: &mut [HistoryMessage]) {
+    let mut index = 0usize;
+    while index + 1 < batch.len() {
+        let swap_pair = batch[index].role == "assistant"
+            && batch[index].tool_name.is_none()
+            && batch[index + 1].role == "tool"
+            && batch[index + 1].tool_name.as_deref() == Some("task");
+        if swap_pair {
+            batch.swap(index, index + 1);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
 }
 
 pub async fn list_sessions(
@@ -811,23 +860,26 @@ pub async fn load_session_history(
                 });
             }
 
+            let mut batch = Vec::new();
+
             for (index, part) in parts.iter().enumerate() {
                 let part_type = part["type"].as_str().unwrap_or("");
                 let part_id = part["id"]
                     .as_str()
                     .unwrap_or(&format!("{message_id}-{index}"))
                     .to_string();
+                let part_time = part_timestamp(part, timestamp);
 
                 match part_type {
                     "text" => {
                         if let Some(text) = part_text(part) {
                             if !text.is_empty() {
-                                messages.push(HistoryMessage {
+                                batch.push(HistoryMessage {
                                     id: part_id,
                                     role: "assistant".to_string(),
                                     content: text,
                                     tool_name: None,
-                                    timestamp,
+                                    timestamp: part_time,
                                 });
                             }
                         }
@@ -835,47 +887,170 @@ pub async fn load_session_history(
                     "reasoning" => {
                         if let Some(text) = part_text(part) {
                             if !text.is_empty() {
-                                messages.push(HistoryMessage {
+                                batch.push(HistoryMessage {
                                     id: part_id,
                                     role: "assistant".to_string(),
                                     content: format!("> {text}"),
                                     tool_name: None,
-                                    timestamp,
+                                    timestamp: part_time,
                                 });
                             }
                         }
                     }
                     "tool" | "tool-call" => {
-                        let tool_name = part["tool"]
-                            .as_str()
-                            .or_else(|| part["name"].as_str())
-                            .unwrap_or("tool")
-                            .to_string();
                         let state = part
                             .get("state")
                             .or_else(|| part.get("data"))
                             .cloned()
                             .unwrap_or(Value::Null);
+                        if state.is_null() {
+                            continue;
+                        }
+                        if let Some(obj) = state.as_object() {
+                            if obj.is_empty() {
+                                continue;
+                            }
+                        }
+                        let tool_name = part["tool"]
+                            .as_str()
+                            .or_else(|| part["name"].as_str())
+                            .unwrap_or("tool")
+                            .to_string();
                         let content = serde_json::to_string_pretty(&state)
                             .unwrap_or_else(|_| state.to_string());
-                        messages.push(HistoryMessage {
+                        batch.push(HistoryMessage {
                             id: part_id,
                             role: "tool".to_string(),
                             content,
                             tool_name: Some(tool_name),
-                            timestamp,
+                            timestamp: part_time,
                         });
                     }
                     _ => {}
                 }
             }
+
+            normalize_planning_message_order(&mut batch);
+            messages.extend(batch);
         }
     }
 
     Ok(messages)
 }
 
-pub async fn delete_session(
+fn tool_part_is_active(part: &Value) -> bool {
+    if part.get("type").and_then(|v| v.as_str()) != Some("tool") {
+        return false;
+    }
+    part.get("state")
+        .and_then(|state| state.get("status"))
+        .and_then(|v| v.as_str())
+        .map(|status| status == "running" || status == "pending")
+        .unwrap_or(false)
+}
+
+pub async fn is_session_busy(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+) -> Result<bool, String> {
+    if get_pending_permission(client, url, session_id)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+
+    let response = client
+        .get(format!("{url}/session/{session_id}/message"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+
+    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    let entries = json.as_array().cloned().unwrap_or_default();
+    let Some(last) = entries.last() else {
+        return Ok(false);
+    };
+
+    let info = last.get("info").cloned().unwrap_or(Value::Null);
+    if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return Ok(true);
+    }
+
+    if info.get("time").and_then(|t| t.get("completed")).is_none() {
+        return Ok(true);
+    }
+
+    let parts = last
+        .get("parts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for part in parts {
+        if tool_part_is_active(&part) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+pub async fn abort_session(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let response = client
+        .post(format!("{url}/session/{session_id}/abort"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() || response.status().as_u16() == 404 {
+        return Ok(());
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    if text.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Abort session failed: {text}"))
+    }
+}
+
+fn friendly_delete_error(text: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<Value>(text) {
+        if let Some(message) = json
+            .pointer("/error/data/message")
+            .and_then(|v| v.as_str())
+        {
+            return format!("删除会话失败：{message}");
+        }
+        if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
+            return format!("删除会话失败：{message}");
+        }
+    }
+
+    if text.contains("FOREIGN KEY") || text.contains("Failed query") {
+        return "删除会话失败：会话仍在后台运行，请稍后重试".to_string();
+    }
+
+    format!("Delete session failed: {text}")
+}
+
+fn delete_error_is_not_found(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("notfounderror")
+        || lower.contains("not found")
+        || lower.contains("session not found")
+}
+
+async fn delete_session_once(
     client: &reqwest::Client,
     url: &str,
     session_id: &str,
@@ -886,20 +1061,94 @@ pub async fn delete_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Delete session failed: {text}"));
+    if response.status().is_success() || response.status().as_u16() == 404 {
+        return Ok(());
     }
 
-    Ok(())
+    let text = response.text().await.unwrap_or_default();
+    if delete_error_is_not_found(&text) {
+        return Ok(());
+    }
+    Err(friendly_delete_error(&text))
+}
+
+fn delete_should_retry(message: &str) -> bool {
+    message.contains("FOREIGN KEY")
+        || message.contains("Failed query")
+        || message.contains("ConstraintError")
+        || message.contains("仍在后台运行")
+}
+
+fn is_abort_message(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized == "aborted"
+        || normalized == "abort"
+        || normalized.contains("cancelled")
+        || normalized.contains("canceled")
+}
+
+fn turn_abort_or_error_event(message: &str) -> Value {
+    if is_abort_message(message) {
+        serde_json::json!({
+            "event": "turn.aborted",
+            "payload": {}
+        })
+    } else {
+        serde_json::json!({
+            "event": "turn.error",
+            "payload": { "message": message }
+        })
+    }
+}
+
+pub async fn cancel_generation(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    abort_session(client, url, session_id).await
+}
+
+pub async fn delete_session(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let mut last_error = String::from("删除会话失败");
+
+    for attempt in 0..3 {
+        let _ = abort_session(client, url, session_id).await;
+        let wait_ms = 250 + attempt * 250;
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+
+        match delete_session_once(client, url, session_id).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if delete_error_is_not_found(&err) {
+                    return Ok(());
+                }
+                last_error = err;
+                if attempt < 2 && delete_should_retry(&last_error) {
+                    continue;
+                }
+                return Err(last_error);
+            }
+        }
+    }
+
+    Err(last_error)
 }
 
 pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
     let event_type = raw.get("type").and_then(|v| v.as_str())?;
     let properties = raw.get("properties").unwrap_or(raw);
 
-    if let Some(sid) = properties.get("sessionID").and_then(|v| v.as_str()) {
-        if sid != session_id {
+    let event_session_id = properties
+        .get("sessionID")
+        .or_else(|| raw.get("sessionID"))
+        .and_then(|v| v.as_str());
+    if let Some(sid) = event_session_id {
+        if !session_id.is_empty() && sid != session_id {
             return None;
         }
     }
@@ -931,18 +1180,29 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             }
 
             if part_type == "tool" || part_type == "tool-call" {
+                let state = part
+                    .get("state")
+                    .or_else(|| part.get("data"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if state.is_null() {
+                    return None;
+                }
+                if let Some(obj) = state.as_object() {
+                    if obj.is_empty() {
+                        return None;
+                    }
+                }
                 return Some(serde_json::json!({
-                    "event": "item.completed",
+                    "event": "item.updated",
                     "payload": {
                         "kind": "tool_call",
+                        "id": part.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                         "name": part.get("tool")
                             .or_else(|| part.get("name"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("tool"),
-                        "args": part.get("state")
-                            .or_else(|| part.get("data"))
-                            .cloned()
-                            .unwrap_or(Value::Null),
+                        "args": state,
                     }
                 }));
             }
@@ -956,10 +1216,24 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
                         return Some(serde_json::json!({
-                            "event": "item.delta",
+                            "event": "item.text",
                             "payload": {
-                                "delta": text,
+                                "text": text,
                                 "kind": "agent_message",
+                            }
+                        }));
+                    }
+                }
+            }
+
+            if part_type == "reasoning" {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        return Some(serde_json::json!({
+                            "event": "item.text",
+                            "payload": {
+                                "text": text,
+                                "kind": "reasoning",
                             }
                         }));
                     }
@@ -968,21 +1242,28 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
 
             None
         }
-        "permission.asked" | "permission.updated" => {
-            let id = permission_request_id(properties)?;
+        "permission.asked" | "permission.updated" | "permission.request" => {
+            if !permission_event_for_session(properties, session_id, false) {
+                return None;
+            }
             let description = permission_description(properties);
             Some(serde_json::json!({
                 "event": "approval.required",
                 "payload": {
-                    "approval_id": id,
+                    "approval_id": permission_request_id(properties).unwrap_or_default(),
                     "description": description,
                 }
             }))
         }
-        "permission.replied" => Some(serde_json::json!({
-            "event": "approval.resolved",
-            "payload": {}
-        })),
+        "permission.replied" => {
+            if !permission_event_for_session(properties, session_id, true) {
+                return None;
+            }
+            Some(serde_json::json!({
+                "event": "approval.resolved",
+                "payload": {}
+            }))
+        }
         "session.error" => {
             let message = properties
                 .get("error")
@@ -994,10 +1275,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                         .and_then(|v| v.as_str())
                 })
                 .unwrap_or("OpenCode 会话出错");
-            Some(serde_json::json!({
-                "event": "turn.error",
-                "payload": { "message": message }
-            }))
+            Some(turn_abort_or_error_event(message))
         }
         "message.updated" => {
             let info = properties.get("info")?;
@@ -1007,19 +1285,16 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             if info.get("time").and_then(|t| t.get("completed")).is_none() {
                 return None;
             }
-            let message = info
-                .get("error")
-                .and_then(|error| {
-                    error
-                        .get("data")
-                        .and_then(|data| data.get("message"))
-                        .or_else(|| error.get("message"))
-                        .and_then(|v| v.as_str())
-                })?;
-            Some(serde_json::json!({
-                "event": "turn.error",
-                "payload": { "message": message }
-            }))
+            if let Some(error) = info.get("error") {
+                let message = error
+                    .get("data")
+                    .and_then(|data| data.get("message"))
+                    .or_else(|| error.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("OpenCode 会话出错");
+                return Some(turn_abort_or_error_event(message));
+            }
+            None
         }
         "session.status" | "session.idle" => {
             let is_idle = if event_type == "session.idle" {
@@ -1031,10 +1306,24 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                     == Some("idle")
             };
             if is_idle {
-                Some(serde_json::json!({ "event": "turn.completed", "payload": {} }))
-            } else {
-                None
+                return Some(serde_json::json!({
+                    "event": "session.idle",
+                    "payload": {}
+                }));
             }
+
+            let is_busy = properties
+                .get("status")
+                .and_then(|status| status.get("type").and_then(|v| v.as_str()))
+                == Some("busy");
+            if is_busy {
+                return Some(serde_json::json!({
+                    "event": "session.busy",
+                    "payload": {}
+                }));
+            }
+
+            None
         }
         _ => None,
     }

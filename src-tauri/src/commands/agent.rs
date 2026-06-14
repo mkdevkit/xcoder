@@ -2,14 +2,14 @@ use crate::agent::codewhale::{
     approve_tool, base_url, create_thread, delete_thread, get_pending_approval,
     get_thread_latest_seq, is_healthy as codewhale_is_healthy, list_models, list_thread_summaries,
     load_thread_history, normalize_event as codewhale_normalize_event, patch_thread_mode,
-    run_doctor, send_turn, spawn_runtime, wait_for_health, CodewhaleState, RuntimeStatus,
+    run_doctor, send_turn, spawn_runtime, wait_for_health, cancel_turn, CodewhaleState, RuntimeStatus,
     ThreadInfo,
 };
 use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
 use crate::agent::opencode::{
-    approve_permission, base_url as opencode_base_url, check_installed, create_session,
+    approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
     delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
-    list_provider_models, list_sessions, load_session_history,
+    list_provider_models, list_sessions, load_session_history, is_session_busy,
     normalize_event as opencode_normalize_event, send_prompt, update_session_title,
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
@@ -17,6 +17,30 @@ use crate::agent::opencode::{
 use futures_util::StreamExt;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
+
+async fn opencode_resolve_service_url(
+    state: &State<'_, Mutex<OpencodeState>>,
+) -> Result<String, String> {
+    let cached = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        guard.base_url.clone()
+    };
+    if let Some(url) = cached {
+        return Ok(url);
+    }
+
+    let url = opencode_base_url();
+    let client = reqwest::Client::new();
+    if !opencode_is_healthy(&client, &url).await {
+        return Err("OpenCode server is not running".to_string());
+    }
+
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    if guard.base_url.is_none() {
+        guard.base_url = Some(url.clone());
+    }
+    Ok(url)
+}
 
 #[tauri::command]
 pub fn codewhale_doctor() -> Result<serde_json::Value, String> {
@@ -220,6 +244,23 @@ pub async fn codewhale_send_turn(
 
     let client = reqwest::Client::new();
     send_turn(&client, &url, &thread_id, &message).await
+}
+
+#[tauri::command]
+pub async fn codewhale_cancel_turn(
+    thread_id: String,
+    state: State<'_, Mutex<CodewhaleState>>,
+) -> Result<(), String> {
+    let url = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        guard
+            .base_url
+            .clone()
+            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
+    };
+
+    let client = reqwest::Client::new();
+    cancel_turn(&client, &url, &thread_id).await
 }
 
 #[tauri::command]
@@ -691,6 +732,23 @@ pub async fn opencode_send_turn(
 }
 
 #[tauri::command]
+pub async fn opencode_cancel_turn(
+    session_id: String,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<(), String> {
+    let url = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        guard
+            .base_url
+            .clone()
+            .ok_or_else(|| "OpenCode server is not running".to_string())?
+    };
+
+    let client = reqwest::Client::new();
+    cancel_generation(&client, &url, &session_id).await
+}
+
+#[tauri::command]
 pub async fn opencode_set_thread_mode(
     _thread_id: String,
     _mode: String,
@@ -706,16 +764,45 @@ pub async fn opencode_approve(
     allow: bool,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
-    let url = {
+    let (url, workspace) = {
         let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
+        (
+            guard
+                .base_url
+                .clone()
+                .ok_or_else(|| "OpenCode server is not running".to_string())?,
+            guard.workspace.clone(),
+        )
     };
 
     let client = reqwest::Client::new();
-    approve_permission(&client, &url, &thread_id, &approval_id, allow).await
+    approve_permission(
+        &client,
+        &url,
+        &thread_id,
+        &approval_id,
+        allow,
+        workspace.as_deref(),
+    )
+    .await
+}
+
+fn parse_opencode_sse_payload(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') {
+        return None;
+    }
+    if let Some(data) = trimmed.strip_prefix("data:") {
+        let payload = data.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            return None;
+        }
+        return Some(payload);
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return Some(trimmed);
+    }
+    None
 }
 
 #[tauri::command]
@@ -724,55 +811,93 @@ pub async fn opencode_subscribe_events(
     app: AppHandle,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
-    let (url, listening) = {
+    let (url, listening, subscribed_session_id, sse_task_active, sse_reconnect) = {
         let guard = state.lock().map_err(|e| e.to_string())?;
         let url = guard
             .base_url
             .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+            .unwrap_or_else(opencode_base_url);
+        *guard
+            .subscribed_session_id
+            .lock()
+            .map_err(|e| e.to_string())? = Some(thread_id);
         guard.listening.store(true, std::sync::atomic::Ordering::SeqCst);
-        (url, guard.listening.clone())
+        guard
+            .sse_reconnect
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        (
+            url,
+            guard.listening.clone(),
+            guard.subscribed_session_id.clone(),
+            guard.sse_task_active.clone(),
+            guard.sse_reconnect.clone(),
+        )
     };
+
+    if sse_task_active.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    sse_task_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let events_url = format!("{url}/event");
 
-        let response = match client.get(&events_url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = app.emit(
-                    "agent-error",
-                    serde_json::json!({
-                        "providerId": "opencode",
-                        "message": format!("SSE connect failed: {e}"),
-                    }),
-                );
-                return;
-            }
-        };
-
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-
         while listening.load(std::sync::atomic::Ordering::SeqCst) {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let response = match client.get(&events_url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = app.emit(
+                        "agent-error",
+                        serde_json::json!({
+                            "providerId": "opencode",
+                            "message": format!("SSE connect failed: {error}"),
+                        }),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    continue;
+                }
+            };
 
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let block = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
 
-                        for line in block.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data.trim() == "[DONE]" {
+            loop {
+                if !listening.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                if sse_reconnect.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+
+                match stream.next().await {
+                    Some(Ok(chunk)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let block = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            let session_id = subscribed_session_id
+                                .lock()
+                                .ok()
+                                .and_then(|guard| guard.clone())
+                                .unwrap_or_default();
+
+                            if session_id.is_empty() {
+                                continue;
+                            }
+
+                            for line in block.lines() {
+                                let Some(data) = parse_opencode_sse_payload(line) else {
                                     continue;
-                                }
-                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                };
+                                if let Ok(event) =
+                                    serde_json::from_str::<serde_json::Value>(data)
+                                {
                                     if let Some(normalized) =
-                                        opencode_normalize_event(&event, &thread_id)
+                                        opencode_normalize_event(&event, &session_id)
                                     {
                                         let payload = serde_json::json!({
                                             "providerId": "opencode",
@@ -784,20 +909,26 @@ pub async fn opencode_subscribe_events(
                             }
                         }
                     }
+                    Some(Err(error)) => {
+                        let _ = app.emit(
+                            "agent-error",
+                            serde_json::json!({
+                                "providerId": "opencode",
+                                "message": format!("SSE stream error: {error}"),
+                            }),
+                        );
+                        break;
+                    }
+                    None => break,
                 }
-                Some(Err(e)) => {
-                    let _ = app.emit(
-                        "agent-error",
-                        serde_json::json!({
-                            "providerId": "opencode",
-                            "message": format!("SSE stream error: {e}"),
-                        }),
-                    );
-                    break;
-                }
-                None => break,
+            }
+
+            if listening.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }
         }
+
+        sse_task_active.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(())
@@ -826,14 +957,7 @@ pub async fn opencode_get_pending_approval(
     session_id: String,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<Option<PendingApproval>, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
-    };
-
+    let url = opencode_resolve_service_url(&state).await?;
     let client = reqwest::Client::new();
     get_pending_permission(&client, &url, &session_id).await
 }
@@ -843,16 +967,19 @@ pub async fn opencode_load_session_history(
     session_id: String,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<Vec<HistoryMessage>, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "OpenCode server is not running".to_string())?
-    };
-
+    let url = opencode_resolve_service_url(&state).await?;
     let client = reqwest::Client::new();
     load_session_history(&client, &url, &session_id).await
+}
+
+#[tauri::command]
+pub async fn opencode_is_session_busy(
+    session_id: String,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<bool, String> {
+    let url = opencode_resolve_service_url(&state).await?;
+    let client = reqwest::Client::new();
+    is_session_busy(&client, &url, &session_id).await
 }
 
 #[tauri::command]

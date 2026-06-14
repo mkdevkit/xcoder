@@ -48,6 +48,7 @@ export type TranslationKey =
   | "chat.restart"
   | "chat.send"
   | "chat.sending"
+  | "chat.cancel"
   | "chat.newSession"
   | "chat.deleteSession"
   | "chat.selectSession"

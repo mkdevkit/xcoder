@@ -236,6 +236,62 @@ pub async fn send_turn(
     response.json().await.map_err(|e| e.to_string())
 }
 
+async fn active_turn_id(
+    client: &reqwest::Client,
+    url: &str,
+    thread_id: &str,
+) -> Result<Option<String>, String> {
+    let response = client
+        .get(format!("{url}/v1/threads/{thread_id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Load thread failed: {text}"));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let turns = json["turns"].as_array().cloned().unwrap_or_default();
+
+    for turn in turns.iter().rev() {
+        let status = turn["status"].as_str().unwrap_or("");
+        if status == "in_progress" || status == "awaiting_approval" {
+            if let Some(id) = turn["id"].as_str().filter(|id| !id.is_empty()) {
+                return Ok(Some(id.to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub async fn cancel_turn(
+    client: &reqwest::Client,
+    url: &str,
+    thread_id: &str,
+) -> Result<(), String> {
+    let Some(turn_id) = active_turn_id(client, url, thread_id).await? else {
+        return Err("当前没有可取消的生成任务".to_string());
+    };
+
+    let response = client
+        .post(format!(
+            "{url}/v1/threads/{thread_id}/turns/{turn_id}/interrupt"
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    Err(format!("Cancel turn failed: {text}"))
+}
+
 pub async fn patch_thread_mode(
     client: &reqwest::Client,
     url: &str,
@@ -586,7 +642,13 @@ pub async fn delete_thread(
         .map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
+        if response.status().as_u16() == 404 {
+            return Ok(());
+        }
         let text = response.text().await.unwrap_or_default();
+        if text.to_ascii_lowercase().contains("not found") {
+            return Ok(());
+        }
         return Err(format!("Delete thread failed: {text}"));
     }
 

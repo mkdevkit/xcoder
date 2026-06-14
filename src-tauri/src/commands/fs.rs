@@ -149,3 +149,73 @@ pub fn create_path(parent: String, name: String, is_dir: bool) -> Result<String,
 
     Ok(new_path.to_string_lossy().to_string())
 }
+
+fn copy_entry_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    if src.is_file() {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(src, dest).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    if src.is_dir() {
+        fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child_dest = dest.join(entry.file_name());
+            copy_entry_recursive(&entry.path(), &child_dest)?;
+        }
+        return Ok(());
+    }
+
+    Err(format!("Source not found: {}", src.display()))
+}
+
+#[tauri::command]
+pub fn copy_paths_into_directory(
+    sources: Vec<String>,
+    destination_dir: String,
+) -> Result<Vec<String>, String> {
+    let dest_dir = Path::new(&destination_dir);
+    if !dest_dir.is_dir() {
+        return Err(format!("Not a directory: {destination_dir}"));
+    }
+
+    let mut copied = Vec::new();
+    for source in sources {
+        let src = Path::new(&source);
+        if !src.exists() {
+            return Err(format!("Source not found: {source}"));
+        }
+
+        let file_name = src
+            .file_name()
+            .ok_or_else(|| format!("Invalid source path: {source}"))?;
+        let dest = dest_dir.join(file_name);
+
+        if dest.exists() {
+            return Err(format!(
+                "已存在同名项: {}",
+                file_name.to_string_lossy()
+            ));
+        }
+
+        if src == dest_dir {
+            return Err("不能复制到相同目录".to_string());
+        }
+
+        if src.is_dir() {
+            let canonical_src = src.canonicalize().map_err(|e| e.to_string())?;
+            let canonical_dest = dest_dir.canonicalize().map_err(|e| e.to_string())?;
+            if canonical_dest.starts_with(&canonical_src) {
+                return Err("不能将文件夹复制到其子目录".to_string());
+            }
+        }
+
+        copy_entry_recursive(src, &dest)?;
+        copied.push(dest.to_string_lossy().to_string());
+    }
+
+    Ok(copied)
+}

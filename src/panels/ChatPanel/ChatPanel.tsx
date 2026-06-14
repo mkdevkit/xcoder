@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalGate } from "../../components/ApprovalGate";
 import { MessageBubble } from "../../components/MessageBubble";
+import { PanelResizeHandle } from "../../components/PanelResizeHandle";
 import {
   RichChatComposer,
   type RichChatComposerHandle,
@@ -17,10 +18,41 @@ import {
 } from "../../utils/opencodeModels";
 import { isTauri } from "../../utils/tauri";
 
+const CHAT_INPUT_HEIGHT_KEY = "xcoder:chat-input-height";
+const CHAT_INPUT_MIN_HEIGHT = 112;
+const CHAT_INPUT_DEFAULT_HEIGHT = 168;
+const CHAT_MESSAGES_MIN_HEIGHT = 120;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function readStoredInputHeight() {
+  try {
+    const raw = localStorage.getItem(CHAT_INPUT_HEIGHT_KEY);
+    if (!raw) return CHAT_INPUT_DEFAULT_HEIGHT;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return CHAT_INPUT_DEFAULT_HEIGHT;
+    return clamp(parsed, CHAT_INPUT_MIN_HEIGHT, 600);
+  } catch {
+    return CHAT_INPUT_DEFAULT_HEIGHT;
+  }
+}
+
+function persistInputHeight(height: number) {
+  try {
+    localStorage.setItem(CHAT_INPUT_HEIGHT_KEY, String(height));
+  } catch {
+    // ignore storage failures
+  }
+}
+
 export function ChatPanel() {
+  const panelRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<RichChatComposerHandle>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [hasContent, setHasContent] = useState(false);
+  const [inputAreaHeight, setInputAreaHeight] = useState(readStoredInputHeight);
   const {
     config,
     providerId,
@@ -54,6 +86,7 @@ export function ChatPanel() {
     setModel,
     setOpencodeVendor,
     sendMessage,
+    cancelGeneration,
     approve,
     setupEventListener,
   } = useChatStore();
@@ -144,12 +177,33 @@ export function ChatPanel() {
     setHasContent(false);
   };
 
+  const handleSendOrCancel = async () => {
+    if (streaming) {
+      await cancelGeneration();
+      return;
+    }
+    await handleSend();
+  };
+
   const handleComposerChange = () => {
     setHasContent(!(composerRef.current?.isEmpty() ?? true));
   };
 
+  const handleInputResize = useCallback((delta: number) => {
+    const panelHeight = panelRef.current?.clientHeight ?? 600;
+    const maxHeight = Math.max(
+      CHAT_INPUT_MIN_HEIGHT,
+      panelHeight - CHAT_MESSAGES_MIN_HEIGHT,
+    );
+    setInputAreaHeight((current) => {
+      const next = clamp(current - delta, CHAT_INPUT_MIN_HEIGHT, maxHeight);
+      persistInputHeight(next);
+      return next;
+    });
+  }, []);
+
   return (
-    <div className="chat-panel">
+    <div className="chat-panel" ref={panelRef}>
       <div className="chat-header">
         <div className="chat-header-top">
           <div className="panel-title">{providerLabel}</div>
@@ -321,9 +375,15 @@ export function ChatPanel() {
         <div ref={bottomRef} />
       </div>
 
+      <PanelResizeHandle
+        direction="vertical"
+        onResizeDelta={handleInputResize}
+      />
+
       <div
         ref={dropAreaRef}
         className={`chat-input-area ${dragOver ? "drag-over" : ""}`}
+        style={{ height: inputAreaHeight }}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -341,11 +401,11 @@ export function ChatPanel() {
           onDrop={handleDrop}
         />
         <button
-          className="primary send-btn"
-          disabled={!canChat || streaming || !hasContent}
-          onClick={handleSend}
+          className={`send-btn ${streaming ? "" : "primary"}`}
+          disabled={streaming ? !canChat : !canChat || !hasContent}
+          onClick={() => handleSendOrCancel().catch(console.error)}
         >
-          {streaming ? t("chat.sending") : t("chat.send")}
+          {streaming ? t("chat.cancel") : t("chat.send")}
         </button>
       </div>
 
@@ -429,10 +489,24 @@ export function ChatPanel() {
         }
         .chat-messages {
           flex: 1;
+          min-height: 0;
           overflow: auto;
           padding: 12px;
         }
+        .chat-panel .panel-resize-handle.vertical {
+          flex-shrink: 0;
+          height: 4px;
+          cursor: row-resize;
+          background: transparent;
+          transition: background 0.15s;
+        }
+        .chat-panel .panel-resize-handle.vertical:hover,
+        .chat-panel .panel-resize-handle.vertical:active {
+          background: var(--accent);
+        }
         .chat-input-area {
+          flex-shrink: 0;
+          min-height: 0;
           padding: 12px;
           border-top: 1px solid var(--border);
           display: flex;
@@ -440,6 +514,19 @@ export function ChatPanel() {
           gap: 8px;
           border-radius: 0;
           transition: background 0.15s, box-shadow 0.15s;
+          overflow: hidden;
+        }
+        .chat-input-area .rich-chat-composer-wrap {
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+        }
+        .chat-input-area .rich-chat-composer {
+          flex: 1;
+          min-height: 0;
+          max-height: none;
+          height: auto;
         }
         .chat-input-area.drag-over {
           background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));

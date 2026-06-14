@@ -5,6 +5,7 @@ import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
 import { isPreferencesTab } from "../../utils/virtualTabs";
 import { startFileDrag } from "../../utils/chatFileReference";
+import { useDropZone } from "../../hooks/useDropZone";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
 
@@ -21,9 +22,13 @@ export function EditorPanel() {
     consumeEditorReveal,
     getActiveTab,
     rootPath,
+    openDroppedPaths,
   } = useWorkspaceStore();
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const editorDrop = useDropZone({
+    onDrop: (paths) => openDroppedPaths(paths).catch(console.error),
+  });
   const activeTab = getActiveTab();
   const showingPreferences = activeFile ? isPreferencesTab(activeFile) : false;
 
@@ -60,7 +65,14 @@ export function EditorPanel() {
 
   if (!activeFile || !activeTab) {
     return (
-      <div className="editor-empty">
+      <div
+        className={`editor-empty ${editorDrop.active ? "drop-active" : ""}`}
+        data-zone="editor"
+        onDragEnter={editorDrop.handleDragEnter}
+        onDragOver={editorDrop.handleDragOver}
+        onDragLeave={editorDrop.handleDragLeave}
+        onDrop={editorDrop.handleDrop}
+      >
         <p>{t("editor.empty")}</p>
         <style>{`
           .editor-empty {
@@ -69,6 +81,11 @@ export function EditorPanel() {
             align-items: center;
             justify-content: center;
             color: var(--text-muted);
+          }
+          .editor-empty.drop-active {
+            background: color-mix(in srgb, var(--accent) 8%, var(--bg-editor));
+            outline: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border));
+            outline-offset: -8px;
           }
         `}</style>
       </div>
@@ -81,7 +98,14 @@ export function EditorPanel() {
   };
 
   return (
-    <div className="editor-panel" data-zone="editor">
+    <div
+      className={`editor-panel ${editorDrop.active ? "drop-active" : ""}`}
+      data-zone="editor"
+      onDragEnter={editorDrop.handleDragEnter}
+      onDragOver={editorDrop.handleDragOver}
+      onDragLeave={editorDrop.handleDragLeave}
+      onDrop={editorDrop.handleDrop}
+    >
       <div className="editor-tabs">
         {openTabs.map((tab) => {
           const isActive = tab.path === activeFile;
@@ -147,6 +171,11 @@ export function EditorPanel() {
           display: flex;
           flex-direction: column;
           background: var(--bg-editor);
+        }
+        .editor-panel.drop-active .editor-body {
+          background: color-mix(in srgb, var(--accent) 6%, var(--bg-editor));
+          outline: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border));
+          outline-offset: -4px;
         }
         .editor-tabs {
           display: flex;

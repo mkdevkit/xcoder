@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
+import { useDropZone } from "../../hooks/useDropZone";
 import type { ExplorerEditState } from "../../stores/workspace";
 import type { FsEntry } from "../../types/fs";
+import { parentPath } from "../../utils/path";
 import { startFileDrag } from "../../utils/chatFileReference";
 
 interface InlineNameInputProps {
@@ -59,6 +61,7 @@ interface TreeNodeProps {
   rootPath: string;
   selectedPath: string | null;
   explorerEdit: ExplorerEditState | null;
+  dropTargetDir: string | null;
   onSelect: (path: string, isDir: boolean) => void;
   onOpen: (entry: FsEntry) => void;
   onCommitEdit: (name: string) => void;
@@ -72,6 +75,7 @@ function TreeNode({
   rootPath,
   selectedPath,
   explorerEdit,
+  dropTargetDir,
   onSelect,
   onOpen,
   onCommitEdit,
@@ -87,6 +91,8 @@ function TreeNode({
   const isCreatingHere =
     explorerEdit?.mode === "create" && explorerEdit.parentDir === entry.path;
   const isSelected = selectedPath === entry.path;
+  const itemDropDir = entry.is_dir ? entry.path : parentPath(entry.path);
+  const isDropTarget = dropTargetDir === itemDropDir;
 
   const loadChildren = async (expand = true) => {
     if (!entry.is_dir) return;
@@ -131,7 +137,7 @@ function TreeNode({
       <div
         role="button"
         tabIndex={0}
-        className={`tree-item ${isSelected ? "selected" : ""}`}
+        className={`tree-item ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
         data-path={entry.path}
         data-is-dir={entry.is_dir ? "1" : "0"}
@@ -171,6 +177,7 @@ function TreeNode({
               rootPath={rootPath}
               selectedPath={selectedPath}
               explorerEdit={explorerEdit}
+              dropTargetDir={dropTargetDir}
               onSelect={onSelect}
               onOpen={onOpen}
               onCommitEdit={onCommitEdit}
@@ -211,10 +218,61 @@ export function FileExplorer() {
     commitExplorerEdit,
     deleteExplorerEntry,
     openFile,
+    importPathsIntoExplorer,
+    getExplorerParentDir,
   } = useWorkspaceStore();
   const { t } = useTranslation();
   const [entries, setEntries] = useState<FsEntry[]>([]);
+  const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);
   const explorerRef = useRef<HTMLDivElement>(null);
+
+  const resolveDropDir = useCallback(
+    (event: React.DragEvent) => {
+      if (!rootPath) return null;
+      const item = (event.target as HTMLElement).closest<HTMLElement>(
+        ".tree-item[data-path]",
+      );
+      if (item?.dataset.path) {
+        const isDir = item.dataset.isDir === "1";
+        return isDir ? item.dataset.path : parentPath(item.dataset.path);
+      }
+      return getExplorerParentDir() ?? rootPath;
+    },
+    [getExplorerParentDir, rootPath],
+  );
+
+  const explorerDrop = useDropZone({
+    enabled: Boolean(rootPath),
+    onDrop: async (paths) => {
+      if (!rootPath) return;
+      const targetDir = dropTargetDir ?? getExplorerParentDir() ?? rootPath;
+      await importPathsIntoExplorer(targetDir, paths);
+      setDropTargetDir(null);
+    },
+  });
+
+  const handleExplorerDragEnter = (event: React.DragEvent) => {
+    explorerDrop.handleDragEnter(event);
+    setDropTargetDir(resolveDropDir(event));
+  };
+
+  const handleExplorerDragOver = (event: React.DragEvent) => {
+    explorerDrop.handleDragOver(event);
+    setDropTargetDir(resolveDropDir(event));
+  };
+
+  const handleExplorerDragLeave = (event: React.DragEvent) => {
+    explorerDrop.handleDragLeave(event);
+    const next = event.relatedTarget as Node | null;
+    if (!next || !explorerRef.current?.contains(next)) {
+      setDropTargetDir(null);
+    }
+  };
+
+  const handleExplorerDrop = (event: React.DragEvent) => {
+    setDropTargetDir(resolveDropDir(event));
+    explorerDrop.handleDrop(event);
+  };
 
   useEffect(() => {
     if (!rootPath) {
@@ -280,10 +338,14 @@ export function FileExplorer() {
   return (
     <div
       ref={explorerRef}
-      className="file-explorer"
+      className={`file-explorer ${explorerDrop.active ? "drop-active" : ""}`}
       data-zone="explorer"
       tabIndex={0}
       onClick={() => explorerRef.current?.focus()}
+      onDragEnter={handleExplorerDragEnter}
+      onDragOver={handleExplorerDragOver}
+      onDragLeave={handleExplorerDragLeave}
+      onDrop={handleExplorerDrop}
       onFocus={() => {
         if (!explorerSelectedPath && entries[0]) {
           setExplorerSelectedPath(entries[0].path, entries[0].is_dir);
@@ -303,6 +365,7 @@ export function FileExplorer() {
           rootPath={rootPath}
           selectedPath={explorerSelectedPath}
           explorerEdit={explorerEdit}
+          dropTargetDir={dropTargetDir}
           onSelect={setExplorerSelectedPath}
           onOpen={handleOpen}
           onCommitEdit={(name) => commitExplorerEdit(name).catch(console.error)}
@@ -378,6 +441,14 @@ const explorerStyles = `
   .tree-item:hover,
   .tree-item.selected {
     background: var(--bg-hover);
+  }
+  .tree-item.drop-target,
+  .file-explorer.drop-active {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-sidebar));
+  }
+  .tree-item.drop-target {
+    outline: 1px dashed color-mix(in srgb, var(--accent) 65%, var(--border));
+    outline-offset: -1px;
   }
   .tree-item.create-row {
     background: var(--bg-hover);

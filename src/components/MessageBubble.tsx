@@ -2,7 +2,12 @@ import { useState } from "react";
 import type { ChatMessage } from "../types/agent";
 import { useChatStore } from "../stores/chat";
 import { getProviderLabel } from "../utils/agentProvider";
-import { getToolPreview } from "../utils/toolMessage";
+import {
+  formatToolContent,
+  getToolPreview,
+  getToolRoleLabel,
+  parseToolContent,
+} from "../utils/toolMessage";
 import { MarkdownContent } from "./MarkdownContent";
 
 interface MessageBubbleProps {
@@ -25,14 +30,18 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isLastMessage = messages[messages.length - 1]?.id === message.id;
 
   if (isTool) {
-    const preview = getToolPreview(message.content);
+    const preview = getToolPreview(message.content, message.toolName);
+    const detail = formatToolContent(
+      parseToolContent(message.content),
+      message.toolName,
+    );
     return (
       <div className="message-bubble tool">
-        <div className="message-meta">工具 · {message.toolName ?? "unknown"}</div>
+        <div className="message-meta">{getToolRoleLabel(message.toolName)}</div>
         {!toolExpanded ? (
           <div className="tool-preview">{preview}</div>
         ) : (
-          <pre className="message-content tool-detail">{message.content}</pre>
+          <pre className="message-content tool-detail">{detail}</pre>
         )}
         <div className="tool-toggle-wrap">
           <button

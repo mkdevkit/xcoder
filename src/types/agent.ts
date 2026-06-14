@@ -1,12 +1,17 @@
 export type AgentEvent =
   | { type: "text_delta"; content: string }
+  | { type: "text_snapshot"; content: string }
   | { type: "reasoning_delta"; content: string }
-  | { type: "tool_call"; name: string; args: unknown }
+  | { type: "reasoning_snapshot"; content: string }
+  | { type: "tool_call"; name: string; args: unknown; partId?: string }
   | { type: "tool_result"; output: string }
   | { type: "approval_required"; id: string; description: string }
   | { type: "approval_resolved" }
   | { type: "file_change"; path: string; diff: string }
   | { type: "turn_completed" }
+  | { type: "session_idle" }
+  | { type: "session_busy" }
+  | { type: "turn_aborted" }
   | { type: "turn_error"; message: string }
   | { type: "raw"; payload: unknown };
 
@@ -112,6 +117,15 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     return { type: "text_delta", content: delta };
   }
 
+  if (event === "item.text") {
+    const text = String(payload.text ?? "");
+    const kind = String(payload.kind ?? "agent_message");
+    if (kind === "reasoning") {
+      return { type: "reasoning_snapshot", content: text };
+    }
+    return { type: "text_snapshot", content: text };
+  }
+
   if (event === "approval.required") {
     const approvalId = String(
       payload.approval_id ??
@@ -119,13 +133,19 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
         (payload.approval as Record<string, unknown> | undefined)?.id ??
         "",
     );
-    if (!approvalId || approvalId.startsWith("item_") || approvalId.startsWith("call_")) {
+    const description = String(
+      payload.description ?? payload.summary ?? "需要审批",
+    );
+    if (!approvalId && !description) {
+      return null;
+    }
+    if (approvalId.startsWith("item_")) {
       return null;
     }
     return {
       type: "approval_required",
       id: approvalId,
-      description: String(payload.description ?? payload.summary ?? "需要审批"),
+      description,
     };
   }
 
@@ -141,6 +161,14 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     return { type: "turn_completed" };
   }
 
+  if (event === "session.idle") {
+    return { type: "session_idle" };
+  }
+
+  if (event === "session.busy") {
+    return { type: "session_busy" };
+  }
+
   if (event === "turn.error") {
     return {
       type: "turn_error",
@@ -148,13 +176,19 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     };
   }
 
-  if (event === "item.completed") {
+  if (event === "turn.aborted") {
+    return { type: "turn_aborted" };
+  }
+
+  if (event === "item.updated" || event === "item.completed") {
     const kind = String(payload.kind ?? "");
     if (kind === "tool_call") {
+      const partId = String(payload.id ?? payload.part_id ?? "");
       return {
         type: "tool_call",
         name: String(payload.name ?? "tool"),
         args: payload.args ?? {},
+        ...(partId ? { partId } : {}),
       };
     }
     if (kind === "file_change") {
