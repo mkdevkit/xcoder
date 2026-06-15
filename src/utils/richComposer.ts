@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { referenceDisplayName } from "./chatFileReference";
 
 export const INLINE_FILE_REF_CLASS = "inline-file-ref";
@@ -20,7 +21,10 @@ export function createInlineFileRefElement(reference: string): HTMLSpanElement {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "inline-file-ref-remove";
-  remove.setAttribute("aria-label", `Remove ${referenceDisplayName(reference)}`);
+  remove.setAttribute(
+    "aria-label",
+    t("composer.removeRef", { name: referenceDisplayName(reference) }),
+  );
   remove.textContent = "×";
   remove.addEventListener("mousedown", (event) => {
     event.preventDefault();

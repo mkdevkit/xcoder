@@ -24,6 +24,8 @@ export interface ProviderChatSlice {
   codewhaleModelCatalog: CodewhaleModelOption[];
   messages: ChatMessage[];
   streaming: boolean;
+  runtimeBusy: boolean;
+  runtimeAction: "connect" | "disconnect" | "restart" | null;
   pendingApproval: { id: string; description: string } | null;
   error: string | null;
 }
@@ -50,6 +52,8 @@ export function createProviderChatSlice(providerId: string): ProviderChatSlice {
     codewhaleModelCatalog: [],
     messages: [],
     streaming: false,
+    runtimeBusy: false,
+    runtimeAction: null,
     pendingApproval: null,
     error: null,
   };

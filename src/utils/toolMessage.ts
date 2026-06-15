@@ -1,14 +1,17 @@
+import { t } from "../i18n";
+import type { TranslationKey } from "../i18n/types";
+
 const PREVIEW_MAX = 100;
 
-const TOOL_ROLE_LABELS: Record<string, string> = {
-  task: "子任务",
-  read: "读取文件",
-  write: "写入文件",
-  edit: "编辑文件",
-  bash: "执行命令",
-  glob: "搜索文件",
-  grep: "搜索内容",
-  list: "列出目录",
+const TOOL_ROLE_KEYS: Record<string, TranslationKey> = {
+  task: "tool.role.task",
+  read: "tool.role.read",
+  write: "tool.role.write",
+  edit: "tool.role.edit",
+  bash: "tool.role.bash",
+  glob: "tool.role.glob",
+  grep: "tool.role.grep",
+  list: "tool.role.list",
 };
 
 function truncate(text: string, max: number) {
@@ -30,6 +33,11 @@ function displayPath(path: unknown): string {
   return name || path;
 }
 
+function statusLine(status: unknown): string | null {
+  if (!status) return null;
+  return t("tool.statusLine", { status: String(status) });
+}
+
 function formatTaskToolState(state: Record<string, unknown>): string {
   const lines: string[] = [];
   const title = state.title;
@@ -40,21 +48,29 @@ function formatTaskToolState(state: Record<string, unknown>): string {
   const heading =
     (typeof title === "string" && title) ||
     (typeof input?.description === "string" && input.description) ||
-    "子任务";
+    t("tool.role.task");
   lines.push(`📋 ${heading}`);
 
-  if (status) lines.push(`状态：${String(status)}`);
+  const statusText = statusLine(status);
+  if (statusText) lines.push(statusText);
   if (input?.subagent_type) {
-    lines.push(`代理类型：${String(input.subagent_type)}`);
+    lines.push(
+      t("tool.agentTypeLine", { type: String(input.subagent_type) }),
+    );
   }
   if (input?.description && input.description !== heading) {
-    lines.push(`说明：${String(input.description)}`);
+    lines.push(
+      t("tool.descriptionLine", { text: String(input.description) }),
+    );
   }
   if (input?.prompt) {
-    lines.push("", "提示词：", String(input.prompt));
+    lines.push("", t("tool.promptHeader"), String(input.prompt));
   }
   if (metadata?.sessionId) {
-    lines.push("", `子会话：${String(metadata.sessionId)}`);
+    lines.push(
+      "",
+      t("tool.subSessionLine", { id: String(metadata.sessionId) }),
+    );
   }
 
   return lines.join("\n");
@@ -63,9 +79,10 @@ function formatTaskToolState(state: Record<string, unknown>): string {
 function formatReadToolState(state: Record<string, unknown>): string {
   const input = asRecord(state.input);
   const filePath =
-    input?.filePath ?? input?.path ?? state.title ?? "未知路径";
+    input?.filePath ?? input?.path ?? state.title ?? t("tool.unknownPath");
   const lines = [`📄 ${String(filePath)}`];
-  if (state.status) lines.push(`状态：${String(state.status)}`);
+  const statusText = statusLine(state.status);
+  if (statusText) lines.push(statusText);
 
   const metadata = asRecord(state.metadata);
   const display = asRecord(metadata?.display);
@@ -74,7 +91,7 @@ function formatReadToolState(state: Record<string, unknown>): string {
   if (preview) {
     lines.push("", String(preview));
   } else if (state.status === "running") {
-    lines.push("", "正在读取…");
+    lines.push("", t("tool.reading"));
   }
 
   return lines.join("\n");
@@ -86,9 +103,10 @@ function formatWriteLikeToolState(
 ): string {
   const input = asRecord(state.input);
   const filePath =
-    input?.filePath ?? input?.path ?? state.title ?? "未知路径";
+    input?.filePath ?? input?.path ?? state.title ?? t("tool.unknownPath");
   const lines = [`📝 ${action} ${String(filePath)}`];
-  if (state.status) lines.push(`状态：${String(state.status)}`);
+  const statusText = statusLine(state.status);
+  if (statusText) lines.push(statusText);
 
   const metadata = asRecord(state.metadata);
   const preview = metadata?.preview ?? input?.content ?? state.output;
@@ -102,9 +120,10 @@ function formatWriteLikeToolState(
 function formatBashToolState(state: Record<string, unknown>): string {
   const input = asRecord(state.input);
   const command = input?.command ?? input?.cmd ?? state.title;
-  const lines = ["⚙️ 执行命令"];
+  const lines = [t("tool.bashTitle")];
   if (command) lines.push(String(command));
-  if (state.status) lines.push(`状态：${String(state.status)}`);
+  const statusText = statusLine(state.status);
+  if (statusText) lines.push(statusText);
   if (state.output) lines.push("", String(state.output));
   return lines.join("\n");
 }
@@ -117,7 +136,8 @@ function formatSearchToolState(
   const pattern = input?.pattern ?? input?.query ?? input?.glob ?? state.title;
   const lines = [`🔍 ${action}`];
   if (pattern) lines.push(String(pattern));
-  if (state.status) lines.push(`状态：${String(state.status)}`);
+  const statusText = statusLine(state.status);
+  if (statusText) lines.push(statusText);
   if (state.output) lines.push("", truncate(String(state.output), 2000));
   return lines.join("\n");
 }
@@ -183,17 +203,17 @@ export function formatToolContent(args: unknown, toolName?: string): string {
     case "read":
       return formatReadToolState(record);
     case "write":
-      return formatWriteLikeToolState(record, "写入");
+      return formatWriteLikeToolState(record, t("tool.actionWrite"));
     case "edit":
-      return formatWriteLikeToolState(record, "编辑");
+      return formatWriteLikeToolState(record, t("tool.actionEdit"));
     case "bash":
       return formatBashToolState(record);
     case "glob":
-      return formatSearchToolState(record, "搜索文件");
+      return formatSearchToolState(record, t("tool.searchFiles"));
     case "grep":
-      return formatSearchToolState(record, "搜索内容");
+      return formatSearchToolState(record, t("tool.searchContent"));
     case "list":
-      return formatSearchToolState(record, "列出目录");
+      return formatSearchToolState(record, t("tool.listDir"));
     default:
       break;
   }
@@ -207,7 +227,7 @@ export function formatToolContent(args: unknown, toolName?: string): string {
 
 export function getToolPreview(content: string, toolName?: string): string {
   const trimmed = content.trim();
-  if (!trimmed) return "（无输出）";
+  if (!trimmed) return t("tool.noOutput");
 
   const parsed = parseToolContent(trimmed);
   const record = asRecord(parsed);
@@ -291,6 +311,7 @@ export function getToolPreview(content: string, toolName?: string): string {
 }
 
 export function getToolRoleLabel(toolName?: string): string {
-  if (!toolName) return "工具";
-  return TOOL_ROLE_LABELS[toolName] ?? `工具 · ${toolName}`;
+  if (!toolName) return t("tool.generic");
+  const key = TOOL_ROLE_KEYS[toolName];
+  return key ? t(key) : t("tool.genericNamed", { name: toolName });
 }

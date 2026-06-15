@@ -1,5 +1,7 @@
 # xcoder
 
+![preview](./public/xcoder.png)
+
 An AI coding workbench built with Tauri, integrating [CodeWhale](https://www.codewhale.ai/) and [OpenCode](https://opencode.ai/).
 
 **中文文档:** [README.zh.md](./README.zh.md)

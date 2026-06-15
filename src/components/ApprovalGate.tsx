@@ -1,3 +1,5 @@
+import { useTranslation } from "../i18n";
+
 interface ApprovalGateProps {
   description: string;
   onApprove: () => void;
@@ -9,15 +11,17 @@ export function ApprovalGate({
   onApprove,
   onDeny,
 }: ApprovalGateProps) {
+  const { t } = useTranslation();
+
   return (
     <div className="approval-gate">
-      <div className="approval-title">需要你的审批</div>
+      <div className="approval-title">{t("approval.title")}</div>
       <p>{description}</p>
       <div className="approval-actions">
         <button className="primary" onClick={onApprove}>
-          允许
+          {t("approval.allow")}
         </button>
-        <button onClick={onDeny}>拒绝</button>
+        <button onClick={onDeny}>{t("approval.deny")}</button>
       </div>
       <style>{`
         .approval-gate {

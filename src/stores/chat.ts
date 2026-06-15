@@ -22,6 +22,7 @@ import {
   normalizePlanningMessageOrder,
 } from "../utils/chatHistory";
 import { translate } from "../i18n/locales";
+import { t } from "../i18n";
 import { useSettingsStore } from "./settings";
 import { useWorkspaceStore } from "./workspace";
 import { workspacesMatch } from "../utils/path";
@@ -316,6 +317,57 @@ function getProviderSlice(
 ): ProviderChatSlice {
   const id = providerId ?? get().providerId;
   return get().providerStates[id] ?? createProviderChatSlice(id);
+}
+
+const RUNTIME_ACTION_TIMEOUT_MS = 90_000;
+
+type RuntimeActionKind = NonNullable<ProviderChatSlice["runtimeAction"]>;
+
+async function runRuntimeAction(
+  providerId: string,
+  action: RuntimeActionKind,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  get: () => ChatState,
+  work: () => Promise<void>,
+) {
+  if (getProviderSlice(get, providerId).runtimeBusy) return;
+
+  patchProvider(set, providerId, {
+    runtimeBusy: true,
+    runtimeAction: action,
+    error: null,
+  });
+
+  let timedOut = false;
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    patchProvider(set, providerId, {
+      runtimeBusy: false,
+      runtimeAction: null,
+      error: t("error.runtimeActionTimeout"),
+    });
+  }, RUNTIME_ACTION_TIMEOUT_MS);
+
+  try {
+    await work();
+  } catch (e) {
+    if (!timedOut) {
+      patchProvider(set, providerId, { error: String(e) });
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (!timedOut) {
+      patchProvider(set, providerId, {
+        runtimeBusy: false,
+        runtimeAction: null,
+      });
+    }
+  }
 }
 
 async function saveProviderChatLocally(
@@ -926,9 +978,9 @@ async function startProviderRuntime(
   if (spawnIfMissing) {
     await tauriInvoke(commands.doctor);
   }
-  if (providerId === "opencode") {
+  if (providerId === "opencode" || providerId === "codewhale") {
     if (!workspace) {
-      throw new Error("请先打开工程目录");
+      throw new Error(t("error.openProjectFirst"));
     }
     return tauriInvoke<RuntimeStatus>(commands.startRuntime, {
       workspace,
@@ -1011,7 +1063,7 @@ async function tryReattachProvider(
   if (!slice.connectedIntent || slice.runtime.running) return;
 
   const resolvedWorkspace = resolveProviderWorkspace(get, providerId, workspace);
-  if (providerId === "opencode" && !resolvedWorkspace) return;
+  if ((providerId === "opencode" || providerId === "codewhale") && !resolvedWorkspace) return;
 
   try {
     const runtime = await startProviderRuntime(
@@ -1123,12 +1175,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       providerStates: ensureProviderSlice(state.providerStates, providerId),
     }));
-    patchProvider(set, providerId, { error: null });
 
-    try {
+    await runRuntimeAction(providerId, "connect", set, get, async () => {
       const runtime = await startProviderRuntime(providerId, workspace, true);
       if (!runtime.running) {
-        throw new Error("AI 服务未能启动");
+        throw new Error(t("error.aiServiceStartFailed"));
       }
       await hydrateProviderAfterConnect(
         providerId,
@@ -1137,22 +1188,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set,
         get,
       );
-    } catch (e) {
-      patchProvider(set, providerId, { error: String(e) });
-      throw e;
-    }
+    });
   },
 
   disconnectRuntime: async () => {
     const { providerId } = get();
-    const commands = getAgentCommands(providerId);
-    await tauriInvoke(commands.stopRuntime);
-    patchProvider(set, providerId, {
-      runtime: { running: false, owned: false },
-      connectedIntent: false,
-      streaming: false,
-      pendingApproval: null,
-      error: null,
+    await runRuntimeAction(providerId, "disconnect", set, get, async () => {
+      const commands = getAgentCommands(providerId);
+      await tauriInvoke(commands.stopRuntime);
+      patchProvider(set, providerId, {
+        runtime: { running: false, owned: false },
+        connectedIntent: false,
+        streaming: false,
+        pendingApproval: null,
+        error: null,
+      });
     });
   },
 
@@ -1166,17 +1216,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workspace,
     );
 
-    if (providerId === "opencode" && !resolvedWorkspace) {
-      throw new Error("请先打开工程目录");
+    if ((providerId === "opencode" || providerId === "codewhale") && !resolvedWorkspace) {
+      throw new Error(t("error.openProjectFirst"));
     }
 
-    patchProvider(set, providerId, {
-      error: null,
-      streaming: false,
-      pendingApproval: null,
-    });
+    await runRuntimeAction(providerId, "restart", set, get, async () => {
+      patchProvider(set, providerId, {
+        streaming: false,
+        pendingApproval: null,
+      });
 
-    try {
       const commands = getAgentCommands(providerId);
       const runtime =
         providerId === "opencode"
@@ -1186,7 +1235,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : await tauriInvoke<RuntimeStatus>(commands.restartRuntime);
 
       if (!runtime.running) {
-        throw new Error("AI 服务重启失败");
+        throw new Error(t("error.aiServiceRestartFailed"));
       }
 
       if (wasLinked) {
@@ -1202,10 +1251,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       await reattachLinkedProviders(resolvedWorkspace, providerId, set, get);
-    } catch (e) {
-      patchProvider(set, providerId, { error: String(e) });
-      throw e;
-    }
+    });
   },
 
   loadThreads: async (workspace, providerId) => {
@@ -1272,7 +1318,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           providerId,
           threadId,
         );
-        if (!local) throw new Error("无法加载该会话的历史记录");
+        if (!local) throw new Error(t("error.sessionHistoryLoadFailed"));
         history = local.messages.map((msg) => ({
           id: msg.id,
           role: msg.role,
@@ -1349,7 +1395,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const created = await tauriInvoke<ThreadInfo>(commands.createThread, {
       workspace,
       mode: current.mode,
-      model: providerId === "codewhale" ? current.model : undefined,
+      ...(providerId === "codewhale"
+        ? { model: current.model }
+        : { title: t("chat.newSessionTitle") }),
     });
 
     await ensureEventSubscription(providerId, created.id);
@@ -1369,7 +1417,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workspace,
       providerId,
       sessionId: created.id,
-      title: "新会话",
+      title: t("chat.newSessionTitle"),
       mode: current.mode,
       model: current.model,
       messages: [],
@@ -1505,7 +1553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!current.thread) {
       patchProvider(set, providerId, {
         streaming: false,
-        error: "未创建会话线程",
+        error: t("error.noSessionThread"),
       });
       return;
     }
@@ -1649,7 +1697,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const refreshed = getProviderSlice(get, providerId);
       if (!refreshed.pendingApproval?.id) {
         patchProvider(set, providerId, {
-          error: "无法获取审批 ID，请稍后重试。",
+          error: t("error.approvalIdMissing"),
         });
         return;
       }
@@ -1683,7 +1731,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (msg.includes("404") || msg.includes("no pending approval")) {
         patchProvider(set, providerId, {
           pendingApproval: null,
-          error: "该审批已过期或已处理，请重新发起操作。",
+          error: t("error.approvalExpired"),
         });
       } else {
         patchProvider(set, providerId, { error: msg });
@@ -1994,7 +2042,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   const prefix = messages[i].content ? "\n\n" : "";
                   messages[i] = {
                     ...messages[i],
-                    content: `${messages[i].content}${prefix}错误：${mapped.message}`,
+                    content: `${messages[i].content}${prefix}${t("error.withMessage", { message: mapped.message })}`,
                   };
                   break;
                 }

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
+import { t } from "../i18n";
 import { safeConfirm, safePickDirectory } from "../utils/tauriDialog";
 import {
   parseFileLinkText,
@@ -137,7 +138,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         mode: "create",
         parentDir,
         isDir,
-        initialName: isDir ? "新建文件夹" : "新建文件.txt",
+        initialName: isDir ? t("explorer.newFolderName") : t("explorer.newFileName"),
       },
       explorerError: null,
     });
@@ -151,7 +152,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     const trimmed = name.trim();
     if (!trimmed) {
-      set({ explorerError: "名称不能为空" });
+      set({ explorerError: t("error.nameRequired") });
       return;
     }
 
@@ -213,13 +214,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         ? (state.explorerSelectedIsDir ?? false)
         : false);
     const label = fileName(path);
-    const kind = resolvedIsDir ? "文件夹" : "文件";
-    const message = `确定删除${kind}「${label}」吗？此操作不可撤销。`;
+    const kind = resolvedIsDir
+      ? t("explorer.deleteKind.folder")
+      : t("explorer.deleteKind.file");
+    const message = t("explorer.deleteConfirm", { kind, label });
     const confirmed = await safeConfirm(message, {
-      title: "确认删除",
+      title: t("dialog.confirmDelete"),
       kind: "warning",
-      okLabel: "删除",
-      cancelLabel: "取消",
+      okLabel: t("dialog.delete"),
+      cancelLabel: t("dialog.cancel"),
     });
     if (!confirmed) return;
 

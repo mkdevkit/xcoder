@@ -2,6 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
+import { t } from "../../i18n";
 import { useTerminalStore } from "../../stores/terminal";
 import {
   safeFitTerminal,
@@ -86,7 +87,7 @@ export function TerminalInstance({ id, active }: TerminalInstanceProps) {
 
     const unlistenExit = listen<TerminalExitPayload>("terminal-exit", (event) => {
       if (event.payload.id !== id) return;
-      term.writeln("\r\n\x1b[33m[进程已退出]\x1b[0m");
+      term.writeln(`\r\n\x1b[33m${t("terminal.processExited")}\x1b[0m`);
       markTerminalExited(id);
     });
 

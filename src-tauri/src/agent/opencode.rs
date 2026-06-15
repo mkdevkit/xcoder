@@ -492,9 +492,10 @@ pub async fn create_session(
     url: &str,
     workspace: &str,
     agent: &str,
+    title: &str,
 ) -> Result<ThreadInfo, String> {
     let body = serde_json::json!({
-        "title": "新会话",
+        "title": title,
     });
 
     let response = with_directory(

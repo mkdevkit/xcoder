@@ -1,11 +1,15 @@
-export interface CodewhaleModelOption {
-  modelId: string;
-  provider: string;
-  label: string;
-  value: string;
-}
+import type { CodewhaleModelOption } from "../types/agent";
 
 export const CODEWHALE_MODES = ["plan", "agent", "yolo"] as const;
+
+export function isCodewhaleModelAvailable(item: CodewhaleModelOption) {
+  return item.available !== false;
+}
+
+export function formatCodewhaleModelLabel(item: CodewhaleModelOption) {
+  const mark = isCodewhaleModelAvailable(item) ? "✓" : "✗";
+  return `${item.label}  ${mark}`;
+}
 
 export function pickCodewhaleDefaults(
   catalog: CodewhaleModelOption[],
@@ -15,11 +19,14 @@ export function pickCodewhaleDefaults(
     return { model: "" };
   }
 
-  const preferred = catalog.find((item) => item.value === preferredModel);
+  const usable = catalog.filter(isCodewhaleModelAvailable);
+  const pool = usable.length > 0 ? usable : catalog;
+
+  const preferred = pool.find((item) => item.value === preferredModel);
   if (preferred) {
     return { model: preferred.value };
   }
 
-  const auto = catalog.find((item) => item.value === "auto");
-  return { model: auto?.value ?? catalog[0].value };
+  const auto = pool.find((item) => item.value === "auto");
+  return { model: auto?.value ?? pool[0].value };
 }

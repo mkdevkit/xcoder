@@ -3,6 +3,11 @@ import { useSettingsStore } from "../stores/settings";
 import { translate } from "./locales";
 import type { AppLocale, TranslationKey } from "./types";
 
+/** Non-React i18n helper (stores, utils). */
+export function t(key: TranslationKey, params?: Record<string, string>) {
+  return translate(useSettingsStore.getState().locale, key, params);
+}
+
 export function useTranslation() {
   const locale = useSettingsStore((state) => state.locale);
 

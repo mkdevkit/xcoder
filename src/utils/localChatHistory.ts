@@ -1,3 +1,6 @@
+import { APP_LOCALES } from "../i18n/types";
+import { translate } from "../i18n/locales";
+import { useSettingsStore } from "../stores/settings";
 import type { ChatMessage, ThreadSummary } from "../types/agent";
 import { isTauri, tauriInvoke } from "./tauri";
 
@@ -176,11 +179,34 @@ export async function deleteLocalChatSession(
   }
 }
 
-const GENERIC_SESSION_TITLES = new Set(["xcoder", "新会话", "未命名会话"]);
+const GENERIC_SESSION_TITLES = new Set<string>(["xcoder", "新会话", "未命名会话"]);
+for (const locale of APP_LOCALES) {
+  GENERIC_SESSION_TITLES.add(translate(locale, "chat.newSessionTitle"));
+  GENERIC_SESSION_TITLES.add(translate(locale, "session.unnamed"));
+}
+
+const GENERIC_NEW_SESSION_TITLES = new Set<string>(["新会话"]);
+const GENERIC_UNNAMED_TITLES = new Set<string>(["未命名会话"]);
+for (const locale of APP_LOCALES) {
+  GENERIC_NEW_SESSION_TITLES.add(translate(locale, "chat.newSessionTitle"));
+  GENERIC_UNNAMED_TITLES.add(translate(locale, "session.unnamed"));
+}
 
 export function isGenericSessionTitle(title: string) {
   const trimmed = title.trim();
   return !trimmed || GENERIC_SESSION_TITLES.has(trimmed);
+}
+
+export function localizeSessionTitle(title: string) {
+  const locale = useSettingsStore.getState().locale;
+  const trimmed = title.trim();
+  if (!trimmed || GENERIC_UNNAMED_TITLES.has(trimmed)) {
+    return translate(locale, "session.unnamed");
+  }
+  if (GENERIC_NEW_SESSION_TITLES.has(trimmed)) {
+    return translate(locale, "chat.newSessionTitle");
+  }
+  return title;
 }
 
 export function mergeThreadLists(

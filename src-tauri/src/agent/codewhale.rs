@@ -134,6 +134,50 @@ pub struct CodewhaleModelOption {
     pub provider: String,
     pub label: String,
     pub value: String,
+    #[serde(default)]
+    pub available: bool,
+}
+
+fn parse_auth_list_line(line: &str) -> Option<(String, bool)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("provider") {
+        return None;
+    }
+
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let provider = parts[0].to_string();
+    let config = parts[1];
+    let store = parts[2];
+    let env = parts[3];
+    let authenticated = config == "yes" || store == "yes" || env == "yes";
+    Some((provider, authenticated))
+}
+
+pub fn list_authenticated_providers() -> Result<std::collections::HashSet<String>, String> {
+    let program = resolve_codewhale_command()?;
+    let output = run_command(&program, &["auth", "list"])?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("codewhale auth list failed: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut providers = std::collections::HashSet::new();
+    for line in stdout.lines() {
+        let Some((provider, authenticated)) = parse_auth_list_line(line) else {
+            continue;
+        };
+        if authenticated {
+            providers.insert(provider);
+        }
+    }
+
+    Ok(providers)
 }
 
 fn parse_model_line(line: &str) -> Option<CodewhaleModelOption> {
@@ -154,6 +198,7 @@ fn parse_model_line(line: &str) -> Option<CodewhaleModelOption> {
         provider: provider.to_string(),
         label: line.to_string(),
         value: model_id.to_string(),
+        available: false,
     })
 }
 
@@ -166,15 +211,17 @@ pub fn list_models() -> Result<Vec<CodewhaleModelOption>, String> {
         return Err(format!("codewhale model list failed: {stderr}"));
     }
 
+    let authenticated = list_authenticated_providers().unwrap_or_default();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut options = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
     for line in stdout.lines() {
-        let Some(option) = parse_model_line(line) else {
+        let Some(mut option) = parse_model_line(line) else {
             continue;
         };
         if seen.insert(option.value.clone()) {
+            option.available = authenticated.contains(&option.provider);
             options.push(option);
         }
     }

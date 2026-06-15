@@ -1,5 +1,7 @@
 # xcoder
 
+![preview](./public/xcoder.png)
+
 基于 Tauri 的 AI 编程工作台，集成 [CodeWhale](https://www.codewhale.ai/) 与 [OpenCode](https://opencode.ai/)。
 
 **English:** [README.md](./README.md)

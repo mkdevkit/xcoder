@@ -752,6 +752,7 @@ pub async fn opencode_list_provider_models(
 pub async fn opencode_create_thread(
     workspace: String,
     mode: String,
+    title: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<ThreadInfo, String> {
     let url = {
@@ -763,7 +764,10 @@ pub async fn opencode_create_thread(
     };
 
     let client = reqwest::Client::new();
-    create_session(&client, &url, &workspace, &mode).await
+    let session_title = title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "New session".to_string());
+    create_session(&client, &url, &workspace, &mode, &session_title).await
 }
 
 #[tauri::command]

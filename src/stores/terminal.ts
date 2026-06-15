@@ -1,9 +1,9 @@
 import { create } from "zustand";
+import { t } from "../i18n";
 import { useSettingsStore } from "./settings";
-import { isTauri, tauriInvoke } from "../utils/tauri";
-import type { TerminalTab } from "../types/terminal";
+import { isTauri, tauriInvoke } from "../utils/tauri";import type { TerminalTab } from "../types/terminal";
 
-const TERMINAL_TITLE = "终端";
+const TERMINAL_TITLE = () => t("terminal.title");
 
 interface TerminalState {
   tabs: TerminalTab[];
@@ -25,7 +25,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     const id = await tauriInvoke<string>("terminal_spawn", { cwd: cwd ?? null });
     const tab: TerminalTab = {
       id,
-      title: TERMINAL_TITLE,
+      title: TERMINAL_TITLE(),
       cwd,
       exited: false,
     };

@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 export type AgentEvent =
   | { type: "text_delta"; content: string }
   | { type: "text_snapshot"; content: string }
@@ -76,6 +78,7 @@ export interface CodewhaleModelOption {
   provider: string;
   label: string;
   value: string;
+  available?: boolean;
 }
 
 export interface UiOptions {
@@ -134,7 +137,7 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
         "",
     );
     const description = String(
-      payload.description ?? payload.summary ?? "需要审批",
+      payload.description ?? payload.summary ?? t("approval.required"),
     );
     if (!approvalId && !description) {
       return null;
@@ -172,7 +175,7 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
   if (event === "turn.error") {
     return {
       type: "turn_error",
-      message: String(payload.message ?? "OpenCode 会话出错"),
+      message: String(payload.message ?? t("error.opencodeSession")),
     };
   }
 

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "../i18n";
 import type { ChatMessage } from "../types/agent";
 import { useChatStore } from "../stores/chat";
 import { getProviderLabel } from "../utils/agentProvider";
@@ -15,6 +16,7 @@ interface MessageBubbleProps {
 }
 
 export function MessageBubble({ message }: MessageBubbleProps) {
+  const { t } = useTranslation();
   const providerId = useChatStore((state) => state.providerId);
   const streaming = useChatStore(
     (state) =>
@@ -47,7 +49,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           <button
             type="button"
             className="tool-toggle"
-            aria-label={toolExpanded ? "收起详情" : "查看详情"}
+            aria-label={
+              toolExpanded
+                ? t("message.collapseDetails")
+                : t("message.expandDetails")
+            }
             onClick={() => setToolExpanded((v) => !v)}
           >
             {toolExpanded ? "▲" : "▼"}
@@ -65,7 +71,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   return (
     <div className={`message-bubble ${message.role}`}>
       <div className="message-meta">
-        {isUser ? "你" : assistantLabel}
+        {isUser ? t("message.you") : assistantLabel}
       </div>
       {isUser ? (
         <pre className="message-content">{message.content || "…"}</pre>

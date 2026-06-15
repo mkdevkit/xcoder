@@ -16,6 +16,8 @@ import {
   formatOpencodeVendorLabel,
   modelsForOpencodeVendor,
 } from "../../utils/opencodeModels";
+import { formatCodewhaleModelLabel } from "../../utils/codewhaleModels";
+import { localizeSessionTitle } from "../../utils/localChatHistory";
 import { isTauri } from "../../utils/tauri";
 
 const CHAT_INPUT_HEIGHT_KEY = "xcoder:chat-input-height";
@@ -68,6 +70,8 @@ export function ChatPanel() {
     pendingApproval,
     error,
     initialized,
+    runtimeBusy,
+    runtimeAction,
     opencodeModelCatalog,
     opencodeConnectedProviders,
     opencodeVendor,
@@ -94,6 +98,17 @@ export function ChatPanel() {
   const { t } = useTranslation();
   const canChat = Boolean(rootPath && runtime.running && thread);
   const canCompose = Boolean(rootPath && runtime.running && !streaming);
+  const controlsLocked = streaming || runtimeBusy;
+
+  const connectButtonLabel = runtimeBusy
+    ? runtimeAction === "disconnect"
+      ? t("chat.disconnecting")
+      : runtimeAction === "restart"
+        ? t("chat.restarting")
+        : t("chat.connecting")
+    : runtime.running
+      ? t("chat.disconnect")
+      : t("chat.connect");
 
   const handleAttachReferences = useCallback((refs: string[]) => {
     composerRef.current?.insertReferences(refs);
@@ -164,7 +179,8 @@ export function ChatPanel() {
       await disconnectRuntime();
       return;
     }
-    await connectRuntime(rootPath ?? undefined);
+    if (!rootPath) return;
+    await connectRuntime(rootPath);
   };
 
   const handleSend = async () => {
@@ -212,7 +228,7 @@ export function ChatPanel() {
               className="provider-select"
               value={providerId}
               onChange={(e) => setProvider(e.target.value)}
-              disabled={streaming}
+              disabled={controlsLocked}
             >
               {config.providers.map((provider) => (
                 <option key={provider.id} value={provider.id}>
@@ -227,18 +243,20 @@ export function ChatPanel() {
             <button
               className={runtime.running ? "" : "primary"}
               onClick={handleConnect}
-              disabled={streaming}
+              disabled={controlsLocked || (!rootPath && !runtime.running)}
             >
-              {runtime.running ? t("chat.disconnect") : t("chat.connect")}
+              {connectButtonLabel}
             </button>
             {runtime.running && (
               <button
                 type="button"
                 onClick={() => restartRuntime(rootPath ?? undefined).catch(console.error)}
-                disabled={streaming}
+                disabled={controlsLocked}
                 title={t("chat.restart")}
               >
-                {t("chat.restart")}
+                {runtimeBusy && runtimeAction === "restart"
+                  ? t("chat.restarting")
+                  : t("chat.restart")}
               </button>
             )}
           </div>
@@ -247,7 +265,7 @@ export function ChatPanel() {
               className="chat-mode-select"
               value={mode}
               onChange={(e) => setMode(e.target.value)}
-              disabled={!initialized}
+              disabled={!initialized || controlsLocked}
             >
               {modeOptions.map((m) => (
                 <option key={m} value={m}>
@@ -260,8 +278,8 @@ export function ChatPanel() {
                 className="chat-vendor-select"
                 value={opencodeVendor}
                 onChange={(e) => setOpencodeVendor(e.target.value)}
-                disabled={!initialized || streaming}
-                title="Model provider"
+                disabled={!initialized || controlsLocked}
+                title={t("chat.modelProvider")}
               >
                 {opencodeVendors.map((vendor) => (
                   <option key={vendor.id} value={vendor.id}>
@@ -275,7 +293,7 @@ export function ChatPanel() {
                 className="chat-model-select"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                disabled={!initialized || streaming}
+                disabled={!initialized || controlsLocked}
                 title={model}
               >
                 {isOpencode
@@ -286,7 +304,7 @@ export function ChatPanel() {
                     ))
                   : codewhaleModelCatalog.map((item) => (
                       <option key={`${item.value}-${item.provider}`} value={item.value}>
-                        {item.label}
+                        {formatCodewhaleModelLabel(item)}
                       </option>
                     ))}
               </select>
@@ -298,7 +316,7 @@ export function ChatPanel() {
             <select
               className="thread-select"
               value={thread?.id ?? ""}
-              disabled={threadsLoading || streaming || threads.length === 0}
+              disabled={threadsLoading || controlsLocked || threads.length === 0}
               onChange={(e) => {
                 const nextId = e.target.value;
                 if (!nextId || !rootPath) return;
@@ -312,7 +330,7 @@ export function ChatPanel() {
                   {!thread && <option value="">{t("chat.selectSession")}</option>}
                   {threads.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.title || item.preview || item.id}
+                      {localizeSessionTitle(item.title) || item.preview || item.id}
                     </option>
                   ))}
                 </>
@@ -322,7 +340,7 @@ export function ChatPanel() {
               type="button"
               className="thread-delete-btn"
               title={t("chat.deleteSession")}
-              disabled={!thread || streaming}
+              disabled={!thread || controlsLocked}
               onClick={() => {
                 if (!rootPath || !thread) return;
                 deleteThread(thread.id, rootPath).catch(console.error);
@@ -334,7 +352,7 @@ export function ChatPanel() {
               type="button"
               className="thread-new-btn"
               title={t("chat.newSession")}
-              disabled={!rootPath || streaming}
+              disabled={!rootPath || controlsLocked}
               onClick={() => {
                 if (!rootPath) return;
                 createNewThread(rootPath).catch(console.error);
