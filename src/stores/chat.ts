@@ -466,7 +466,6 @@ async function syncMessagesFromServerOnce(
         busy: boolean;
         pending: { id: string; description: string } | null;
       }>("opencode_poll_turn", {
-        sessionId: threadId,
         ...opencodeSessionArgs(get, providerId, threadId),
         limit: opencodeStreamingMessageLimit(slice.messages),
       });
@@ -661,14 +660,8 @@ async function tryFinishOpencodeTurn(
   await completeTurnForProvider(get, set, providerId, options);
 }
 
-const completeTurnTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function cancelScheduledCompleteTurn(resolvedId: string) {
-  const existing = completeTurnTimers.get(resolvedId);
-  if (existing !== undefined) {
-    clearTimeout(existing);
-    completeTurnTimers.delete(resolvedId);
-  }
+function cancelScheduledCompleteTurn(_resolvedId: string) {
+  // Completion is driven by poll/SSE paths; kept for call-site compatibility.
 }
 
 async function completeTurnForProvider(
@@ -780,85 +773,6 @@ async function runPendingApprovalCheck(
     patchProvider(set, resolvedId, { pendingApproval: null });
   }
   return false;
-}
-
-function scheduleCompleteTurn(
-  get: () => ChatState,
-  set: (
-    partial:
-      | Partial<ChatState>
-      | ((state: ChatState) => Partial<ChatState>),
-  ) => void,
-  resolvedId: string,
-  delayMs: number,
-) {
-  cancelScheduledCompleteTurn(resolvedId);
-  completeTurnTimers.set(
-    resolvedId,
-    setTimeout(() => {
-      completeTurnTimers.delete(resolvedId);
-      void (async () => {
-        const slice = getProviderSlice(get, resolvedId);
-        const last = slice.messages[slice.messages.length - 1];
-        if (
-          slice.streaming &&
-          last?.role === "assistant" &&
-          !last.content.trim()
-        ) {
-          const commands = getAgentCommands(resolvedId);
-          if (commands.isSessionBusy && slice.thread) {
-            try {
-              const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-                ...opencodeSessionArgs(get, resolvedId, slice.thread.id),
-              });
-              if (!busy) {
-                await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
-                return;
-              }
-            } catch {
-              // keep waiting for server history to catch up
-            }
-          }
-          const attempts = (completeTurnAttemptCounts.get(resolvedId) ?? 0) + 1;
-          completeTurnAttemptCounts.set(resolvedId, attempts);
-          if (attempts >= 6) {
-            await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
-            return;
-          }
-          scheduleCompleteTurn(get, set, resolvedId, 1500);
-          patchProvider(set, resolvedId, { streaming: true });
-          return;
-        }
-
-        const commands = getAgentCommands(resolvedId);
-        if (commands.isSessionBusy && slice.thread) {
-          try {
-            const busy = await tauriInvoke<boolean>(commands.isSessionBusy, {
-              ...opencodeSessionArgs(get, resolvedId, slice.thread.id),
-            });
-            if (busy) {
-              const attempts =
-                (completeTurnAttemptCounts.get(resolvedId) ?? 0) + 1;
-              completeTurnAttemptCounts.set(resolvedId, attempts);
-              if (attempts >= 6) {
-                await tryFinishOpencodeTurn(get, set, resolvedId, {
-                  force: true,
-                });
-                return;
-              }
-              scheduleCompleteTurn(get, set, resolvedId, 1500);
-              patchProvider(set, resolvedId, { streaming: true });
-              return;
-            }
-          } catch {
-            // ignore
-          }
-        }
-        completeTurnAttemptCounts.delete(resolvedId);
-        await tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
-      })();
-    }, delayMs),
-  );
 }
 
 async function hydrateProviderAfterConnect(
