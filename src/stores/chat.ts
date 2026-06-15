@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
+import { safeConfirm } from "../utils/tauriDialog";
 import { getAgentCommands } from "../utils/agentProvider";
 import type {
   AppConfig,
@@ -339,58 +340,71 @@ async function saveProviderChatLocally(
 }
 
 const STREAMING_POLL_MS: Record<string, number> = {
-  opencode: 300,
+  opencode: 200,
 };
+const OPENCODE_SSE_POLL_MS = 120;
 const DEFAULT_STREAMING_POLL_MS = 1000;
-const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 50;
-const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 120;
+const OPENCODE_SSE_FALLBACK_MS = 1800;
+const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 48;
+const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 160;
 
 function streamingPollIntervalMs(providerId: string) {
   return STREAMING_POLL_MS[providerId] ?? DEFAULT_STREAMING_POLL_MS;
 }
 
-function opencodeStreamingMessageLimit(messages: ChatMessage[]) {
+function opencodeStreamingPollDelayMs(providerId: string) {
+  const sseFresh =
+    Date.now() - (lastOpencodeTextSseAt.get(providerId) ?? 0) <
+    OPENCODE_SSE_FALLBACK_MS;
+  return sseFresh ? OPENCODE_SSE_POLL_MS : streamingPollIntervalMs(providerId);
+}
+
+function nextStreamingPollDelayMs(providerId: string) {
+  return providerId === "opencode"
+    ? opencodeStreamingPollDelayMs(providerId)
+    : streamingPollIntervalMs(providerId);
+}
+
+function opencodeStreamingMessageLimit(
+  messages: ChatMessage[],
+  busy?: boolean,
+) {
   const estimatedEntries = Math.max(
-    12,
-    Math.ceil(messages.length / 3) + 10,
+    20,
+    Math.ceil(messages.length / 2) + (busy ? 24 : 12),
   );
+  const max = busy
+    ? OPENCODE_STREAMING_MESSAGE_LIMIT_MAX
+    : Math.min(120, OPENCODE_STREAMING_MESSAGE_LIMIT_MAX);
   return Math.min(
-    OPENCODE_STREAMING_MESSAGE_LIMIT_MAX,
+    max,
     Math.max(OPENCODE_STREAMING_MESSAGE_LIMIT_MIN, estimatedEntries),
   );
 }
-const historySyncTimers = new Map<string, ReturnType<typeof setInterval>>();
-const historySyncInFlight = new Set<string>();
-const historySyncSnapshots = new Map<
-  string,
-  { count: number; textLen: number }
->();
-const historyStableCounts = new Map<string, number>();
-const completeTurnAttemptCounts = new Map<string, number>();
-const historyIdleSince = new Map<string, number>();
-const finishingTurnProviders = new Set<string>();
 
-function historySnapshot(history: HistoryMessage[]) {
-  return {
-    count: history.length,
-    textLen: history.reduce((sum, item) => sum + item.content.length, 0),
-  };
+const historySyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const historySyncActive = new Set<string>();
+const historySyncInFlight = new Set<string>();
+const finishingTurnProviders = new Set<string>();
+const lastOpencodeTextSseAt = new Map<string, number>();
+
+function lastAssistantMessage(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return messages[index];
+    }
+  }
+  return undefined;
+}
+
+function markOpencodeTextSseActivity(providerId: string) {
+  if (providerId === "opencode") {
+    lastOpencodeTextSseAt.set(providerId, Date.now());
+  }
 }
 
 function isPollOnlyMessageProvider(providerId: string) {
   return providerId === "opencode";
-}
-
-function isPollOnlyContentEvent(type: string) {
-  return (
-    type === "text_delta" ||
-    type === "text_snapshot" ||
-    type === "reasoning_delta" ||
-    type === "reasoning_snapshot" ||
-    type === "tool_call" ||
-    type === "tool_result" ||
-    type === "file_change"
-  );
 }
 
 function finalizeTurnMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -426,11 +440,18 @@ async function syncMessagesFromServer(
   ) => void,
   providerId: string,
   force = false,
+  forceFullHistory = false,
 ) {
   if (historySyncInFlight.has(providerId)) return;
   historySyncInFlight.add(providerId);
   try {
-    await syncMessagesFromServerOnce(get, set, providerId, force);
+    await syncMessagesFromServerOnce(
+      get,
+      set,
+      providerId,
+      force,
+      forceFullHistory,
+    );
   } finally {
     historySyncInFlight.delete(providerId);
   }
@@ -445,6 +466,7 @@ async function syncMessagesFromServerOnce(
   ) => void,
   providerId: string,
   force = false,
+  forceFullHistory = false,
 ) {
   const slice = getProviderSlice(get, providerId);
   if (!slice.thread) return;
@@ -452,26 +474,58 @@ async function syncMessagesFromServerOnce(
 
   const commands = getAgentCommands(providerId);
   const threadId = slice.thread.id;
-  const useLimitedOpencodePoll =
+  const useOpencodeStreaming =
     providerId === "opencode" && slice.streaming;
+  const useCodewhaleStreaming =
+    providerId === "codewhale" && slice.streaming;
+  const assistantEmpty = !lastAssistantMessage(slice.messages)?.content?.trim();
+  const sseFresh =
+    !forceFullHistory &&
+    !assistantEmpty &&
+    useOpencodeStreaming &&
+    Date.now() - (lastOpencodeTextSseAt.get(providerId) ?? 0) <
+      OPENCODE_SSE_FALLBACK_MS;
   const syncStartedAt = import.meta.env.DEV ? performance.now() : 0;
   try {
-    let history: HistoryMessage[] = [];
-    let polledBusy: boolean | undefined;
+    let history: HistoryMessage[] | undefined;
     let polledPending: { id: string; description: string } | null | undefined;
+    let polledTurnComplete = false;
 
-    if (useLimitedOpencodePoll) {
+    if (useOpencodeStreaming && sseFresh && !forceFullHistory) {
+      const status = await tauriInvoke<{
+        busy: boolean;
+        pending: { id: string; description: string } | null;
+      }>("opencode_poll_status", opencodeSessionArgs(get, providerId, threadId));
+      polledPending = status.pending;
+    } else if (useOpencodeStreaming && forceFullHistory) {
+      history = await tauriInvoke<HistoryMessage[]>(
+        commands.loadThreadHistory,
+        opencodeSessionArgs(get, providerId, threadId),
+      );
+      polledPending = null;
+    } else if (useOpencodeStreaming) {
       const poll = await tauriInvoke<{
         messages: HistoryMessage[];
         busy: boolean;
         pending: { id: string; description: string } | null;
+        turn_complete: boolean;
       }>("opencode_poll_turn", {
         ...opencodeSessionArgs(get, providerId, threadId),
-        limit: opencodeStreamingMessageLimit(slice.messages),
+        limit: opencodeStreamingMessageLimit(slice.messages, true),
       });
       history = poll.messages;
-      polledBusy = poll.busy;
       polledPending = poll.pending;
+      polledTurnComplete = poll.turn_complete;
+    } else if (useCodewhaleStreaming) {
+      const poll = await tauriInvoke<{
+        messages: HistoryMessage[];
+        busy: boolean;
+        pending: { id: string; description: string } | null;
+        turn_complete: boolean;
+      }>("codewhale_poll_turn", { threadId });
+      history = poll.messages;
+      polledPending = poll.pending;
+      polledTurnComplete = poll.turn_complete;
     } else {
       history = await tauriInvoke<HistoryMessage[]>(
         commands.loadThreadHistory,
@@ -484,37 +538,47 @@ async function syncMessagesFromServerOnce(
     const latest = getProviderSlice(get, providerId);
     if (!latest.thread || latest.thread.id !== threadId) return;
 
-    const merged = mergeServerMessagesWithLocal(latest.messages, history, {
-      pollOnly: isPollOnlyMessageProvider(providerId),
-      limitedRemote: useLimitedOpencodePoll,
-    });
-    const changed =
-      merged.length !== latest.messages.length ||
-      merged.some((msg, index) => {
-        const prev = latest.messages[index];
-        return (
-          !prev ||
-          prev.id !== msg.id ||
-          prev.content !== msg.content ||
-          prev.role !== msg.role ||
-          prev.toolName !== msg.toolName
-        );
+    if (history) {
+      const merged = mergeServerMessagesWithLocal(latest.messages, history, {
+        pollOnly: isPollOnlyMessageProvider(providerId),
+        limitedRemote: useOpencodeStreaming && !forceFullHistory,
       });
-    if (changed) {
-      patchProvider(set, providerId, {
-        messages: merged,
-        streaming: true,
-      });
+      const changed =
+        merged.length !== latest.messages.length ||
+        merged.some((msg, index) => {
+          const prev = latest.messages[index];
+          return (
+            !prev ||
+            prev.id !== msg.id ||
+            prev.content !== msg.content ||
+            prev.role !== msg.role ||
+            prev.toolName !== msg.toolName
+          );
+        });
+      if (changed) {
+        patchProvider(set, providerId, {
+          messages: merged,
+          streaming: true,
+        });
+      } else if (
+        import.meta.env.DEV &&
+        providerId === "opencode" &&
+        history.length > 0 &&
+        assistantEmpty
+      ) {
+        console.warn("[chat sync] opencode poll returned data but merge unchanged", {
+          localCount: latest.messages.length,
+          remoteCount: history.length,
+          remotePreview: history
+            .filter((item) => item.role === "assistant")
+            .slice(-1)[0]?.content?.slice(0, 80),
+        });
+      }
     }
 
-    const snapshot = historySnapshot(history);
-    const previousSnapshot = historySyncSnapshots.get(providerId);
-    historySyncSnapshots.set(providerId, snapshot);
-
-    if (providerId === "opencode") {
+    if (providerId === "opencode" || providerId === "codewhale") {
       if (polledPending?.id) {
         cancelScheduledCompleteTurn(providerId);
-        historyStableCounts.delete(providerId);
         patchProvider(set, providerId, {
           pendingApproval: polledPending,
           streaming: true,
@@ -526,66 +590,29 @@ async function syncMessagesFromServerOnce(
       if (afterPendingCheck.pendingApproval) {
         patchProvider(set, providerId, { pendingApproval: null });
       }
+
+      if (polledTurnComplete && !getProviderSlice(get, providerId).pendingApproval) {
+        await syncMessagesFromServerOnce(
+          get,
+          set,
+          providerId,
+          true,
+          providerId === "opencode",
+        );
+        await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+        return;
+      }
     } else if (commands.getPendingApproval) {
       if (await runPendingApprovalCheck(get, set, providerId)) {
         cancelScheduledCompleteTurn(providerId);
-        historyStableCounts.delete(providerId);
         ensureStreamingHistorySync(get, set, providerId);
         return;
       }
     }
 
-    const active = getProviderSlice(get, providerId);
-    if (
-      active.streaming &&
-      providerId === "opencode" &&
-      active.thread?.id === threadId &&
-      !finishingTurnProviders.has(providerId)
-    ) {
-      try {
-        const busy =
-          polledBusy ??
-          (await tauriInvoke<boolean>(commands.isSessionBusy!, {
-            ...opencodeSessionArgs(get, providerId, threadId),
-          }));
-        const historyStable =
-          previousSnapshot !== undefined &&
-          previousSnapshot.count === snapshot.count &&
-          previousSnapshot.textLen === snapshot.textLen;
-        const stableCount = historyStable
-          ? (historyStableCounts.get(providerId) ?? 0) + 1
-          : 0;
-        historyStableCounts.set(providerId, stableCount);
-
-        if (historyStable) {
-          if (!historyIdleSince.has(providerId)) {
-            historyIdleSince.set(providerId, Date.now());
-          }
-        } else {
-          historyIdleSince.delete(providerId);
-        }
-
-        if (!busy) {
-          historyIdleSince.delete(providerId);
-          await tryFinishOpencodeTurn(get, set, providerId, { force: true });
-          return;
-        }
-
-        const idleSince = historyIdleSince.get(providerId);
-        if (idleSince !== undefined && Date.now() - idleSince >= 2000) {
-          await tryFinishOpencodeTurn(get, set, providerId, { force: true });
-          return;
-        }
-      } catch (error) {
-        if (import.meta.env.DEV) {
-          console.warn(`[chat sync] ${providerId} busy check failed:`, error);
-        }
-      }
-    }
-
     if (import.meta.env.DEV && providerId === "opencode" && syncStartedAt > 0) {
       console.debug(
-        `[chat sync] opencode ${Math.round(performance.now() - syncStartedAt)}ms`,
+        `[chat sync] opencode ${Math.round(performance.now() - syncStartedAt)}ms ${sseFresh ? "status" : "full"}`,
       );
     }
   } catch (error) {
@@ -605,13 +632,32 @@ function startStreamingHistorySync(
   providerId: string,
 ) {
   stopStreamingHistorySync(providerId);
-  void syncMessagesFromServer(get, set, providerId, true);
-  historySyncTimers.set(
-    providerId,
-    setInterval(() => {
-      void syncMessagesFromServer(get, set, providerId, true);
-    }, streamingPollIntervalMs(providerId)),
-  );
+  historySyncActive.add(providerId);
+
+  const scheduleNext = () => {
+    const timer = setTimeout(() => {
+      void syncMessagesFromServer(get, set, providerId, true).finally(() => {
+        if (!historySyncActive.has(providerId)) return;
+        const slice = getProviderSlice(get, providerId);
+        if (!slice.thread || !slice.streaming) {
+          stopStreamingHistorySync(providerId);
+          return;
+        }
+        scheduleNext();
+      });
+    }, nextStreamingPollDelayMs(providerId));
+    historySyncTimers.set(providerId, timer);
+  };
+
+  void syncMessagesFromServer(get, set, providerId, true).finally(() => {
+    if (!historySyncActive.has(providerId)) return;
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.thread || !slice.streaming) {
+      stopStreamingHistorySync(providerId);
+      return;
+    }
+    scheduleNext();
+  });
 }
 
 function ensureStreamingHistorySync(
@@ -625,21 +671,19 @@ function ensureStreamingHistorySync(
 ) {
   const slice = getProviderSlice(get, providerId);
   if (!slice.thread || !slice.streaming) return;
-  if (historySyncTimers.has(providerId)) return;
+  if (historySyncActive.has(providerId)) return;
   startStreamingHistorySync(get, set, providerId);
 }
 
 function stopStreamingHistorySync(providerId: string) {
+  historySyncActive.delete(providerId);
   const timer = historySyncTimers.get(providerId);
   if (timer !== undefined) {
-    clearInterval(timer);
+    clearTimeout(timer);
     historySyncTimers.delete(providerId);
   }
   historySyncInFlight.delete(providerId);
-  historySyncSnapshots.delete(providerId);
-  historyStableCounts.delete(providerId);
-  historyIdleSince.delete(providerId);
-  completeTurnAttemptCounts.delete(providerId);
+  lastOpencodeTextSseAt.delete(providerId);
 }
 
 async function tryFinishOpencodeTurn(
@@ -661,7 +705,7 @@ async function tryFinishOpencodeTurn(
 }
 
 function cancelScheduledCompleteTurn(_resolvedId: string) {
-  // Completion is driven by poll/SSE paths; kept for call-site compatibility.
+  // OpenCode turn end is driven by turn.completed SSE; poll only syncs content.
 }
 
 async function completeTurnForProvider(
@@ -686,7 +730,7 @@ async function completeTurnForProvider(
 
     const before = getProviderSlice(get, resolvedId);
     if (before.thread && before.streaming) {
-      await syncMessagesFromServer(get, set, resolvedId, true);
+      await syncMessagesFromServer(get, set, resolvedId, true, true);
     }
     stopStreamingHistorySync(resolvedId);
     cancelScheduledCompleteTurn(resolvedId);
@@ -1341,7 +1385,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       current?.title ||
       current?.preview ||
       translate(useSettingsStore.getState().locale, "chat.sessionFallback");
-    const confirmed = window.confirm(
+    const confirmed = await safeConfirm(
       translate(useSettingsStore.getState().locale, "chat.deleteConfirm", {
         label,
       }),
@@ -1432,9 +1476,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const { providerId } = get();
     cancelScheduledCompleteTurn(providerId);
-    completeTurnAttemptCounts.delete(providerId);
-    historyStableCounts.delete(providerId);
-    historyIdleSince.delete(providerId);
+    lastOpencodeTextSseAt.delete(providerId);
     const slice = getProviderSlice(get, providerId);
     const userMsg: ChatMessage = {
       id: uid(),
@@ -1672,14 +1714,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           );
           if (!mapped) return;
           const resolvedId = eventProviderId || get().providerId;
-          if (
-            isPollOnlyMessageProvider(resolvedId) &&
-            isPollOnlyContentEvent(mapped.type)
-          ) {
-            return;
-          }
 
           if (mapped.type === "text_delta") {
+            markOpencodeTextSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1708,7 +1745,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
               return { messages, streaming: true };
             });
+            ensureStreamingHistorySync(get, set, resolvedId);
           } else if (mapped.type === "text_snapshot") {
+            markOpencodeTextSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1910,11 +1949,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ensureStreamingHistorySync(get, set, resolvedId);
           }
 
-          if (mapped.type === "session_idle" || mapped.type === "turn_completed") {
+          if (mapped.type === "session_idle") {
+            const activeSlice = getProviderSlice(get, resolvedId);
+            if (!activeSlice.streaming) return;
+            if (resolvedId === "opencode") {
+              lastOpencodeTextSseAt.delete(resolvedId);
+              ensureStreamingHistorySync(get, set, resolvedId);
+            }
+          }
+
+          if (mapped.type === "turn_completed") {
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!activeSlice.streaming) return;
             cancelScheduledCompleteTurn(resolvedId);
-            void tryFinishOpencodeTurn(get, set, resolvedId, { force: true });
+            void (async () => {
+              await syncMessagesFromServerOnce(
+                get,
+                set,
+                resolvedId,
+                true,
+                resolvedId === "opencode",
+              );
+              await tryFinishOpencodeTurn(get, set, resolvedId, {
+                force: true,
+              });
+            })();
           }
 
           if (mapped.type === "turn_aborted") {
@@ -1972,6 +2031,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (slice.thread?.id) {
           void ensureEventSubscription(resolvedId, slice.thread.id);
         }
+        if (slice.streaming) {
+          lastOpencodeTextSseAt.delete(resolvedId);
+          ensureStreamingHistorySync(get, set, resolvedId);
+        }
         return;
       }
       if (isPollOnlyMessageProvider(resolvedId)) return;
@@ -2013,6 +2076,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
             messages: HistoryMessage[];
             busy: boolean;
             pending: { id: string; description: string } | null;
+            turn_complete: boolean;
           }>("opencode_poll_turn", {
             sessionId,
             workspace,
@@ -2027,12 +2091,22 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
           streaming: slice.streaming,
           pendingApproval: slice.pendingApproval,
           busy: poll.busy,
+          turnComplete: poll.turn_complete,
           pending: poll.pending ?? pending,
-          pollMs: historyIdleSince.get("opencode")
-            ? Date.now() - (historyIdleSince.get("opencode") ?? Date.now())
-            : null,
           messageCount: slice.messages.length,
           polledMessages: poll.messages.length,
+          mergedCount: mergeServerMessagesWithLocal(
+            slice.messages,
+            poll.messages,
+            { pollOnly: true, limitedRemote: slice.streaming },
+          ).length,
+          mergedAssistantPreview: mergeServerMessagesWithLocal(
+            slice.messages,
+            poll.messages,
+            { pollOnly: true, limitedRemote: slice.streaming },
+          )
+            .filter((item) => item.role === "assistant")
+            .slice(-1)[0]?.content?.slice(0, 120),
         };
       } catch (error) {
         return {

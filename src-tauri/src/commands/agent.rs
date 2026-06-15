@@ -2,7 +2,8 @@ use crate::agent::codewhale::{
     approve_tool, base_url, create_thread, delete_thread, get_pending_approval,
     get_thread_latest_seq, is_healthy as codewhale_is_healthy, list_models, list_thread_summaries,
     load_thread_history, normalize_event as codewhale_normalize_event, patch_thread_mode,
-    run_doctor, send_turn, spawn_runtime, wait_for_health, cancel_turn, CodewhaleState, RuntimeStatus,
+    run_doctor, send_turn, spawn_runtime, wait_for_health, cancel_turn, poll_turn_state as codewhale_poll_turn_state,
+    CodewhaleState, RuntimeStatus,
     ThreadInfo,
 };
 use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
@@ -10,7 +11,8 @@ use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
     delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
     list_provider_models, list_sessions, load_session_history, is_session_busy,
-    normalize_event as opencode_normalize_event, poll_turn_state, send_prompt, update_session_title,
+    normalize_event as opencode_normalize_event, poll_session_status, poll_turn_state,
+    send_prompt, shared_http_client, update_session_title,
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
 };
@@ -324,83 +326,132 @@ pub async fn codewhale_subscribe_events(
     app: AppHandle,
     state: State<'_, Mutex<CodewhaleState>>,
 ) -> Result<(), String> {
-    let (url, listening) = {
+    let (url, listening, subscribed_thread_id, sse_task_active, sse_reconnect) = {
         let guard = state.lock().map_err(|e| e.to_string())?;
         let url = guard
             .base_url
             .clone()
             .ok_or_else(|| "CodeWhale runtime is not running".to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        *guard
+            .subscribed_thread_id
+            .lock()
+            .map_err(|e| e.to_string())? = Some(thread_id);
         guard.listening.store(true, std::sync::atomic::Ordering::SeqCst);
-        (url, guard.listening.clone())
+        guard
+            .sse_reconnect
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        (
+            url,
+            guard.listening.clone(),
+            guard.subscribed_thread_id.clone(),
+            guard.sse_task_active.clone(),
+            guard.sse_reconnect.clone(),
+        )
     };
+
+    if sse_task_active.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    sse_task_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        let since_seq = get_thread_latest_seq(&client, &url, &thread_id)
-            .await
-            .unwrap_or(0);
-        let events_url = format!("{url}/v1/threads/{thread_id}/events?since_seq={since_seq}");
-
-        let response = match client.get(&events_url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = app.emit(
-                    "agent-error",
-                    serde_json::json!({
-                        "providerId": "codewhale",
-                        "message": format!("SSE connect failed: {e}"),
-                    }),
-                );
-                return;
-            }
-        };
-
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
 
         while listening.load(std::sync::atomic::Ordering::SeqCst) {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let thread_id = subscribed_thread_id
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_default();
 
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let block = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
+            if thread_id.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                continue;
+            }
 
-                        for line in block.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data.trim() == "[DONE]" {
-                                    continue;
-                                }
-                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(normalized) =
-                                        codewhale_normalize_event(&event, &thread_id)
+            let since_seq = get_thread_latest_seq(&client, &url, &thread_id)
+                .await
+                .unwrap_or(0);
+            let events_url =
+                format!("{url}/v1/threads/{thread_id}/events?since_seq={since_seq}");
+
+            let response = match client.get(&events_url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = app.emit(
+                        "agent-error",
+                        serde_json::json!({
+                            "providerId": "codewhale",
+                            "message": format!("SSE connect failed: {error}"),
+                        }),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    continue;
+                }
+            };
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            loop {
+                if !listening.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                if sse_reconnect.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+
+                match stream.next().await {
+                    Some(Ok(chunk)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let block = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            for line in block.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    if data.trim() == "[DONE]" {
+                                        continue;
+                                    }
+                                    if let Ok(event) =
+                                        serde_json::from_str::<serde_json::Value>(data)
                                     {
-                                        let payload = serde_json::json!({
-                                            "providerId": "codewhale",
-                                            "event": normalized,
-                                        });
-                                        let _ = app.emit("agent-event", payload);
+                                        if let Some(normalized) =
+                                            codewhale_normalize_event(&event, &thread_id)
+                                        {
+                                            let payload = serde_json::json!({
+                                                "providerId": "codewhale",
+                                                "event": normalized,
+                                            });
+                                            let _ = app.emit("agent-event", payload);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    Some(Err(error)) => {
+                        let _ = app.emit(
+                            "agent-error",
+                            serde_json::json!({
+                                "providerId": "codewhale",
+                                "message": format!("SSE stream error: {error}"),
+                            }),
+                        );
+                        break;
+                    }
+                    None => break,
                 }
-                Some(Err(e)) => {
-                    let _ = app.emit(
-                        "agent-error",
-                        serde_json::json!({
-                            "providerId": "codewhale",
-                            "message": format!("SSE stream error: {e}"),
-                        }),
-                    );
-                    break;
-                }
-                None => break,
+            }
+
+            if listening.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }
         }
+
+        sse_task_active.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(())
@@ -456,6 +507,23 @@ pub async fn codewhale_load_thread_history(
 
     let client = reqwest::Client::new();
     load_thread_history(&client, &url, &thread_id).await
+}
+
+#[tauri::command]
+pub async fn codewhale_poll_turn(
+    thread_id: String,
+    state: State<'_, Mutex<CodewhaleState>>,
+) -> Result<crate::agent::codewhale::CodewhaleTurnPoll, String> {
+    let url = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        guard
+            .base_url
+            .clone()
+            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
+    };
+
+    let client = reqwest::Client::new();
+    codewhale_poll_turn_state(&client, &url, &thread_id).await
 }
 
 #[tauri::command]
@@ -997,13 +1065,31 @@ pub async fn opencode_poll_turn(
 ) -> Result<crate::agent::opencode::OpencodeTurnPoll, String> {
     let url = opencode_resolve_service_url(&state).await?;
     let workspace = opencode_workspace(&state, workspace)?;
-    let client = crate::agent::opencode::http_client()?;
+    let client = shared_http_client(&state)?;
     poll_turn_state(
         &client,
         &url,
         &session_id,
         workspace.as_deref(),
         limit,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn opencode_poll_status(
+    session_id: String,
+    workspace: Option<String>,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<crate::agent::opencode::OpencodeSessionStatusPoll, String> {
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
+    let client = shared_http_client(&state)?;
+    poll_session_status(
+        &client,
+        &url,
+        &session_id,
+        workspace.as_deref(),
     )
     .await
 }

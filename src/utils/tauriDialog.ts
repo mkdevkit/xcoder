@@ -12,9 +12,9 @@ export async function safeConfirm(
     return await confirm(message, options);
   } catch (error) {
     if (import.meta.env.DEV) {
-      console.warn("[dialog] confirm fallback:", error);
+      console.warn("[dialog] confirm failed:", error);
     }
-    return window.confirm(message);
+    return false;
   }
 }
 

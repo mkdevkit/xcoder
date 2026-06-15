@@ -21,6 +21,15 @@ pub struct OpencodeState {
     pub subscribed_session_id: Arc<Mutex<Option<String>>>,
     pub sse_task_active: Arc<AtomicBool>,
     pub sse_reconnect: Arc<AtomicBool>,
+    pub http_client: Option<reqwest::Client>,
+}
+
+pub fn shared_http_client(state: &Mutex<OpencodeState>) -> Result<reqwest::Client, String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    if guard.http_client.is_none() {
+        guard.http_client = Some(http_client()?);
+    }
+    Ok(guard.http_client.as_ref().unwrap().clone())
 }
 
 fn provider_config() -> Result<ProviderConfig, String> {
@@ -1072,12 +1081,86 @@ fn assistant_entry_is_active(entry: &Value) -> bool {
 fn messages_indicate_busy(entries: &[Value]) -> bool {
     for entry in entries.iter().rev() {
         let info = entry.get("info").cloned().unwrap_or(Value::Null);
-        if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
+        let role = info.get("role").and_then(|v| v.as_str());
+        if role == Some("assistant") {
+            return assistant_entry_is_active(entry);
         }
-        return assistant_entry_is_active(entry);
+        if role == Some("user") {
+            // Session may report idle before the assistant entry is created.
+            return true;
+        }
     }
     false
+}
+
+fn entries_turn_complete(entries: &[Value]) -> bool {
+    for entry in entries.iter().rev() {
+        let info = entry.get("info").cloned().unwrap_or(Value::Null);
+        let role = info.get("role").and_then(|v| v.as_str());
+        if role == Some("assistant") {
+            return info.get("time").and_then(|t| t.get("completed")).is_some();
+        }
+        if role == Some("user") {
+            return false;
+        }
+    }
+    false
+}
+
+async fn fetch_recent_message_entries(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let response = with_directory(
+        client.get(format!("{url}/session/{session_id}/message")),
+        workspace,
+    )
+    .query(&[("limit", "8")])
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Ok(Vec::new());
+    }
+
+    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(json.as_array().cloned().unwrap_or_default())
+}
+
+async fn fetch_messages_indicate_busy(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<bool, String> {
+    let entries = fetch_recent_message_entries(client, url, session_id, workspace).await?;
+    Ok(messages_indicate_busy(&entries))
+}
+
+async fn fetch_entries_turn_complete(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<bool, String> {
+    let entries = fetch_recent_message_entries(client, url, session_id, workspace).await?;
+    Ok(entries_turn_complete(&entries))
+}
+
+async fn resolve_session_busy(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+    status: Option<String>,
+) -> Result<bool, String> {
+    if matches!(status.as_deref(), Some("busy") | Some("retry")) {
+        return Ok(true);
+    }
+    fetch_messages_indicate_busy(client, url, session_id, workspace).await
 }
 
 #[derive(Serialize)]
@@ -1085,6 +1168,7 @@ pub struct OpencodeTurnPoll {
     pub messages: Vec<HistoryMessage>,
     pub busy: bool,
     pub pending: Option<crate::agent::history::PendingApproval>,
+    pub turn_complete: bool,
 }
 
 pub async fn poll_turn_state(
@@ -1105,17 +1189,63 @@ pub async fn poll_turn_state(
     let pending = permission_res?;
     let busy = if pending.is_some() {
         true
-    } else if let Some(status) = status_res? {
-        matches!(status.as_str(), "busy" | "retry")
     } else {
+        resolve_session_busy(
+            client,
+            url,
+            session_id,
+            workspace,
+            status_res?,
+        )
+        .await?
+    };
+
+    let turn_complete = if pending.is_some() || busy {
         false
+    } else {
+        fetch_entries_turn_complete(client, url, session_id, workspace).await?
     };
 
     Ok(OpencodeTurnPoll {
         messages,
         busy,
         pending,
+        turn_complete,
     })
+}
+
+#[derive(Serialize)]
+pub struct OpencodeSessionStatusPoll {
+    pub busy: bool,
+    pub pending: Option<crate::agent::history::PendingApproval>,
+}
+
+pub async fn poll_session_status(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<OpencodeSessionStatusPoll, String> {
+    let status_fut = session_status_type(client, url, session_id, workspace);
+    let permission_fut = get_pending_permission(client, url, session_id, workspace);
+
+    let (status_res, permission_res) = tokio::join!(status_fut, permission_fut);
+
+    let pending = permission_res?;
+    let busy = if pending.is_some() {
+        true
+    } else {
+        resolve_session_busy(
+            client,
+            url,
+            session_id,
+            workspace,
+            status_res?,
+        )
+        .await?
+    };
+
+    Ok(OpencodeSessionStatusPoll { busy, pending })
 }
 
 pub async fn is_session_busy(
@@ -1128,30 +1258,8 @@ pub async fn is_session_busy(
         return Ok(true);
     }
 
-    if let Some(status) = session_status_type(client, url, session_id, workspace).await? {
-        match status.as_str() {
-            "idle" => return Ok(false),
-            "busy" | "retry" => return Ok(true),
-            _ => {}
-        }
-    }
-
-    let response = with_directory(
-        client.get(format!("{url}/session/{session_id}/message")),
-        workspace,
-    )
-    .query(&[("limit", "8")])
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        return Ok(false);
-    }
-
-    let json: Value = response.json().await.map_err(|e| e.to_string())?;
-    let entries = json.as_array().cloned().unwrap_or_default();
-    Ok(messages_indicate_busy(&entries))
+    let status = session_status_type(client, url, session_id, workspace).await?;
+    resolve_session_busy(client, url, session_id, workspace, status).await
 }
 
 pub async fn abort_session(
@@ -1456,7 +1564,10 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                     .unwrap_or("OpenCode 会话出错");
                 return Some(turn_abort_or_error_event(message));
             }
-            None
+            Some(serde_json::json!({
+                "event": "turn.completed",
+                "payload": {}
+            }))
         }
         "session.status" | "session.idle" => {
             let is_idle = if event_type == "session.idle" {

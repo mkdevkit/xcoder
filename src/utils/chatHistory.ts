@@ -60,6 +60,35 @@ function latestAssistantText(messages: ChatMessage[]) {
   return "";
 }
 
+function mergeRemoteTailOntoLocal(
+  local: ChatMessage[],
+  remote: ChatMessage[],
+): ChatMessage[] {
+  const localUser = lastUserMessage(local);
+  if (!localUser) return local;
+
+  let localUserIndex = -1;
+  for (let index = local.length - 1; index >= 0; index -= 1) {
+    if (local[index].role === "user") {
+      localUserIndex = index;
+      break;
+    }
+  }
+  if (localUserIndex < 0) return local;
+
+  const remoteUserIndex = remote.findIndex(
+    (msg) =>
+      msg.role === "user" &&
+      msg.content.trim() === localUser.content.trim(),
+  );
+  const remoteTail =
+    remoteUserIndex >= 0 ? remote.slice(remoteUserIndex + 1) : remote;
+  if (remoteTail.length === 0) return local;
+
+  const prefix = local.slice(0, localUserIndex + 1);
+  return normalizePlanningMessageOrder([...prefix, ...remoteTail]);
+}
+
 export function mergeServerMessagesWithLocal(
   local: ChatMessage[],
   history: HistoryMessage[],
@@ -77,34 +106,42 @@ export function mergeServerMessagesWithLocal(
       );
       return [...local.slice(0, anchorIndex), ...mergedTail];
     }
-    if (anchorIndex < 0) {
-      const localUser = lastUserMessage(local);
-      const remoteUserIndex = localUser
-        ? remote.findIndex(
-            (msg) =>
-              msg.role === "user" &&
-              msg.content.trim() === localUser.content.trim(),
-          )
-        : -1;
-      if (remoteUserIndex > 0) {
-        let localUserIndex = -1;
-        for (let i = local.length - 1; i >= 0; i -= 1) {
-          if (local[i].role === "user") {
-            localUserIndex = i;
-            break;
-          }
-        }
-        if (localUserIndex >= 0) {
-          const anchor = Math.max(0, localUserIndex - remoteUserIndex);
-          const mergedTail = mergeServerMessagesWithLocal(
-            local.slice(anchor),
-            history,
-            { pollOnly: true },
-          );
-          return [...local.slice(0, anchor), ...mergedTail];
+    if (anchorIndex === 0) {
+      return mergeServerMessagesWithLocal(local, history, { pollOnly: true });
+    }
+
+    const localUser = lastUserMessage(local);
+    const remoteUserIndex = localUser
+      ? remote.findIndex(
+          (msg) =>
+            msg.role === "user" &&
+            msg.content.trim() === localUser.content.trim(),
+        )
+      : -1;
+    if (remoteUserIndex >= 0) {
+      let localUserIndex = -1;
+      for (let index = local.length - 1; index >= 0; index -= 1) {
+        if (local[index].role === "user") {
+          localUserIndex = index;
+          break;
         }
       }
-      return local;
+      if (localUserIndex >= 0) {
+        const anchor = Math.max(0, localUserIndex - remoteUserIndex);
+        const mergedTail = mergeServerMessagesWithLocal(
+          local.slice(anchor),
+          history,
+          { pollOnly: true },
+        );
+        return [...local.slice(0, anchor), ...mergedTail];
+      }
+    }
+
+    if (localUser) {
+      const mergedTail = mergeRemoteTailOntoLocal(local, remote);
+      if (mergedTail !== local) {
+        return mergedTail;
+      }
     }
   }
 

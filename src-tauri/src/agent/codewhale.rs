@@ -1,16 +1,31 @@
-use crate::agent::history::{HistoryMessage, ThreadSummary};
+use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
 use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Output, Stdio};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
 pub struct CodewhaleState {
     pub base_url: Option<String>,
     pub child: Option<Child>,
     pub listening: Arc<AtomicBool>,
+    pub subscribed_thread_id: Arc<Mutex<Option<String>>>,
+    pub sse_task_active: Arc<AtomicBool>,
+    pub sse_reconnect: Arc<AtomicBool>,
+}
+
+impl Default for CodewhaleState {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            child: None,
+            listening: Arc::new(AtomicBool::new(false)),
+            subscribed_thread_id: Arc::new(Mutex::new(None)),
+            sse_task_active: Arc::new(AtomicBool::new(false)),
+            sse_reconnect: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +251,186 @@ pub async fn send_turn(
     response.json().await.map_err(|e| e.to_string())
 }
 
+async fn fetch_thread_json(
+    client: &reqwest::Client,
+    url: &str,
+    thread_id: &str,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .get(format!("{url}/v1/threads/{thread_id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Load thread failed: {text}"));
+    }
+
+    response.json().await.map_err(|e| e.to_string())
+}
+
+fn history_messages_from_thread_json(json: &serde_json::Value) -> Vec<HistoryMessage> {
+    let items = json["items"].as_array().cloned().unwrap_or_default();
+    let mut messages = Vec::new();
+
+    for item in items {
+        let kind = item["kind"].as_str().unwrap_or("");
+        let id = item["id"].as_str().unwrap_or_default().to_string();
+        let content = item_text(&item);
+        if content.is_empty() && kind != "tool_call" {
+            continue;
+        }
+
+        match kind {
+            "user_message" => messages.push(HistoryMessage {
+                id,
+                role: "user".to_string(),
+                content,
+                tool_name: None,
+                timestamp: 0,
+            }),
+            "agent_message" => messages.push(HistoryMessage {
+                id,
+                role: "assistant".to_string(),
+                content,
+                tool_name: None,
+                timestamp: 0,
+            }),
+            "agent_reasoning" => messages.push(HistoryMessage {
+                id,
+                role: "assistant".to_string(),
+                content: format!("> {content}"),
+                tool_name: None,
+                timestamp: 0,
+            }),
+            "tool_call" => {
+                let summary = item["summary"].as_str().unwrap_or("tool");
+                let tool_name = summary
+                    .split(':')
+                    .next()
+                    .unwrap_or("tool")
+                    .trim()
+                    .to_string();
+                let body = if content.is_empty() {
+                    summary.to_string()
+                } else {
+                    content
+                };
+                messages.push(HistoryMessage {
+                    id,
+                    role: "tool".to_string(),
+                    content: body,
+                    tool_name: Some(tool_name),
+                    timestamp: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    messages
+}
+
+fn pending_approval_from_thread_json(
+    json: &serde_json::Value,
+) -> Option<PendingApproval> {
+    let turns = json["turns"].as_array().cloned().unwrap_or_default();
+    let latest_turn = turns.last()?;
+
+    if latest_turn["status"].as_str() != Some("in_progress") {
+        return None;
+    }
+
+    let turn_id = latest_turn["id"].as_str().unwrap_or_default();
+    let items = json["items"].as_array().cloned().unwrap_or_default();
+
+    for item in items.iter().rev() {
+        if item["turn_id"].as_str() != Some(turn_id) {
+            continue;
+        }
+
+        let status = item["status"].as_str().unwrap_or("");
+        if status != "in_progress" && status != "awaiting_approval" {
+            continue;
+        }
+
+        let kind = item["kind"].as_str().unwrap_or("");
+        if kind != "tool_call" && kind != "command_execution" {
+            continue;
+        }
+
+        let approval_id = item
+            .get("metadata")
+            .and_then(|metadata| {
+                metadata
+                    .get("approval_id")
+                    .or_else(|| metadata.get("approvalId"))
+                    .and_then(|value| value.as_str())
+            })
+            .filter(|id| !id.is_empty())?;
+
+        let description = item_text(item);
+        return Some(PendingApproval {
+            id: approval_id.to_string(),
+            description: if description.is_empty() {
+                "需要审批".to_string()
+            } else {
+                description
+            },
+        });
+    }
+
+    None
+}
+
+fn thread_has_active_turn(json: &serde_json::Value) -> bool {
+    let turns = json["turns"].as_array().cloned().unwrap_or_default();
+    for turn in turns.iter().rev() {
+        let status = turn["status"].as_str().unwrap_or("");
+        if status == "in_progress" || status == "awaiting_approval" {
+            return true;
+        }
+    }
+    false
+}
+
+fn thread_turn_complete(json: &serde_json::Value) -> bool {
+    let turns = json["turns"].as_array().cloned().unwrap_or_default();
+    let Some(latest) = turns.last() else {
+        return false;
+    };
+    let status = latest["status"].as_str().unwrap_or("");
+    !matches!(status, "in_progress" | "awaiting_approval" | "")
+}
+
+#[derive(Serialize)]
+pub struct CodewhaleTurnPoll {
+    pub messages: Vec<HistoryMessage>,
+    pub busy: bool,
+    pub pending: Option<PendingApproval>,
+    pub turn_complete: bool,
+}
+
+pub async fn poll_turn_state(
+    client: &reqwest::Client,
+    url: &str,
+    thread_id: &str,
+) -> Result<CodewhaleTurnPoll, String> {
+    let json = fetch_thread_json(client, url, thread_id).await?;
+    let messages = history_messages_from_thread_json(&json);
+    let pending = pending_approval_from_thread_json(&json);
+    let busy = pending.is_some() || thread_has_active_turn(&json);
+    let turn_complete = !busy && thread_turn_complete(&json);
+
+    Ok(CodewhaleTurnPoll {
+        messages,
+        busy,
+        pending,
+        turn_complete,
+    })
+}
+
 async fn active_turn_id(
     client: &reqwest::Client,
     url: &str,
@@ -389,73 +584,8 @@ pub async fn get_pending_approval(
     url: &str,
     thread_id: &str,
 ) -> Result<Option<crate::agent::history::PendingApproval>, String> {
-    let response = client
-        .get(format!("{url}/v1/threads/{thread_id}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Load thread failed: {text}"));
-    }
-
-    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    let turns = json["turns"].as_array().cloned().unwrap_or_default();
-    let latest_turn = match turns.last() {
-        Some(turn) => turn,
-        None => return Ok(None),
-    };
-
-    if latest_turn["status"].as_str() != Some("in_progress") {
-        return Ok(None);
-    }
-
-    let turn_id = latest_turn["id"].as_str().unwrap_or_default();
-    let items = json["items"].as_array().cloned().unwrap_or_default();
-
-    for item in items.iter().rev() {
-        if item["turn_id"].as_str() != Some(turn_id) {
-            continue;
-        }
-
-        let status = item["status"].as_str().unwrap_or("");
-        if status != "in_progress" && status != "awaiting_approval" {
-            continue;
-        }
-
-        let kind = item["kind"].as_str().unwrap_or("");
-        if kind != "tool_call" && kind != "command_execution" {
-            continue;
-        }
-
-        let approval_id = item
-            .get("metadata")
-            .and_then(|metadata| {
-                metadata
-                    .get("approval_id")
-                    .or_else(|| metadata.get("approvalId"))
-                    .and_then(|value| value.as_str())
-            })
-            .filter(|id| !id.is_empty());
-
-        let approval_id = match approval_id {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-
-        let description = item_text(item);
-        return Ok(Some(crate::agent::history::PendingApproval {
-            id: approval_id,
-            description: if description.is_empty() {
-                "需要审批".to_string()
-            } else {
-                description
-            },
-        }));
-    }
-
-    Ok(None)
+    let json = fetch_thread_json(client, url, thread_id).await?;
+    Ok(pending_approval_from_thread_json(&json))
 }
 
 pub fn normalize_event(raw: &serde_json::Value, thread_id: &str) -> Option<serde_json::Value> {
@@ -556,77 +686,8 @@ pub async fn load_thread_history(
     url: &str,
     thread_id: &str,
 ) -> Result<Vec<HistoryMessage>, String> {
-    let response = client
-        .get(format!("{url}/v1/threads/{thread_id}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Load thread failed: {text}"));
-    }
-
-    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    let items = json["items"].as_array().cloned().unwrap_or_default();
-    let mut messages = Vec::new();
-
-    for item in items {
-        let kind = item["kind"].as_str().unwrap_or("");
-        let id = item["id"].as_str().unwrap_or_default().to_string();
-        let content = item_text(&item);
-        if content.is_empty() && kind != "tool_call" {
-            continue;
-        }
-
-        match kind {
-            "user_message" => messages.push(HistoryMessage {
-                id,
-                role: "user".to_string(),
-                content,
-                tool_name: None,
-                timestamp: 0,
-            }),
-            "agent_message" => messages.push(HistoryMessage {
-                id,
-                role: "assistant".to_string(),
-                content,
-                tool_name: None,
-                timestamp: 0,
-            }),
-            "agent_reasoning" => messages.push(HistoryMessage {
-                id,
-                role: "assistant".to_string(),
-                content: format!("> {content}"),
-                tool_name: None,
-                timestamp: 0,
-            }),
-            "tool_call" => {
-                let summary = item["summary"].as_str().unwrap_or("tool");
-                let tool_name = summary
-                    .split(':')
-                    .next()
-                    .unwrap_or("tool")
-                    .trim()
-                    .to_string();
-                let body = if content.is_empty() {
-                    summary.to_string()
-                } else {
-                    content
-                };
-                messages.push(HistoryMessage {
-                    id,
-                    role: "tool".to_string(),
-                    content: body,
-                    tool_name: Some(tool_name),
-                    timestamp: 0,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    Ok(messages)
+    let json = fetch_thread_json(client, url, thread_id).await?;
+    Ok(history_messages_from_thread_json(&json))
 }
 
 pub async fn delete_thread(
