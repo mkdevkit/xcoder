@@ -18,3 +18,17 @@ export function joinPath(parent: string, name: string) {
   const separator = parent.includes("\\") ? "\\" : "/";
   return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
 }
+
+export function resolveFilePathInWorkspace(
+  rawPath: string,
+  rootPath: string | null,
+): string {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return trimmed;
+  const isAbsolute =
+    /^[A-Za-z]:[\\/]/.test(trimmed) ||
+    trimmed.startsWith("\\\\") ||
+    trimmed.startsWith("/");
+  if (isAbsolute || !rootPath) return trimmed;
+  return joinPath(rootPath, trimmed.replace(/^\.[\\/]/, ""));
+}

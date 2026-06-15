@@ -7,7 +7,11 @@ import {
   parseFileLinkText,
   resolveTerminalFilePath,
 } from "../utils/terminalFileLinks";
-import { parentPath, workspacesMatch } from "../utils/path";
+import {
+  parentPath,
+  resolveFilePathInWorkspace,
+  workspacesMatch,
+} from "../utils/path";
 import { resolveDroppedOpenPath } from "../utils/externalFileDrop";
 import { PREFERENCES_TAB_PATH } from "../utils/virtualTabs";
 import type { FsEntry } from "../types/fs";
@@ -60,6 +64,7 @@ interface WorkspaceState {
   setActiveFile: (path: string) => void;
   setFileContent: (content: string) => void;
   reloadActiveFile: () => Promise<void>;
+  reloadOpenFilesIfClean: (paths: string[]) => void;
   saveActiveFile: () => Promise<void>;
   listDirectory: (path: string) => Promise<FsEntry[]>;
   importPathsIntoExplorer: (
@@ -78,6 +83,69 @@ interface WorkspaceState {
 }
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let reloadOpenFilesTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingReloadPaths: string[] = [];
+
+function pathMatchesOpenTab(changedPath: string, tabPath: string, rootPath: string | null) {
+  const candidates = new Set<string>([
+    changedPath,
+    resolveFilePathInWorkspace(changedPath, rootPath),
+  ]);
+  return Array.from(candidates).some((candidate) =>
+    workspacesMatch(candidate, tabPath),
+  );
+}
+
+async function flushReloadOpenFilesIfClean(
+  get: () => WorkspaceState,
+  set: (
+    partial:
+      | Partial<WorkspaceState>
+      | ((state: WorkspaceState) => Partial<WorkspaceState>),
+  ) => void,
+) {
+  const paths = pendingReloadPaths;
+  pendingReloadPaths = [];
+  if (paths.length === 0) return;
+
+  const { openTabs, rootPath } = get();
+  const tabsToReload = openTabs.filter(
+    (tab) =>
+      (!tab.kind || tab.kind === "file") &&
+      !tab.dirty &&
+      paths.some((changedPath) => pathMatchesOpenTab(changedPath, tab.path, rootPath)),
+  );
+  if (tabsToReload.length === 0) return;
+
+  const updates = await Promise.all(
+    tabsToReload.map(async (tab) => {
+      try {
+        const content = await tauriInvoke<string>("read_file", { path: tab.path });
+        return { path: tab.path, content };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  const updatedPaths = new Set(
+    updates
+      .filter((item): item is { path: string; content: string } => item !== null)
+      .map((item) => item.path),
+  );
+  if (updatedPaths.size === 0) return;
+
+  set((state) => ({
+    openTabs: state.openTabs.map((tab) => {
+      if (tab.dirty) return tab;
+      const update = updates.find(
+        (item) => item && workspacesMatch(item.path, tab.path),
+      );
+      if (!update) return tab;
+      return { ...tab, content: update.content, dirty: false };
+    }),
+  }));
+}
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -386,15 +454,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   reloadActiveFile: async () => {
     const { activeFile } = get();
     if (!activeFile) return;
-    const activeTab = get().openTabs.find((tab) => tab.path === activeFile);
-    if (activeTab?.kind && activeTab.kind !== "file") return;
+    get().reloadOpenFilesIfClean([activeFile]);
+  },
 
-    const content = await tauriInvoke<string>("read_file", { path: activeFile });
-    set((state) => ({
-      openTabs: state.openTabs.map((tab) =>
-        tab.path === activeFile ? { ...tab, content, dirty: false } : tab,
-      ),
-    }));
+  reloadOpenFilesIfClean: (paths) => {
+    const normalized = paths.map((path) => path.trim()).filter((path) => path.length > 0);
+    if (normalized.length === 0) return;
+
+    pendingReloadPaths.push(...normalized);
+    if (reloadOpenFilesTimer) {
+      clearTimeout(reloadOpenFilesTimer);
+    }
+    reloadOpenFilesTimer = setTimeout(() => {
+      reloadOpenFilesTimer = null;
+      void flushReloadOpenFilesIfClean(get, set);
+    }, 200);
   },
 
   saveActiveFile: async () => {
@@ -506,24 +580,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         get().bumpExplorerRefresh();
 
         const changedPaths = (event.payload as { paths?: string[] })?.paths ?? [];
-        set((state) => ({
-          openTabs: state.openTabs.map((tab) => {
-            const changed = changedPaths.some(
-              (p) => p === tab.path || p.endsWith(fileName(tab.path)),
-            );
-            if (!changed || tab.dirty || tab.path !== state.activeFile) {
-              return tab;
-            }
-            return tab;
-          }),
-        }));
-
-        const { activeFile } = get();
-        const activeTab = get().getActiveTab();
-        if (activeFile && activeTab && !activeTab.dirty) {
-          get()
-            .reloadActiveFile()
-            .catch(() => undefined);
+        if (changedPaths.length > 0) {
+          get().reloadOpenFilesIfClean(changedPaths);
         }
       }, 250);
     });
@@ -532,6 +590,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (refreshTimer) {
         clearTimeout(refreshTimer);
       }
+      if (reloadOpenFilesTimer) {
+        clearTimeout(reloadOpenFilesTimer);
+      }
+      pendingReloadPaths = [];
       unlisten();
     };
   },

@@ -183,6 +183,14 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     return { type: "turn_aborted" };
   }
 
+  if (event === "file_change") {
+    return {
+      type: "file_change",
+      path: String(payload.path ?? ""),
+      diff: String(payload.diff ?? ""),
+    };
+  }
+
   if (event === "item.updated" || event === "item.completed") {
     const kind = String(payload.kind ?? "");
     if (kind === "tool_call") {

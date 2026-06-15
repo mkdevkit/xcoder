@@ -2036,6 +2036,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
               return { messages, streaming: true };
             });
+          } else if (mapped.type === "file_change") {
+            const workspace = useWorkspaceStore.getState();
+            if (mapped.path) {
+              workspace.reloadOpenFilesIfClean([mapped.path]);
+            }
+            workspace.bumpExplorerRefresh();
           }
 
           if (mapped.type === "approval_required") {
