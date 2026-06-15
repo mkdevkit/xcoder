@@ -160,7 +160,7 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     return { type: "approval_resolved" };
   }
 
-  if (event === "turn.completed") {
+  if (event === "turn.completed" || event === "session.turn.completed") {
     return { type: "turn_completed" };
   }
 

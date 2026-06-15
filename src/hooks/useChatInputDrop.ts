@@ -37,6 +37,7 @@ export function useChatInputDrop({
       if (disabled) return;
       event.preventDefault();
       event.stopPropagation();
+      // Attach file refs — never move the file when dropping on chat input.
       event.dataTransfer.dropEffect = "copy";
       setDragOver(true);
     },
@@ -58,14 +59,15 @@ export function useChatInputDrop({
     setDragOver(false);
     if (disabled) return;
 
-    const fromTransfer = pathsFromDataTransfer(event.dataTransfer);
+    const transfer = event.dataTransfer;
+    const fromTransfer = pathsFromDataTransfer(transfer);
     if (fromTransfer.length > 0) {
       attachPaths(fromTransfer);
       return;
     }
 
-    if (event.dataTransfer.files.length > 0) {
-      attachPaths(pathsFromFileList(event.dataTransfer.files));
+    if (transfer.files.length > 0) {
+      attachPaths(pathsFromFileList(transfer.files));
     }
   };
 

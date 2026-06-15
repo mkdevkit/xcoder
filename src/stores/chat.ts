@@ -397,6 +397,7 @@ const STREAMING_POLL_MS: Record<string, number> = {
 const OPENCODE_SSE_POLL_MS = 120;
 const DEFAULT_STREAMING_POLL_MS = 1000;
 const OPENCODE_SSE_FALLBACK_MS = 1800;
+const TURN_COMPLETE_CONFIRMATIONS = 2;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 48;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 160;
 
@@ -439,6 +440,104 @@ const historySyncActive = new Set<string>();
 const historySyncInFlight = new Set<string>();
 const finishingTurnProviders = new Set<string>();
 const lastOpencodeTextSseAt = new Map<string, number>();
+const turnCompleteStreak = new Map<string, number>();
+
+function resetTurnCompleteStreak(providerId: string) {
+  turnCompleteStreak.delete(providerId);
+}
+
+function cancelScheduledCompleteTurn(providerId: string) {
+  resetTurnCompleteStreak(providerId);
+}
+
+async function fetchTurnCompleteState(
+  get: () => ChatState,
+  providerId: string,
+): Promise<{
+  busy: boolean;
+  turn_complete: boolean;
+  pending: boolean;
+}> {
+  const slice = getProviderSlice(get, providerId);
+  if (!slice.thread) {
+    return { busy: true, turn_complete: false, pending: false };
+  }
+
+  if (providerId === "opencode") {
+    const poll = await tauriInvoke<{
+      busy: boolean;
+      turn_complete: boolean;
+      pending: { id: string; description: string } | null;
+    }>("opencode_poll_turn", {
+      ...opencodeSessionArgs(get, providerId, slice.thread.id),
+      limit: opencodeStreamingMessageLimit(slice.messages, true),
+    });
+    return {
+      busy: poll.busy,
+      turn_complete: poll.turn_complete,
+      pending: Boolean(poll.pending?.id),
+    };
+  }
+
+  if (providerId === "codewhale") {
+    const poll = await tauriInvoke<{
+      busy: boolean;
+      turn_complete: boolean;
+      pending: { id: string; description: string } | null;
+    }>("codewhale_poll_turn", { threadId: slice.thread.id });
+    return {
+      busy: poll.busy,
+      turn_complete: poll.turn_complete,
+      pending: Boolean(poll.pending?.id),
+    };
+  }
+
+  return { busy: false, turn_complete: true, pending: false };
+}
+
+async function verifyAndCompleteTurn(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+) {
+  const slice = getProviderSlice(get, providerId);
+  if (!slice.streaming || !slice.thread) return;
+
+  try {
+    const state = await fetchTurnCompleteState(get, providerId);
+    if (state.pending) {
+      resetTurnCompleteStreak(providerId);
+      patchProvider(set, providerId, { streaming: true });
+      ensureStreamingHistorySync(get, set, providerId);
+      return;
+    }
+
+    if (state.busy || !state.turn_complete) {
+      resetTurnCompleteStreak(providerId);
+      patchProvider(set, providerId, { streaming: true });
+      ensureStreamingHistorySync(get, set, providerId);
+      return;
+    }
+
+    const streak = (turnCompleteStreak.get(providerId) ?? 0) + 1;
+    turnCompleteStreak.set(providerId, streak);
+    if (streak < TURN_COMPLETE_CONFIRMATIONS) {
+      patchProvider(set, providerId, { streaming: true });
+      ensureStreamingHistorySync(get, set, providerId);
+      return;
+    }
+
+    resetTurnCompleteStreak(providerId);
+    await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+  } catch {
+    patchProvider(set, providerId, { streaming: true });
+    ensureStreamingHistorySync(get, set, providerId);
+  }
+}
 
 function lastAssistantMessage(messages: ChatMessage[]) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -651,7 +750,7 @@ async function syncMessagesFromServerOnce(
           true,
           providerId === "opencode",
         );
-        await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+        await verifyAndCompleteTurn(get, set, providerId);
         return;
       }
     } else if (commands.getPendingApproval) {
@@ -736,6 +835,7 @@ function stopStreamingHistorySync(providerId: string) {
   }
   historySyncInFlight.delete(providerId);
   lastOpencodeTextSseAt.delete(providerId);
+  resetTurnCompleteStreak(providerId);
 }
 
 async function tryFinishOpencodeTurn(
@@ -754,10 +854,6 @@ async function tryFinishOpencodeTurn(
     return;
   }
   await completeTurnForProvider(get, set, providerId, options);
-}
-
-function cancelScheduledCompleteTurn(_resolvedId: string) {
-  // OpenCode turn end is driven by turn.completed SSE; poll only syncs content.
 }
 
 async function completeTurnForProvider(
@@ -1534,6 +1630,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     const assistantId = uid();
 
+    resetTurnCompleteStreak(providerId);
     patchProvider(set, providerId, {
       messages: [
         ...slice.messages,
@@ -2002,14 +2099,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!activeSlice.streaming) return;
             if (resolvedId === "opencode") {
               lastOpencodeTextSseAt.delete(resolvedId);
-              ensureStreamingHistorySync(get, set, resolvedId);
+              void (async () => {
+                await syncMessagesFromServerOnce(
+                  get,
+                  set,
+                  resolvedId,
+                  true,
+                  true,
+                );
+                await verifyAndCompleteTurn(get, set, resolvedId);
+              })();
+              return;
             }
+            ensureStreamingHistorySync(get, set, resolvedId);
           }
 
           if (mapped.type === "turn_completed") {
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!activeSlice.streaming) return;
-            cancelScheduledCompleteTurn(resolvedId);
             void (async () => {
               await syncMessagesFromServerOnce(
                 get,
@@ -2018,9 +2125,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 true,
                 resolvedId === "opencode",
               );
-              await tryFinishOpencodeTurn(get, set, resolvedId, {
-                force: true,
-              });
+              await verifyAndCompleteTurn(get, set, resolvedId);
             })();
           }
 

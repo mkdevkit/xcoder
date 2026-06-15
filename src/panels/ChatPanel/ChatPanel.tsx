@@ -124,7 +124,7 @@ export function ChatPanel() {
   } = useChatInputDrop({
     rootPath,
     onAttach: handleAttachReferences,
-    disabled: !canCompose,
+    disabled: !rootPath || streaming,
     onFocus: () => composerRef.current?.focus(),
   });
 

@@ -120,5 +120,6 @@ export function startFileDrag(
   event.dataTransfer.clearData();
   event.dataTransfer.setData(XCODER_PATH_MIME, absolutePath);
   event.dataTransfer.setData("text/plain", reference);
-  event.dataTransfer.effectAllowed = "move";
+  // Explorer drops use move; chat input attaches a copy of the file reference.
+  event.dataTransfer.effectAllowed = "copyMove";
 }

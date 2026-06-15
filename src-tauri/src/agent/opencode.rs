@@ -1094,20 +1094,6 @@ fn messages_indicate_busy(entries: &[Value]) -> bool {
     false
 }
 
-fn entries_turn_complete(entries: &[Value]) -> bool {
-    for entry in entries.iter().rev() {
-        let info = entry.get("info").cloned().unwrap_or(Value::Null);
-        let role = info.get("role").and_then(|v| v.as_str());
-        if role == Some("assistant") {
-            return info.get("time").and_then(|t| t.get("completed")).is_some();
-        }
-        if role == Some("user") {
-            return false;
-        }
-    }
-    false
-}
-
 async fn fetch_recent_message_entries(
     client: &reqwest::Client,
     url: &str,
@@ -1139,16 +1125,6 @@ async fn fetch_messages_indicate_busy(
 ) -> Result<bool, String> {
     let entries = fetch_recent_message_entries(client, url, session_id, workspace).await?;
     Ok(messages_indicate_busy(&entries))
-}
-
-async fn fetch_entries_turn_complete(
-    client: &reqwest::Client,
-    url: &str,
-    session_id: &str,
-    workspace: Option<&str>,
-) -> Result<bool, String> {
-    let entries = fetch_recent_message_entries(client, url, session_id, workspace).await?;
-    Ok(entries_turn_complete(&entries))
 }
 
 async fn resolve_session_busy(
@@ -1201,11 +1177,7 @@ pub async fn poll_turn_state(
         .await?
     };
 
-    let turn_complete = if pending.is_some() || busy {
-        false
-    } else {
-        fetch_entries_turn_complete(client, url, session_id, workspace).await?
-    };
+    let turn_complete = pending.is_none() && !busy;
 
     Ok(OpencodeTurnPoll {
         messages,
@@ -1565,11 +1537,12 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                     .unwrap_or("OpenCode 会话出错");
                 return Some(turn_abort_or_error_event(message));
             }
-            Some(serde_json::json!({
-                "event": "turn.completed",
-                "payload": {}
-            }))
+            None
         }
+        "session.turn.completed" => Some(serde_json::json!({
+            "event": "turn.completed",
+            "payload": {}
+        })),
         "session.status" | "session.idle" => {
             let is_idle = if event_type == "session.idle" {
                 true
