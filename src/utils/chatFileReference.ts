@@ -70,6 +70,10 @@ export function normalizeDroppedReferences(
   return refs;
 }
 
+export function isInternalPathDrag(dataTransfer: DataTransfer): boolean {
+  return dataTransfer.types.includes(XCODER_PATH_MIME);
+}
+
 export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
   const custom = dataTransfer.getData(XCODER_PATH_MIME);
   if (custom) {
@@ -116,5 +120,5 @@ export function startFileDrag(
   event.dataTransfer.clearData();
   event.dataTransfer.setData(XCODER_PATH_MIME, absolutePath);
   event.dataTransfer.setData("text/plain", reference);
-  event.dataTransfer.effectAllowed = "copy";
+  event.dataTransfer.effectAllowed = "move";
 }

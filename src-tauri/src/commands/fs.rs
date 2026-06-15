@@ -172,17 +172,48 @@ fn copy_entry_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     Err(format!("Source not found: {}", src.display()))
 }
 
-#[tauri::command]
-pub fn copy_paths_into_directory(
+fn validate_transfer_into_directory(
+    src: &Path,
+    dest_dir: &Path,
+    dest: &Path,
+    action: &str,
+) -> Result<(), String> {
+    if src == dest_dir {
+        return Err(format!("不能{action}到相同目录"));
+    }
+
+    if dest.exists() {
+        let file_name = src
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| src.display().to_string());
+        return Err(format!("已存在同名项: {file_name}"));
+    }
+
+    if src.is_dir() {
+        let canonical_src = src.canonicalize().map_err(|e| e.to_string())?;
+        let canonical_dest = dest_dir.canonicalize().map_err(|e| e.to_string())?;
+        if canonical_dest.starts_with(&canonical_src) {
+            return Err(format!("不能将文件夹{action}到其子目录"));
+        }
+    }
+
+    Ok(())
+}
+
+fn transfer_paths_into_directory(
     sources: Vec<String>,
     destination_dir: String,
+    move_files: bool,
 ) -> Result<Vec<String>, String> {
     let dest_dir = Path::new(&destination_dir);
     if !dest_dir.is_dir() {
         return Err(format!("Not a directory: {destination_dir}"));
     }
 
-    let mut copied = Vec::new();
+    let action = if move_files { "移动" } else { "复制" };
+    let mut results = Vec::new();
+
     for source in sources {
         let src = Path::new(&source);
         if !src.exists() {
@@ -194,28 +225,42 @@ pub fn copy_paths_into_directory(
             .ok_or_else(|| format!("Invalid source path: {source}"))?;
         let dest = dest_dir.join(file_name);
 
-        if dest.exists() {
-            return Err(format!(
-                "已存在同名项: {}",
-                file_name.to_string_lossy()
-            ));
+        if src == dest {
+            results.push(dest.to_string_lossy().to_string());
+            continue;
         }
 
-        if src == dest_dir {
-            return Err("不能复制到相同目录".to_string());
+        if src.parent().is_some_and(|parent| parent == dest_dir) {
+            results.push(src.to_string_lossy().to_string());
+            continue;
         }
 
-        if src.is_dir() {
-            let canonical_src = src.canonicalize().map_err(|e| e.to_string())?;
-            let canonical_dest = dest_dir.canonicalize().map_err(|e| e.to_string())?;
-            if canonical_dest.starts_with(&canonical_src) {
-                return Err("不能将文件夹复制到其子目录".to_string());
-            }
+        validate_transfer_into_directory(src, dest_dir, &dest, action)?;
+
+        if move_files {
+            fs::rename(src, &dest).map_err(|e| e.to_string())?;
+        } else {
+            copy_entry_recursive(src, &dest)?;
         }
 
-        copy_entry_recursive(src, &dest)?;
-        copied.push(dest.to_string_lossy().to_string());
+        results.push(dest.to_string_lossy().to_string());
     }
 
-    Ok(copied)
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn copy_paths_into_directory(
+    sources: Vec<String>,
+    destination_dir: String,
+) -> Result<Vec<String>, String> {
+    transfer_paths_into_directory(sources, destination_dir, false)
+}
+
+#[tauri::command]
+pub fn move_paths_into_directory(
+    sources: Vec<String>,
+    destination_dir: String,
+) -> Result<Vec<String>, String> {
+    transfer_paths_into_directory(sources, destination_dir, true)
 }

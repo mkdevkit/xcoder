@@ -7,7 +7,7 @@ import {
   parseFileLinkText,
   resolveTerminalFilePath,
 } from "../utils/terminalFileLinks";
-import { parentPath } from "../utils/path";
+import { parentPath, workspacesMatch } from "../utils/path";
 import { resolveDroppedOpenPath } from "../utils/externalFileDrop";
 import { PREFERENCES_TAB_PATH } from "../utils/virtualTabs";
 import type { FsEntry } from "../types/fs";
@@ -66,6 +66,10 @@ interface WorkspaceState {
     targetDir: string,
     sources: string[],
   ) => Promise<string[]>;
+  movePathsInExplorer: (
+    targetDir: string,
+    sources: string[],
+  ) => Promise<string[]>;
   openDroppedPaths: (paths: string[]) => Promise<void>;
   startWorkspaceWatch: (path: string) => Promise<void>;
   stopWorkspaceWatch: () => Promise<void>;
@@ -85,6 +89,20 @@ function syncActiveTab(
 ): EditorTab | null {
   if (!activeFile) return null;
   return tabs.find((tab) => tab.path === activeFile) ?? null;
+}
+
+function remapPath(
+  current: string | null,
+  sources: string[],
+  destinations: string[],
+): string | null {
+  if (!current) return current;
+  for (let i = 0; i < sources.length; i += 1) {
+    if (workspacesMatch(current, sources[i])) {
+      return destinations[i] ?? current;
+    }
+  }
+  return current;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -412,6 +430,39 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         explorerSelectedPath: copied[copied.length - 1] ?? state.explorerSelectedPath,
       }));
       return copied;
+    } catch (error) {
+      set({ explorerError: String(error) });
+      throw error;
+    }
+  },
+
+  movePathsInExplorer: async (targetDir, sources) => {
+    const uniqueSources = Array.from(new Set(sources.map((item) => item.trim()))).filter(
+      (item) => item.length > 0,
+    );
+    if (uniqueSources.length === 0) return [];
+
+    try {
+      const moved = await tauriInvoke<string[]>("move_paths_into_directory", {
+        sources: uniqueSources,
+        destinationDir: targetDir,
+      });
+      set((state) => ({
+        explorerError: null,
+        explorerRefreshKey: state.explorerRefreshKey + 1,
+        explorerSelectedPath:
+          remapPath(state.explorerSelectedPath, uniqueSources, moved) ??
+          moved[moved.length - 1] ??
+          state.explorerSelectedPath,
+        activeFile: remapPath(state.activeFile, uniqueSources, moved),
+        openTabs: state.openTabs.map((tab) => {
+          const nextPath = remapPath(tab.path, uniqueSources, moved);
+          return nextPath && !workspacesMatch(nextPath, tab.path)
+            ? { ...tab, path: nextPath }
+            : tab;
+        }),
+      }));
+      return moved;
     } catch (error) {
       set({ explorerError: String(error) });
       throw error;

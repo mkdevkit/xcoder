@@ -4,12 +4,14 @@ import { extractDroppedPaths, hasExternalFilePayload } from "../utils/externalFi
 interface UseDropZoneOptions {
   enabled?: boolean;
   accept?: (event: DragEvent) => boolean;
+  getDropEffect?: (event: DragEvent) => DataTransfer["dropEffect"];
   onDrop: (paths: string[], event: DragEvent) => void | Promise<void>;
 }
 
 export function useDropZone({
   enabled = true,
   accept,
+  getDropEffect,
   onDrop,
 }: UseDropZoneOptions) {
   const [active, setActive] = useState(false);
@@ -25,16 +27,24 @@ export function useDropZone({
     [accept, enabled],
   );
 
+  const resolveDropEffect = useCallback(
+    (event: DragEvent): DataTransfer["dropEffect"] => {
+      if (getDropEffect) return getDropEffect(event);
+      return "copy";
+    },
+    [getDropEffect],
+  );
+
   const handleDragEnter = useCallback(
     (event: DragEvent) => {
       if (!canAccept(event)) return;
       event.preventDefault();
       event.stopPropagation();
       depthRef.current += 1;
-      event.dataTransfer!.dropEffect = "copy";
+      event.dataTransfer!.dropEffect = resolveDropEffect(event);
       setActive(true);
     },
-    [canAccept],
+    [canAccept, resolveDropEffect],
   );
 
   const handleDragOver = useCallback(
@@ -42,10 +52,10 @@ export function useDropZone({
       if (!canAccept(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      event.dataTransfer!.dropEffect = "copy";
+      event.dataTransfer!.dropEffect = resolveDropEffect(event);
       setActive(true);
     },
-    [canAccept],
+    [canAccept, resolveDropEffect],
   );
 
   const handleDragLeave = useCallback((event: DragEvent) => {

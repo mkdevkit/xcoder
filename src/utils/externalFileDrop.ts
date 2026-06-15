@@ -1,10 +1,13 @@
 import type { DragEvent } from "react";
 import { joinPath } from "./path";
 import {
+  isInternalPathDrag,
   pathsFromDataTransfer,
   pathsFromFileList,
   XCODER_PATH_MIME,
 } from "./chatFileReference";
+
+export { isInternalPathDrag };
 
 export function extractDroppedPaths(event: DragEvent): string[] {
   const transfer = event.dataTransfer;

@@ -46,10 +46,9 @@ export function useWorkbenchContextMenu() {
         const row = target.closest(".tree-item") as HTMLElement | null;
         const filePath = row?.dataset.path;
         const isDir = row?.dataset.isDir === "1";
-        const parentDir = getExplorerParentDir(
-          filePath ?? explorerSelectedPath,
-          filePath ? isDir : (explorerSelectedIsDir ?? undefined),
-        );
+        const parentDir = filePath
+          ? getExplorerParentDir(filePath, isDir)
+          : rootPath;
 
         items.push(
           {
@@ -97,6 +96,15 @@ export function useWorkbenchContextMenu() {
               label: t("context.copyPath"),
               onClick: () => copyText(filePath),
             },
+            {
+              id: "explorer-reveal",
+              label: t("context.revealInExplorer"),
+              onClick: () => {
+                tauriInvoke("reveal_path_in_explorer", { path: filePath }).catch(
+                  console.error,
+                );
+              },
+            },
           );
         } else if (explorerSelectedPath) {
           items.push(
@@ -118,6 +126,15 @@ export function useWorkbenchContextMenu() {
               id: "explorer-copy-path-selected",
               label: t("context.copyPath"),
               onClick: () => copyText(explorerSelectedPath),
+            },
+            {
+              id: "explorer-reveal-selected",
+              label: t("context.revealInExplorer"),
+              onClick: () => {
+                tauriInvoke("reveal_path_in_explorer", {
+                  path: explorerSelectedPath,
+                }).catch(console.error);
+              },
             },
           );
         }

@@ -2,15 +2,38 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useDropZone } from "../../hooks/useDropZone";
+import { isInternalPathDrag } from "../../utils/externalFileDrop";
 import type { ExplorerEditState } from "../../stores/workspace";
 import type { FsEntry } from "../../types/fs";
-import { parentPath } from "../../utils/path";
+import { parentPath, workspacesMatch } from "../../utils/path";
 import { startFileDrag } from "../../utils/chatFileReference";
 
 interface InlineNameInputProps {
   initialName: string;
   onCommit: (name: string) => void;
   onCancel: () => void;
+}
+
+function pathsEqual(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) return false;
+  return workspacesMatch(left, right);
+}
+
+function resolveExplorerDropDir(
+  event: React.DragEvent,
+  rootPath: string,
+): string | null {
+  const item = (event.target as HTMLElement).closest<HTMLElement>(
+    ".tree-item[data-path], .explorer-root[data-path]",
+  );
+  if (item?.dataset.path) {
+    const isDir = item.dataset.isDir === "1";
+    return isDir ? item.dataset.path : parentPath(item.dataset.path);
+  }
+  if ((event.target as HTMLElement).closest(".file-explorer")) {
+    return rootPath;
+  }
+  return null;
 }
 
 function InlineNameInput({ initialName, onCommit, onCancel }: InlineNameInputProps) {
@@ -90,9 +113,9 @@ function TreeNode({
     explorerEdit?.mode === "rename" && explorerEdit.targetPath === entry.path;
   const isCreatingHere =
     explorerEdit?.mode === "create" && explorerEdit.parentDir === entry.path;
-  const isSelected = selectedPath === entry.path;
+  const isSelected = pathsEqual(selectedPath, entry.path);
   const itemDropDir = entry.is_dir ? entry.path : parentPath(entry.path);
-  const isDropTarget = dropTargetDir === itemDropDir;
+  const isDropTarget = pathsEqual(dropTargetDir, itemDropDir);
 
   const loadChildren = async (expand = true) => {
     if (!entry.is_dir) return;
@@ -150,7 +173,6 @@ function TreeNode({
             void handleClick(event as unknown as React.MouseEvent);
           }
         }}
-        onFocus={() => onSelect(entry.path, entry.is_dir)}
       >
         <span className="tree-icon">
           {entry.is_dir ? (expanded ? "▾" : "▸") : "·"}
@@ -219,7 +241,7 @@ export function FileExplorer() {
     deleteExplorerEntry,
     openFile,
     importPathsIntoExplorer,
-    getExplorerParentDir,
+    movePathsInExplorer,
   } = useWorkspaceStore();
   const { t } = useTranslation();
   const [entries, setEntries] = useState<FsEntry[]>([]);
@@ -229,24 +251,25 @@ export function FileExplorer() {
   const resolveDropDir = useCallback(
     (event: React.DragEvent) => {
       if (!rootPath) return null;
-      const item = (event.target as HTMLElement).closest<HTMLElement>(
-        ".tree-item[data-path]",
-      );
-      if (item?.dataset.path) {
-        const isDir = item.dataset.isDir === "1";
-        return isDir ? item.dataset.path : parentPath(item.dataset.path);
-      }
-      return getExplorerParentDir() ?? rootPath;
+      return resolveExplorerDropDir(event, rootPath);
     },
-    [getExplorerParentDir, rootPath],
+    [rootPath],
   );
 
   const explorerDrop = useDropZone({
     enabled: Boolean(rootPath),
-    onDrop: async (paths) => {
+    getDropEffect: (event) =>
+      event.dataTransfer && isInternalPathDrag(event.dataTransfer)
+        ? "move"
+        : "copy",
+    onDrop: async (paths, event) => {
       if (!rootPath) return;
-      const targetDir = dropTargetDir ?? getExplorerParentDir() ?? rootPath;
-      await importPathsIntoExplorer(targetDir, paths);
+      const targetDir = resolveDropDir(event) ?? rootPath;
+      if (event.dataTransfer && isInternalPathDrag(event.dataTransfer)) {
+        await movePathsInExplorer(targetDir, paths);
+      } else {
+        await importPathsIntoExplorer(targetDir, paths);
+      }
       setDropTargetDir(null);
     },
   });
@@ -326,6 +349,8 @@ export function FileExplorer() {
   const isCreatingAtRoot =
     explorerEdit?.mode === "create" && explorerEdit.parentDir === rootPath;
 
+  const isRootDropTarget = pathsEqual(dropTargetDir, rootPath);
+
   if (!rootPath) {
     return (
       <div className="file-explorer empty">
@@ -341,18 +366,29 @@ export function FileExplorer() {
       className={`file-explorer ${explorerDrop.active ? "drop-active" : ""}`}
       data-zone="explorer"
       tabIndex={0}
-      onClick={() => explorerRef.current?.focus()}
+      onClick={(event) => {
+        explorerRef.current?.focus();
+        const target = event.target as HTMLElement;
+        if (
+          target.closest(".tree-item") ||
+          target.closest(".tree-rename-input")
+        ) {
+          return;
+        }
+        setExplorerSelectedPath(null);
+      }}
       onDragEnter={handleExplorerDragEnter}
       onDragOver={handleExplorerDragOver}
       onDragLeave={handleExplorerDragLeave}
       onDrop={handleExplorerDrop}
-      onFocus={() => {
-        if (!explorerSelectedPath && entries[0]) {
-          setExplorerSelectedPath(entries[0].path, entries[0].is_dir);
-        }
-      }}
     >
-      <div className="explorer-root" title={rootPath}>
+      <div
+        className={`explorer-root ${isRootDropTarget ? "drop-target" : ""}`}
+        title={rootPath}
+        data-path={rootPath}
+        data-is-dir="1"
+        onClick={() => setExplorerSelectedPath(null)}
+      >
         {rootPath.split(/[\\/]/).pop()}
       </div>
       {explorerError && <div className="explorer-error">{explorerError}</div>}
@@ -405,6 +441,13 @@ const explorerStyles = `
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border-radius: 4px;
+    margin: 0 4px 4px;
+  }
+  .explorer-root.drop-target {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-sidebar));
+    outline: 1px dashed color-mix(in srgb, var(--accent) 65%, var(--border));
+    outline-offset: -1px;
   }
   .explorer-error {
     margin: 0 8px 8px;
@@ -438,9 +481,14 @@ const explorerStyles = `
     outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
-  .tree-item:hover,
-  .tree-item.selected {
+  .tree-item:hover:not(.selected) {
     background: var(--bg-hover);
+  }
+  .tree-item.selected {
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-sidebar));
+  }
+  .tree-item.selected:hover {
+    background: color-mix(in srgb, var(--accent) 22%, var(--bg-sidebar));
   }
   .tree-item.drop-target,
   .file-explorer.drop-active {

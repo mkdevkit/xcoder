@@ -27,6 +27,7 @@ pub fn run() {
             commands::fs::delete_path,
             commands::fs::create_path,
             commands::fs::copy_paths_into_directory,
+            commands::fs::move_paths_into_directory,
             commands::config::load_config,
             commands::config::save_config,
             commands::config::get_config_paths,
