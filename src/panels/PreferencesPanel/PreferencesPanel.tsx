@@ -86,7 +86,7 @@ export function PreferencesPanel() {
 
       {activeTab === "project" && rootPath && (
         <div role="tabpanel">
-          <ProjectConfigTab />
+          <ProjectConfigTab key={rootPath} />
         </div>
       )}
 

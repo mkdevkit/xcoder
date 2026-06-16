@@ -6,6 +6,7 @@ import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
 import { isPreferencesTab } from "../../utils/virtualTabs";
 import { startFileDrag } from "../../utils/chatFileReference";
+import { projectDisplayName } from "../../utils/recentProjects";
 import { useDropZone } from "../../hooks/useDropZone";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
@@ -24,6 +25,8 @@ export function EditorPanel() {
     getActiveTab,
     rootPath,
     openDroppedPaths,
+    recentProjects,
+    openRecentProject,
   } = useWorkspaceStore();
   const appTheme = useChatStore((state) => state.config?.app.theme ?? "dark");
   const monacoTheme = appTheme === "light" ? "vs" : "vs-dark";
@@ -67,6 +70,109 @@ export function EditorPanel() {
   }, [saveActiveFile]);
 
   if (!activeFile || !activeTab) {
+    if (!rootPath) {
+      return (
+        <div
+          className={`editor-empty editor-recent ${editorDrop.active ? "drop-active" : ""}`}
+          data-zone="editor"
+          onDragEnter={editorDrop.handleDragEnter}
+          onDragOver={editorDrop.handleDragOver}
+          onDragLeave={editorDrop.handleDragLeave}
+          onDrop={editorDrop.handleDrop}
+        >
+          <div className="editor-recent-panel">
+            <h3 className="editor-recent-title">{t("editor.recentProjects")}</h3>
+            {recentProjects.length === 0 ? (
+              <p className="editor-recent-empty">{t("editor.noRecentProjects")}</p>
+            ) : (
+              <ul className="editor-recent-list">
+                {recentProjects.map((path) => (
+                  <li key={path}>
+                    <button
+                      type="button"
+                      className="editor-recent-item"
+                      title={path}
+                      onClick={() => openRecentProject(path).catch(console.error)}
+                    >
+                      <span className="editor-recent-name">{projectDisplayName(path)}</span>
+                      <span className="editor-recent-path">{path}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <style>{`
+            .editor-empty {
+              height: 100%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              color: var(--text-muted);
+            }
+            .editor-empty.editor-recent {
+              align-items: flex-start;
+              justify-content: center;
+              padding: 48px 24px;
+              overflow: auto;
+            }
+            .editor-recent-panel {
+              width: min(720px, 100%);
+            }
+            .editor-recent-title {
+              margin: 0 0 16px;
+              font-size: 18px;
+              font-weight: 600;
+              color: var(--text);
+            }
+            .editor-recent-empty {
+              margin: 0;
+              color: var(--text-muted);
+            }
+            .editor-recent-list {
+              list-style: none;
+              margin: 0;
+              padding: 0;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            }
+            .editor-recent-item {
+              width: 100%;
+              display: flex;
+              flex-direction: column;
+              align-items: flex-start;
+              gap: 4px;
+              padding: 12px 14px;
+              border: 1px solid var(--border);
+              border-radius: 8px;
+              background: var(--bg-elevated);
+              color: var(--text);
+              text-align: left;
+            }
+            .editor-recent-item:hover {
+              background: var(--bg-hover);
+              border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+            }
+            .editor-recent-name {
+              font-size: 14px;
+              font-weight: 600;
+            }
+            .editor-recent-path {
+              font-size: 12px;
+              color: var(--text-muted);
+              word-break: break-all;
+            }
+            .editor-empty.drop-active {
+              background: color-mix(in srgb, var(--accent) 8%, var(--bg-editor));
+              outline: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border));
+              outline-offset: -8px;
+            }
+          `}</style>
+        </div>
+      );
+    }
+
     return (
       <div
         className={`editor-empty ${editorDrop.active ? "drop-active" : ""}`}

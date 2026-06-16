@@ -2,7 +2,12 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
 import { t } from "../i18n";
-import { safeConfirm, safePickDirectory } from "../utils/tauriDialog";
+import { safeConfirm, safePickDirectory, safeAlert } from "../utils/tauriDialog";
+import {
+  addRecentProject,
+  readRecentProjects,
+  removeRecentProject,
+} from "../utils/recentProjects";
 import {
   parseFileLinkText,
   resolveTerminalFilePath,
@@ -53,6 +58,7 @@ interface WorkspaceState {
   explorerSelectionAnchor: string | null;
   explorerEdit: ExplorerEditState | null;
   explorerError: string | null;
+  recentProjects: string[];
   bumpExplorerRefresh: () => void;
   setExplorerSelectedPath: (path: string | null, isDir?: boolean) => void;
   selectExplorerEntry: (
@@ -71,6 +77,10 @@ interface WorkspaceState {
   deleteExplorerEntries: (paths: string[], isDirHint?: boolean) => Promise<void>;
   getExplorerParentDir: (path?: string | null, isDir?: boolean) => string | null;
   openFolder: () => Promise<void>;
+  openWorkspaceAt: (path: string) => Promise<boolean>;
+  openRecentProject: (path: string) => Promise<void>;
+  closeProject: () => Promise<void>;
+  refreshRecentProjects: () => void;
   openFile: (path: string) => Promise<void>;
   openPreferencesTab: () => void;
   openFileAtLocation: (linkText: string) => Promise<void>;
@@ -214,6 +224,15 @@ function buildExplorerSelection(
   };
 }
 
+function createPreferencesTab(): EditorTab {
+  return {
+    path: PREFERENCES_TAB_PATH,
+    content: "",
+    dirty: false,
+    kind: "preferences",
+  };
+}
+
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   rootPath: null,
   projectConfig: null,
@@ -229,6 +248,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   explorerSelectionAnchor: null,
   explorerEdit: null,
   explorerError: null,
+  recentProjects: readRecentProjects(),
 
   getActiveTab: () => syncActiveTab(get().openTabs, get().activeFile),
 
@@ -588,6 +608,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   openFolder: async () => {
     const selected = await safePickDirectory();
     if (!selected) return;
+    await get().openWorkspaceAt(selected);
+  },
+
+  openWorkspaceAt: async (selected) => {
+    const path = selected.trim();
+    if (!path) return false;
+
+    try {
+      await get().listDirectory(path);
+    } catch {
+      const nextRecent = removeRecentProject(path);
+      set({ recentProjects: nextRecent });
+      await safeAlert(t("dialog.recentProjectMissing", { path }), {
+        title: t("menu.openRecent"),
+        kind: "warning",
+      });
+      return false;
+    }
 
     const { useChatStore } = await import("./chat");
     const chat = useChatStore.getState();
@@ -599,27 +637,74 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     await get().stopWorkspaceWatch();
+
+    const previous = get();
+    const keepPreferencesTab = previous.openTabs.some(
+      (tab) => tab.path === PREFERENCES_TAB_PATH,
+    );
+
     set({
-      rootPath: selected,
+      rootPath: path,
       projectConfig: null,
       projectConfigPath: null,
-      openTabs: [],
-      activeFile: null,
+      openTabs: keepPreferencesTab ? [createPreferencesTab()] : [],
+      activeFile: keepPreferencesTab ? PREFERENCES_TAB_PATH : null,
       editorReveal: null,
       explorerRefreshKey: get().explorerRefreshKey + 1,
     });
-    await get().startWorkspaceWatch(selected);
+    await get().startWorkspaceWatch(path);
 
     const projectInfo = await tauriInvoke<ProjectConfigInfo>(
       "ensure_project_config_cmd",
-      { workspace: selected },
+      { workspace: path },
     );
     set({
       projectConfig: projectInfo.config,
       projectConfigPath: projectInfo.path,
+      recentProjects: addRecentProject(path),
     });
 
-    await chat.onProjectOpened(selected, projectInfo.config);
+    await chat.onProjectOpened(path, projectInfo.config);
+    return true;
+  },
+
+  openRecentProject: async (path) => {
+    await get().openWorkspaceAt(path);
+  },
+
+  closeProject: async () => {
+    if (!get().rootPath) return;
+
+    const { useChatStore } = await import("./chat");
+    const { useTerminalStore } = await import("./terminal");
+    await useChatStore.getState().disconnectRuntime();
+    await get().stopWorkspaceWatch();
+    await useTerminalStore.getState().resetTerminals();
+
+    const keepPreferencesTab = get().openTabs.some(
+      (tab) => tab.path === PREFERENCES_TAB_PATH,
+    );
+
+    set({
+      rootPath: null,
+      projectConfig: null,
+      projectConfigPath: null,
+      openTabs: keepPreferencesTab ? [createPreferencesTab()] : [],
+      activeFile: keepPreferencesTab ? PREFERENCES_TAB_PATH : null,
+      editorReveal: null,
+      explorerRefreshKey: get().explorerRefreshKey + 1,
+      explorerSelectedPath: null,
+      explorerSelectedIsDir: null,
+      explorerSelectedPaths: [],
+      explorerPathIsDir: {},
+      explorerSelectionAnchor: null,
+      explorerEdit: null,
+      explorerError: null,
+    });
+  },
+
+  refreshRecentProjects: () => {
+    set({ recentProjects: readRecentProjects() });
   },
 
   openFile: async (path) => {
@@ -645,14 +730,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return;
     }
 
-    const tab: EditorTab = {
-      path,
-      content: "",
-      dirty: false,
-      kind: "preferences",
-    };
     set((state) => ({
-      openTabs: [...state.openTabs, tab],
+      openTabs: [...state.openTabs, createPreferencesTab()],
       activeFile: path,
     }));
   },

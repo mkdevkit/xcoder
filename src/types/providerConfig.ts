@@ -3,6 +3,8 @@ export interface CodewhaleProviderEntry {
   apiKey: string;
 }
 
+import type { McpServerEntry } from "./mcp";
+
 export interface CodewhaleConfigView {
   path: string;
   installed: boolean;
@@ -13,6 +15,8 @@ export interface CodewhaleConfigView {
   defaultMode: string;
   approvalMode: string;
   reasoningEffort: string;
+  mcpPath: string;
+  mcpServers: McpServerEntry[];
 }
 
 export const OPENCODE_MODALITY_OPTIONS = [
@@ -56,4 +60,5 @@ export interface OpencodeConfigView {
   defaultAgent: string;
   permissions: OpencodePermissionsView;
   providers: OpencodeProviderEntry[];
+  mcpServers: McpServerEntry[];
 }

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 export interface MenuBarItem {
   id: string;
   label: string;
+  title?: string;
   onClick?: () => void;
   disabled?: boolean;
   dividerBefore?: boolean;
@@ -66,6 +67,7 @@ function MenuItems({
                       className="menu-item"
                       role="menuitem"
                       disabled={child.disabled}
+                      title={child.title}
                       onClick={() => onRun(child)}
                     >
                       {child.label}

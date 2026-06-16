@@ -4,7 +4,15 @@ import { useChatStore } from "../../stores/chat";
 import { tauriInvoke } from "../../utils/tauri";
 import { ConfigPathRow } from "./ConfigPathRow";
 import { ProviderNotInstalledNotice } from "./ProviderNotInstalledNotice";
+import {
+  PreferencesConfigActions,
+  PreferencesSubTabs,
+} from "./PreferencesSubTabs";
+import { ProviderMcpSection } from "./ProviderMcpSection";
+import { useWorkspaceStore } from "../../stores/workspace";
 import type { CodewhaleConfigView } from "../../types/providerConfig";
+
+type CodewhaleSubTab = "basic" | "apiKey" | "mcp";
 
 function emptyConfig(): CodewhaleConfigView {
   return {
@@ -17,11 +25,15 @@ function emptyConfig(): CodewhaleConfigView {
     defaultMode: "agent",
     approvalMode: "suggest",
     reasoningEffort: "high",
+    mcpPath: "",
+    mcpServers: [],
   };
 }
 
 export function CodewhaleConfigTab() {
   const { t } = useTranslation();
+  const rootPath = useWorkspaceStore((state) => state.rootPath);
+  const [activeSubTab, setActiveSubTab] = useState<CodewhaleSubTab>("basic");
   const [config, setConfig] = useState<CodewhaleConfigView>(emptyConfig);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -41,6 +53,7 @@ export function CodewhaleConfigTab() {
           data.providers.length > 0
             ? data.providers
             : [{ id: data.provider || "deepseek", apiKey: data.apiKey }],
+        mcpServers: data.mcpServers ?? [],
       });
     } catch (error) {
       setStatus("err");
@@ -124,153 +137,171 @@ export function CodewhaleConfigTab() {
       <ConfigPathRow path={config.path} />
       <p className="preferences-hint">{t("preferences.reconnectHint")}</p>
 
-      <section className="preferences-section">
-        <div className="preferences-field">
-          <label>{t("preferences.provider")}</label>
-          <input
-            className="preferences-input"
-            value={config.provider}
-            onChange={(e) =>
-              setConfig((prev) => ({ ...prev, provider: e.target.value }))
-            }
-          />
-        </div>
-        <div className="preferences-field">
-          <label>{t("preferences.authMode")}</label>
-          <input
-            className="preferences-input"
-            value={config.authMode}
-            onChange={(e) =>
-              setConfig((prev) => ({ ...prev, authMode: e.target.value }))
-            }
-          />
-        </div>
-      </section>
+      <PreferencesSubTabs<CodewhaleSubTab>
+        tabs={[
+          { id: "basic", labelKey: "preferences.subTabBasicConfig" },
+          { id: "apiKey", labelKey: "preferences.subTabApiKey" },
+          { id: "mcp", labelKey: "preferences.subTabMcp" },
+        ]}
+        activeTab={activeSubTab}
+        onChange={setActiveSubTab}
+      >
+        {activeSubTab === "basic" && (
+          <>
+            <section className="preferences-section">
+            <div className="preferences-field">
+              <label>{t("preferences.provider")}</label>
+              <input
+                className="preferences-input"
+                value={config.provider}
+                onChange={(e) =>
+                  setConfig((prev) => ({ ...prev, provider: e.target.value }))
+                }
+              />
+            </div>
+            <div className="preferences-field">
+              <label>{t("preferences.authMode")}</label>
+              <input
+                className="preferences-input"
+                value={config.authMode}
+                onChange={(e) =>
+                  setConfig((prev) => ({ ...prev, authMode: e.target.value }))
+                }
+              />
+            </div>
+          </section>
 
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.defaultMode")}</div>
-        <select
-          className="preferences-select"
-          value={config.defaultMode}
-          onChange={(e) =>
-            setConfig((prev) => ({ ...prev, defaultMode: e.target.value }))
-          }
-        >
-          <option value="plan">plan</option>
-          <option value="agent">agent</option>
-          <option value="yolo">yolo</option>
-        </select>
+          <section className="preferences-section">
+            <div className="preferences-label">{t("preferences.defaultMode")}</div>
+            <select
+              className="preferences-select"
+              value={config.defaultMode}
+              onChange={(e) =>
+                setConfig((prev) => ({ ...prev, defaultMode: e.target.value }))
+              }
+            >
+              <option value="plan">plan</option>
+              <option value="agent">agent</option>
+              <option value="yolo">yolo</option>
+            </select>
 
-        <div className="preferences-field" style={{ marginTop: 12 }}>
-          <label>{t("preferences.reasoningEffort")}</label>
-          <select
-            className="preferences-select"
-            value={config.reasoningEffort}
-            onChange={(e) =>
+            <div className="preferences-field" style={{ marginTop: 12 }}>
+              <label>{t("preferences.reasoningEffort")}</label>
+              <select
+                className="preferences-select"
+                value={config.reasoningEffort}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    reasoningEffort: e.target.value,
+                  }))
+                }
+              >
+                <option value="off">off</option>
+                <option value="high">high</option>
+                <option value="max">max</option>
+              </select>
+            </div>
+          </section>
+
+          <section className="preferences-section">
+            <div className="preferences-label">{t("preferences.permissions")}</div>
+            <p className="preferences-hint">
+              {t("preferences.codewhalePermissionsHint")}
+            </p>
+            <div className="preferences-field">
+              <label>{t("preferences.approvalMode")}</label>
+              <select
+                className="preferences-select"
+                value={config.approvalMode}
+                onChange={(e) =>
+                  setConfig((prev) => ({ ...prev, approvalMode: e.target.value }))
+                }
+              >
+                <option value="suggest">suggest</option>
+                <option value="auto">auto</option>
+                <option value="never">never</option>
+              </select>
+            </div>
+          </section>
+          </>
+        )}
+
+        {activeSubTab === "apiKey" && (
+          <section className="preferences-section">
+            <p className="preferences-hint">{t("preferences.apiKeyHint")}</p>
+            {config.providers.map((entry, index) => (
+              <div key={`${entry.id}-${index}`} className="preferences-card">
+                <div className="preferences-card-header">
+                  <span className="preferences-card-title">
+                    {entry.id || t("preferences.providerId")}
+                  </span>
+                  {config.providers.length > 1 && (
+                    <button
+                      type="button"
+                      className="preferences-link-btn"
+                      onClick={() => removeProvider(index)}
+                    >
+                      {t("preferences.remove")}
+                    </button>
+                  )}
+                </div>
+                <div className="preferences-field">
+                  <label>{t("preferences.providerId")}</label>
+                  <input
+                    className="preferences-input"
+                    value={entry.id}
+                    onChange={(e) => updateProvider(index, { id: e.target.value })}
+                  />
+                </div>
+                <div className="preferences-field">
+                  <label>{t("preferences.apiKey")}</label>
+                  <input
+                    className="preferences-input"
+                    type="password"
+                    value={entry.apiKey}
+                    onChange={(e) =>
+                      updateProvider(index, { apiKey: e.target.value })
+                    }
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="preferences-link-btn"
+              style={{ marginTop: 12 }}
+              onClick={addProvider}
+            >
+              {t("preferences.addProvider")}
+            </button>
+          </section>
+        )}
+
+        {activeSubTab === "mcp" && (
+          <ProviderMcpSection
+            providerId="codewhale"
+            configPath={config.mcpPath}
+            servers={config.mcpServers}
+            workspace={rootPath}
+            disabled={saving}
+            onChange={(mcpServers) =>
               setConfig((prev) => ({
                 ...prev,
-                reasoningEffort: e.target.value,
+                mcpServers,
               }))
             }
-          >
-            <option value="off">off</option>
-            <option value="high">high</option>
-            <option value="max">max</option>
-          </select>
-        </div>
-      </section>
-
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.permissions")}</div>
-        <p className="preferences-hint">{t("preferences.codewhalePermissionsHint")}</p>
-        <div className="preferences-field">
-          <label>{t("preferences.approvalMode")}</label>
-          <select
-            className="preferences-select"
-            value={config.approvalMode}
-            onChange={(e) =>
-              setConfig((prev) => ({ ...prev, approvalMode: e.target.value }))
-            }
-          >
-            <option value="suggest">suggest</option>
-            <option value="auto">auto</option>
-            <option value="never">never</option>
-          </select>
-        </div>
-      </section>
-
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.apiKey")}</div>
-        <p className="preferences-hint">{t("preferences.apiKeyHint")}</p>
-        {config.providers.map((entry, index) => (
-          <div key={`${entry.id}-${index}`} className="preferences-card">
-            <div className="preferences-card-header">
-              <span className="preferences-card-title">
-                {entry.id || t("preferences.providerId")}
-              </span>
-              {config.providers.length > 1 && (
-                <button
-                  type="button"
-                  className="preferences-link-btn"
-                  onClick={() => removeProvider(index)}
-                >
-                  {t("preferences.remove")}
-                </button>
-              )}
-            </div>
-            <div className="preferences-field">
-              <label>{t("preferences.providerId")}</label>
-              <input
-                className="preferences-input"
-                value={entry.id}
-                onChange={(e) => updateProvider(index, { id: e.target.value })}
-              />
-            </div>
-            <div className="preferences-field">
-              <label>{t("preferences.apiKey")}</label>
-              <input
-                className="preferences-input"
-                type="password"
-                value={entry.apiKey}
-                onChange={(e) =>
-                  updateProvider(index, { apiKey: e.target.value })
-                }
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        ))}
-        <button
-          type="button"
-          className="preferences-link-btn"
-          style={{ marginTop: 12 }}
-          onClick={addProvider}
-        >
-          {t("preferences.addProvider")}
-        </button>
-      </section>
-
-      <div className="preferences-actions">
-        <button
-          type="button"
-          className="preferences-btn primary"
-          disabled={saving}
-          onClick={() => save().catch(console.error)}
-        >
-          {saving ? t("preferences.saving") : t("preferences.save")}
-        </button>
-        <button
-          type="button"
-          className="preferences-btn"
-          disabled={loading || saving}
-          onClick={() => load().catch(console.error)}
-        >
-          {t("preferences.reload")}
-        </button>
-        {status !== "idle" && (
-          <span className={`preferences-status ${status}`}>{statusMessage}</span>
+          />
         )}
-      </div>
+      </PreferencesSubTabs>
+
+      <PreferencesConfigActions
+        saving={saving}
+        status={status}
+        statusMessage={statusMessage}
+        onSave={() => save().catch(console.error)}
+      />
     </div>
   );
 }

@@ -119,6 +119,7 @@ impl Default for AppConfig {
     }
 }
 
+pub mod mcp_config;
 pub mod provider_config;
 pub mod runtime_args;
 

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod config;
 pub mod fs;
 pub mod history;
+pub mod mcp;
 pub mod project_config;
 pub mod skills;
 pub mod terminal;

@@ -1,5 +1,30 @@
-import { confirm, open, type ConfirmDialogOptions, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
+import {
+  confirm,
+  message,
+  open,
+  type ConfirmDialogOptions,
+  type MessageDialogOptions,
+  type OpenDialogOptions,
+} from "@tauri-apps/plugin-dialog";
 import { isTauri } from "./tauri";
+
+export async function safeAlert(
+  text: string,
+  options?: MessageDialogOptions,
+): Promise<void> {
+  if (!isTauri()) {
+    window.alert(text);
+    return;
+  }
+  try {
+    await message(text, options);
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      console.warn("[dialog] message failed:", error);
+    }
+    window.alert(text);
+  }
+}
 
 export async function safeConfirm(
   message: string,

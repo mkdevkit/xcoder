@@ -15,6 +15,14 @@ import type {
   OpencodeProviderEntry,
 } from "../../types/providerConfig";
 import { ModalityMultiSelect } from "./ModalityMultiSelect";
+import {
+  PreferencesConfigActions,
+  PreferencesSubTabs,
+} from "./PreferencesSubTabs";
+import { ProviderMcpSection } from "./ProviderMcpSection";
+import { useWorkspaceStore } from "../../stores/workspace";
+
+type OpencodeSubTab = "basic" | "provider" | "mcp";
 
 function emptyModel(): OpencodeModelEntry {
   return {
@@ -64,11 +72,14 @@ function emptyConfig(): OpencodeConfigView {
     defaultAgent: "build",
     permissions: emptyPermissions(),
     providers: [],
+    mcpServers: [],
   };
 }
 
 export function OpenCodeConfigTab() {
   const { t } = useTranslation();
+  const rootPath = useWorkspaceStore((state) => state.rootPath);
+  const [activeSubTab, setActiveSubTab] = useState<OpencodeSubTab>("basic");
   const [config, setConfig] = useState<OpencodeConfigView>(emptyConfig);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -90,6 +101,7 @@ export function OpenCodeConfigTab() {
           ...provider,
           models: (provider.models ?? []).map(normalizeModel),
         })),
+        mcpServers: data.mcpServers ?? [],
       });
     } catch (error) {
       setStatus("err");
@@ -216,76 +228,89 @@ export function OpenCodeConfigTab() {
       <p className="preferences-hint">{t("preferences.opencodeModelsDynamic")}</p>
       <p className="preferences-hint">{t("preferences.reconnectHint")}</p>
 
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.defaultMode")}</div>
-        <select
-          className="preferences-select"
-          value={config.defaultAgent}
-          onChange={(e) =>
-            setConfig((prev) => ({ ...prev, defaultAgent: e.target.value }))
-          }
-        >
-          {OPENCODE_DEFAULT_AGENTS.map((agent) => (
-            <option key={agent} value={agent}>
-              {agent}
-            </option>
-          ))}
-        </select>
-        <p className="preferences-hint">
-          {t("preferences.opencodeDefaultModeHint")}
-        </p>
-      </section>
+      <PreferencesSubTabs<OpencodeSubTab>
+        tabs={[
+          { id: "basic", labelKey: "preferences.subTabBasicConfig" },
+          { id: "provider", labelKey: "preferences.subTabProvider" },
+          { id: "mcp", labelKey: "preferences.subTabMcp" },
+        ]}
+        activeTab={activeSubTab}
+        onChange={setActiveSubTab}
+      >
+        {activeSubTab === "basic" && (
+          <>
+            <section className="preferences-section">
+            <div className="preferences-label">{t("preferences.defaultMode")}</div>
+            <select
+              className="preferences-select"
+              value={config.defaultAgent}
+              onChange={(e) =>
+                setConfig((prev) => ({ ...prev, defaultAgent: e.target.value }))
+              }
+            >
+              {OPENCODE_DEFAULT_AGENTS.map((agent) => (
+                <option key={agent} value={agent}>
+                  {agent}
+                </option>
+              ))}
+            </select>
+            <p className="preferences-hint">
+              {t("preferences.opencodeDefaultModeHint")}
+            </p>
+          </section>
 
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.permissions")}</div>
-        <p className="preferences-hint">{t("preferences.opencodePermissionsHint")}</p>
-        <PermissionActionSelect
-          labelKey="preferences.permissionEdit"
-          value={config.permissions.edit}
-          onChange={(value) =>
-            setConfig((prev) => ({
-              ...prev,
-              permissions: { ...prev.permissions, edit: value },
-            }))
-          }
-        />
-        <PermissionActionSelect
-          labelKey="preferences.permissionBash"
-          value={config.permissions.bash}
-          onChange={(value) =>
-            setConfig((prev) => ({
-              ...prev,
-              permissions: { ...prev.permissions, bash: value },
-            }))
-          }
-        />
-        <PermissionActionSelect
-          labelKey="preferences.permissionRead"
-          value={config.permissions.read}
-          onChange={(value) =>
-            setConfig((prev) => ({
-              ...prev,
-              permissions: { ...prev.permissions, read: value },
-            }))
-          }
-        />
-        <PermissionActionSelect
-          labelKey="preferences.permissionWebfetch"
-          value={config.permissions.webfetch}
-          onChange={(value) =>
-            setConfig((prev) => ({
-              ...prev,
-              permissions: { ...prev.permissions, webfetch: value },
-            }))
-          }
-        />
-      </section>
-
-      <section className="preferences-section">
-        <div className="preferences-label">{t("preferences.provider")}</div>
-        {config.providers.length === 0 && (
-          <p className="preferences-hint">{t("preferences.noProvidersConfigured")}</p>
+          <section className="preferences-section">
+            <div className="preferences-label">{t("preferences.permissions")}</div>
+            <p className="preferences-hint">{t("preferences.opencodePermissionsHint")}</p>
+            <PermissionActionSelect
+              labelKey="preferences.permissionEdit"
+              value={config.permissions.edit}
+              onChange={(value) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  permissions: { ...prev.permissions, edit: value },
+                }))
+              }
+            />
+            <PermissionActionSelect
+              labelKey="preferences.permissionBash"
+              value={config.permissions.bash}
+              onChange={(value) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  permissions: { ...prev.permissions, bash: value },
+                }))
+              }
+            />
+            <PermissionActionSelect
+              labelKey="preferences.permissionRead"
+              value={config.permissions.read}
+              onChange={(value) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  permissions: { ...prev.permissions, read: value },
+                }))
+              }
+            />
+            <PermissionActionSelect
+              labelKey="preferences.permissionWebfetch"
+              value={config.permissions.webfetch}
+              onChange={(value) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  permissions: { ...prev.permissions, webfetch: value },
+                }))
+              }
+            />
+          </section>
+          </>
         )}
+
+        {activeSubTab === "provider" && (
+          <section className="preferences-section">
+            {config.providers.length === 0 && (
+              <p className="preferences-hint">{t("preferences.noProvidersConfigured")}</p>
+            )}
         {config.providers.map((entry, providerIndex) => (
           <div key={`${entry.id}-${providerIndex}`} className="preferences-card">
             <div className="preferences-card-header">
@@ -493,29 +518,32 @@ export function OpenCodeConfigTab() {
         >
           {t("preferences.addProvider")}
         </button>
-      </section>
-
-      <div className="preferences-actions">
-        <button
-          type="button"
-          className="preferences-btn primary"
-          disabled={saving}
-          onClick={() => save().catch(console.error)}
-        >
-          {saving ? t("preferences.saving") : t("preferences.save")}
-        </button>
-        <button
-          type="button"
-          className="preferences-btn"
-          disabled={loading || saving}
-          onClick={() => load().catch(console.error)}
-        >
-          {t("preferences.reload")}
-        </button>
-        {status !== "idle" && (
-          <span className={`preferences-status ${status}`}>{statusMessage}</span>
+          </section>
         )}
-      </div>
+
+        {activeSubTab === "mcp" && (
+          <ProviderMcpSection
+            providerId="opencode"
+            configPath={config.path}
+            servers={config.mcpServers}
+            workspace={rootPath}
+            disabled={saving}
+            onChange={(mcpServers) =>
+              setConfig((prev) => ({
+                ...prev,
+                mcpServers,
+              }))
+            }
+          />
+        )}
+      </PreferencesSubTabs>
+
+      <PreferencesConfigActions
+        saving={saving}
+        status={status}
+        statusMessage={statusMessage}
+        onSave={() => save().catch(console.error)}
+      />
     </div>
   );
 }

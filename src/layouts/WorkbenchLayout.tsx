@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import appIcon from "../../src-tauri/icons/icon.png";
-import { MenuBar } from "../components/MenuBar";
+import { MenuBar, type MenuBarMenu } from "../components/MenuBar";
 import { PanelResizeHandle } from "../components/PanelResizeHandle";
 import { FileExplorer } from "../panels/FileExplorer/FileExplorer";
 import { EditorPanel } from "../panels/EditorPanel/EditorPanel";
@@ -15,6 +15,7 @@ import { useTerminalStore } from "../stores/terminal";
 import { useWorkspaceStore } from "../stores/workspace";
 import { useChatStore, useActiveProviderChat } from "../stores/chat";
 import { useTranslation } from "../i18n";
+import { projectDisplayName } from "../utils/recentProjects";
 
 export function WorkbenchLayout() {
   const {
@@ -27,13 +28,17 @@ export function WorkbenchLayout() {
     resizeTerminalBy,
   } = useSettingsStore();
   const centerColumnRef = useRef<HTMLElement>(null);
-  const { openFolder, openPreferencesTab, rootPath, activeFile, setupWorkspaceListener } =
+  const { openFolder, openPreferencesTab, openRecentProject, closeProject, recentProjects, rootPath, activeFile, setupWorkspaceListener } =
     useWorkspaceStore();
   const { createTerminal } = useTerminalStore();
   const { connectedIntent } = useActiveProviderChat();
   const showChatPanel = Boolean(rootPath && connectedIntent);
   const { t } = useTranslation();
   useWorkbenchContextMenu();
+
+  useEffect(() => {
+    useWorkspaceStore.getState().refreshRecentProjects();
+  }, []);
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -54,36 +59,65 @@ export function WorkbenchLayout() {
     createTerminal(rootPath ?? undefined).catch(console.error);
   };
 
-  const menuBarMenus = [
-    {
-      id: "file",
-      label: t("menu.file"),
-      items: [
-        {
-          id: "open-project",
-          label: t("menu.openProject"),
-          onClick: () => openFolder().catch(console.error),
-        },
-        {
-          id: "preferences",
-          label: t("menu.preferences"),
-          dividerBefore: true,
-          onClick: () => openPreferencesTab(),
-        },
-      ],
-    },
-    {
-      id: "terminal",
-      label: t("menu.terminal"),
-      items: [
-        {
-          id: "new-terminal",
-          label: t("menu.newTerminal"),
-          onClick: handleNewTerminal,
-        },
-      ],
-    },
-  ];
+  const menuBarMenus = useMemo((): MenuBarMenu[] => {
+    const recentItems =
+      recentProjects.length > 0
+        ? recentProjects.map((path) => ({
+            id: `recent-${path}`,
+            label: projectDisplayName(path),
+            title: path,
+            onClick: () => openRecentProject(path).catch(console.error),
+          }))
+        : [
+            {
+              id: "open-recent-empty",
+              label: t("menu.openRecentEmpty"),
+              disabled: true,
+            },
+          ];
+
+    return [
+      {
+        id: "file",
+        label: t("menu.file"),
+        items: [
+          {
+            id: "open-project",
+            label: t("menu.openProject"),
+            onClick: () => openFolder().catch(console.error),
+          },
+          {
+            id: "open-recent",
+            label: t("menu.openRecent"),
+            children: recentItems,
+          },
+          {
+            id: "close-project",
+            label: t("menu.closeProject"),
+            disabled: !rootPath,
+            onClick: () => closeProject().catch(console.error),
+          },
+          {
+            id: "preferences",
+            label: t("menu.preferences"),
+            dividerBefore: true,
+            onClick: () => openPreferencesTab(),
+          },
+        ],
+      },
+      {
+        id: "terminal",
+        label: t("menu.terminal"),
+        items: [
+          {
+            id: "new-terminal",
+            label: t("menu.newTerminal"),
+            onClick: handleNewTerminal,
+          },
+        ],
+      },
+    ];
+  }, [closeProject, handleNewTerminal, openFolder, openPreferencesTab, openRecentProject, recentProjects, rootPath, t]);
 
   const handleTerminalResize = (delta: number) => {
     const maxHeight = centerColumnRef.current
@@ -210,6 +244,9 @@ export function WorkbenchLayout() {
           padding: 7px 14px;
           border-radius: 0;
           color: var(--text);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .menu-item:hover:not(:disabled) {
           background: var(--bg-hover);

@@ -12,12 +12,14 @@ interface ProjectSkillsSectionProps {
   workspace: string;
   providerId: string;
   disabled?: boolean;
+  embedded?: boolean;
 }
 
 export function ProjectSkillsSection({
   workspace,
   providerId,
   disabled = false,
+  embedded = false,
 }: ProjectSkillsSectionProps) {
   const { t } = useTranslation();
   const [catalog, setCatalog] = useState<SkillCatalog | null>(null);
@@ -124,8 +126,12 @@ export function ProjectSkillsSection({
   }
 
   return (
-    <section className="preferences-section project-skills-section">
-      <div className="preferences-label">{t("preferences.projectSkills")}</div>
+    <section
+      className={`preferences-section project-skills-section${embedded ? " project-skills-embedded" : ""}`}
+    >
+      {!embedded && (
+        <div className="preferences-label">{t("preferences.projectSkills")}</div>
+      )}
       <p className="preferences-hint">
         {isOpencode
           ? t("preferences.projectSkillsOpencodeHint", {

@@ -1,4 +1,5 @@
 use crate::config::load_app_config;
+use crate::config::mcp_config::{build_opencode_mcp_json, parse_opencode_mcp_servers, McpServerEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -60,6 +61,9 @@ pub struct CodewhaleConfigView {
     pub default_mode: String,
     pub approval_mode: String,
     pub reasoning_effort: String,
+    pub mcp_path: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -109,6 +113,7 @@ pub fn read_codewhale_default_text_model() -> Option<String> {
 }
 
 pub fn load_codewhale_config() -> Result<CodewhaleConfigView, String> {
+    let mcp = crate::config::mcp_config::load_codewhale_mcp_config()?;
     let path = resolve_provider_config_path("codewhale")?;
     if !path.exists() {
         return Ok(CodewhaleConfigView {
@@ -121,6 +126,8 @@ pub fn load_codewhale_config() -> Result<CodewhaleConfigView, String> {
             default_mode: "agent".to_string(),
             approval_mode: "suggest".to_string(),
             reasoning_effort: "high".to_string(),
+            mcp_path: mcp.path,
+            mcp_servers: mcp.servers,
         });
     }
 
@@ -170,6 +177,8 @@ pub fn load_codewhale_config() -> Result<CodewhaleConfigView, String> {
         } else {
             parsed.ui.reasoning_effort
         },
+        mcp_path: mcp.path,
+        mcp_servers: mcp.servers,
     })
 }
 
@@ -240,7 +249,8 @@ pub fn save_codewhale_config(view: CodewhaleConfigView) -> Result<(), String> {
     };
 
     let content = toml::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    crate::config::mcp_config::save_codewhale_mcp_config(&view.mcp_servers)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +298,8 @@ pub struct OpencodeConfigView {
     pub default_agent: String,
     pub permissions: OpencodePermissionsView,
     pub providers: Vec<OpencodeProviderEntry>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerEntry>,
 }
 
 fn permission_value_to_action(value: &Value) -> String {
@@ -319,6 +331,55 @@ fn parse_permission_action(permission: Option<&Value>, key: &str) -> String {
         return permission_value_to_action(value);
     }
     String::new()
+}
+
+pub fn project_codewhale_config_path(workspace: &str) -> PathBuf {
+    Path::new(workspace).join(".codewhale").join("config.toml")
+}
+
+fn is_codewhale_project_config_empty(file: &CodewhaleConfigFile) -> bool {
+    file.api_key.is_empty()
+        && file.provider.is_empty()
+        && file.auth_mode.is_empty()
+        && file.default_text_model.is_empty()
+        && file.providers.is_empty()
+        && file.ui.default_mode.is_empty()
+        && file.ui.approval_mode.is_empty()
+        && file.ui.reasoning_effort.is_empty()
+}
+
+pub fn sync_project_codewhale_approval(workspace: &str, approval_mode: &str) -> Result<(), String> {
+    let path = project_codewhale_config_path(workspace);
+    let mode = approval_mode.trim();
+
+    if mode.is_empty() && !path.is_file() {
+        return Ok(());
+    }
+
+    let existing_content = if path.is_file() {
+        fs::read_to_string(&path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+
+    let mut parsed: CodewhaleConfigFile = if existing_content.trim().is_empty() {
+        CodewhaleConfigFile::default()
+    } else {
+        toml::from_str(&existing_content).unwrap_or_default()
+    };
+
+    parsed.ui.approval_mode = mode.to_string();
+
+    if is_codewhale_project_config_empty(&parsed) {
+        if path.is_file() {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    ensure_parent(&path)?;
+    let content = toml::to_string_pretty(&parsed).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())
 }
 
 pub fn project_opencode_config_path(workspace: &str) -> PathBuf {
@@ -618,6 +679,7 @@ pub fn load_opencode_config() -> Result<OpencodeConfigView, String> {
                 webfetch: String::new(),
             },
             providers: Vec::new(),
+            mcp_servers: Vec::new(),
         });
     }
 
@@ -651,6 +713,7 @@ pub fn load_opencode_config() -> Result<OpencodeConfigView, String> {
         default_agent,
         permissions,
         providers,
+        mcp_servers: parse_opencode_mcp_servers(&json),
     })
 }
 
@@ -742,6 +805,13 @@ pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
             &view.permissions,
             existing_permission.as_ref(),
         );
+
+        let mcp = build_opencode_mcp_json(&view.mcp_servers);
+        if mcp.as_object().is_some_and(|map| map.is_empty()) {
+            obj.remove("mcp");
+        } else {
+            obj.insert("mcp".to_string(), mcp);
+        }
 
         if let Some(model) = obj.get("model").and_then(|value| value.as_str()) {
             if let Some((provider, _)) = model.split_once('/') {

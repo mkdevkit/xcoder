@@ -16,7 +16,9 @@ use crate::agent::opencode::{
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
 };
-use crate::commands::project_config::sync_project_opencode_from_config;
+use crate::commands::project_config::{
+    sync_project_codewhale_from_config, sync_project_opencode_from_config,
+};
 use crate::utils::runtime_lifecycle::{kill_child_tree, kill_tcp_listener};
 use futures_util::StreamExt;
 use std::sync::Mutex;
@@ -69,9 +71,14 @@ pub fn codewhale_list_models() -> Result<Vec<crate::agent::codewhale::CodewhaleM
 
 #[tauri::command]
 pub async fn codewhale_start_runtime(
+    workspace: String,
     spawn_if_missing: Option<bool>,
     state: State<'_, Mutex<CodewhaleState>>,
 ) -> Result<RuntimeStatus, String> {
+    let workspace = workspace.trim();
+    if !workspace.is_empty() {
+        sync_project_codewhale_from_config(workspace)?;
+    }
     let spawn_if_missing = spawn_if_missing.unwrap_or(true);
     let url = base_url();
     let client = reqwest::Client::new();
@@ -135,8 +142,13 @@ pub async fn codewhale_start_runtime(
 
 #[tauri::command]
 pub async fn codewhale_restart_runtime(
+    workspace: String,
     state: State<'_, Mutex<CodewhaleState>>,
 ) -> Result<RuntimeStatus, String> {
+    let workspace = workspace.trim();
+    if !workspace.is_empty() {
+        sync_project_codewhale_from_config(workspace)?;
+    }
     let url = base_url();
     let client = reqwest::Client::new();
 

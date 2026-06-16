@@ -134,20 +134,12 @@ export function GeneralConfigTab() {
     setStatus("idle");
     try {
       if (action === "start") {
-        if (providerId === "opencode") {
-          await tauriInvoke(commands.startRuntime, {
-            workspace: "",
-            spawnIfMissing: true,
-          });
-        } else {
-          await tauriInvoke(commands.startRuntime, { spawnIfMissing: true });
-        }
+        await tauriInvoke(commands.startRuntime, {
+          workspace: "",
+          spawnIfMissing: true,
+        });
       } else if (action === "restart") {
-        if (providerId === "opencode") {
-          await tauriInvoke(commands.restartRuntime, { workspace: "" });
-        } else {
-          await tauriInvoke(commands.restartRuntime);
-        }
+        await tauriInvoke(commands.restartRuntime, { workspace: "" });
       } else {
         await tauriInvoke(commands.stopRuntime);
         await useChatStore.getState().refreshProviderRuntime(providerId);

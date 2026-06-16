@@ -111,6 +111,7 @@ interface ChatState {
   setProjectOpencodePermissions: (
     permissions: Partial<OpencodePermissionsView>,
   ) => Promise<void>;
+  setProjectCodewhaleApprovalMode: (approvalMode: string) => Promise<void>;
   onProjectOpened: (workspace: string, projectConfig: ProjectConfig) => Promise<void>;
   connectRuntime: (workspace?: string) => Promise<void>;
   disconnectRuntime: () => Promise<void>;
@@ -1183,12 +1184,9 @@ async function restartProviderRuntime(
   workspace: string | undefined,
 ) {
   const commands = getAgentCommands(providerId);
-  if (providerId === "opencode") {
-    return tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
-      workspace: workspace ?? "",
-    });
-  }
-  return tauriInvoke<RuntimeStatus>(commands.restartRuntime);
+  return tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
+    workspace: workspace ?? "",
+  });
 }
 
 async function startProviderRuntime(
@@ -1490,6 +1488,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  setProjectCodewhaleApprovalMode: async (approvalMode) => {
+    const workspace = useWorkspaceStore.getState().rootPath;
+    if (!workspace) return;
+
+    const info = await tauriInvoke<ProjectConfigInfo>("save_project_config_cmd", {
+      workspace,
+      config: buildProjectConfigPayload(
+        useWorkspaceStore.getState().projectConfig,
+        get().providerId,
+        { codewhaleApprovalMode: approvalMode },
+      ),
+    });
+    useWorkspaceStore.setState({
+      projectConfig: info.config,
+      projectConfigPath: info.path,
+    });
+  },
+
   startRuntimeHealthMonitor: () => {
     if (runtimeHealthTimer) {
       clearInterval(runtimeHealthTimer);
@@ -1595,12 +1611,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       const commands = getAgentCommands(providerId);
-      const runtime =
-        providerId === "opencode"
-          ? await tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
-              workspace: resolvedWorkspace,
-            })
-          : await tauriInvoke<RuntimeStatus>(commands.restartRuntime);
+      const runtime = await tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
+        workspace: resolvedWorkspace ?? "",
+      });
 
       if (!runtime.running) {
         throw new Error(t("error.aiServiceRestartFailed"));

@@ -32,6 +32,65 @@ export const preferencesStyles = `
     border-bottom-color: var(--accent);
     font-weight: 600;
   }
+  .preferences-subtab-group {
+    max-width: 720px;
+    margin-top: 4px;
+  }
+  .preferences-subtabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+  .preferences-subtab {
+    padding: 8px 14px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    font-size: 13px;
+  }
+  .preferences-subtab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .preferences-subtab-panel {
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    padding: 16px 18px;
+    background: var(--bg-panel);
+  }
+  .preferences-subtab-panel .preferences-section:first-child {
+    margin-top: 0;
+  }
+  .preferences-subtab-panel .preferences-section:last-child {
+    margin-bottom: 0;
+  }
+  .preferences-mcp-kv-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: end;
+    margin-bottom: 8px;
+  }
+    margin: 12px 0 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-height: 280px;
+    overflow: auto;
+  }
   .preferences-section + .preferences-section {
     margin-top: 24px;
   }
@@ -217,6 +276,20 @@ export const preferencesStyles = `
     grid-template-columns: 1fr 160px;
     gap: 12px;
     max-width: 720px;
+  }
+  .preferences-project-runtime-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin: 12px 0 16px;
+    max-width: 720px;
+  }
+  .preferences-project-runtime-panel .preferences-runtime-actions {
+    margin-top: 10px;
+  }
+  .preferences-project-runtime-panel .preferences-hint {
+    margin-top: 10px;
+    margin-bottom: 0;
   }
   .preferences-runtime-actions {
     display: flex;

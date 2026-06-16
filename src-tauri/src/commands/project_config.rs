@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::load_app_config;
-use crate::config::provider_config::{OpencodePermissionsView, sync_project_opencode_permissions};
+use crate::config::provider_config::{
+    OpencodePermissionsView, sync_project_codewhale_approval, sync_project_opencode_permissions,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,6 +15,8 @@ pub struct ProjectConfig {
     pub default_model: String,
     #[serde(default)]
     pub opencode_permissions: OpencodePermissionsView,
+    #[serde(default)]
+    pub codewhale_approval_mode: String,
 }
 
 pub fn sync_project_opencode_from_config(workspace: &str) -> Result<(), String> {
@@ -20,6 +24,13 @@ pub fn sync_project_opencode_from_config(workspace: &str) -> Result<(), String> 
         return Ok(());
     };
     sync_project_opencode_permissions(workspace, &config.opencode_permissions)
+}
+
+pub fn sync_project_codewhale_from_config(workspace: &str) -> Result<(), String> {
+    let Ok(config) = load_project_config(workspace) else {
+        return Ok(());
+    };
+    sync_project_codewhale_approval(workspace, &config.codewhale_approval_mode)
 }
 
 pub fn project_config_dir(workspace: &str) -> PathBuf {
@@ -47,6 +58,7 @@ pub fn ensure_project_config(
         provider: default_provider.to_string(),
         default_model: default_model.to_string(),
         opencode_permissions: OpencodePermissionsView::default(),
+        codewhale_approval_mode: String::new(),
     };
     save_project_config(workspace, &config)?;
     Ok(config)
