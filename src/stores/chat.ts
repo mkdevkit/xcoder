@@ -117,6 +117,7 @@ interface ChatState {
   restartRuntime: (workspace?: string) => Promise<void>;
   reloadProviderConfig: (providerId: string) => Promise<void>;
   refreshProviderRuntime: (providerId?: string) => Promise<void>;
+  autoConnectAfterRuntimeService: (providerId: string) => Promise<void>;
   startRuntimeHealthMonitor: () => () => void;
   loadThreads: (workspace: string, providerId?: string) => Promise<void>;
   selectThread: (threadId: string, workspace: string) => Promise<void>;
@@ -1270,6 +1271,30 @@ function syncProviderWorkspace(
   patchProvider(set, providerId, patch);
 }
 
+function isProjectLinkedToWorkspace(
+  providerStates: Record<string, ProviderChatSlice>,
+  workspace: string,
+): boolean {
+  return Object.values(providerStates).some(
+    (slice) =>
+      slice.connectedIntent &&
+      !!slice.chatWorkspace &&
+      workspacesMatch(slice.chatWorkspace, workspace),
+  );
+}
+
+function isRuntimeServiceRelevantToProject(
+  providerId: string,
+  config: AppConfig,
+  projectProvider: string | undefined,
+): boolean {
+  const defaultProvider = config.app.default_provider || "codewhale";
+  return (
+    providerId === defaultProvider ||
+    (projectProvider != null && providerId === projectProvider)
+  );
+}
+
 async function tryReattachProvider(
   providerId: string,
   workspace: string | undefined,
@@ -1662,6 +1687,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
     patchProvider(set, id, {
       runtime: status,
       connectedIntent: slice.connectedIntent,
+    });
+  },
+
+  autoConnectAfterRuntimeService: async (providerId) => {
+    if (providerId !== "opencode" && providerId !== "codewhale") {
+      return;
+    }
+
+    const rootPath = useWorkspaceStore.getState().rootPath;
+    if (!rootPath) return;
+
+    const { config, providerStates } = get();
+    if (!config) return;
+
+    const projectConfig = useWorkspaceStore.getState().projectConfig;
+    if (
+      !isRuntimeServiceRelevantToProject(
+        providerId,
+        config,
+        projectConfig?.provider,
+      )
+    ) {
+      return;
+    }
+
+    if (isProjectLinkedToWorkspace(providerStates, rootPath)) {
+      return;
+    }
+
+    const runtime = await pollProviderRuntimeStatus(providerId);
+    if (!runtime.running) return;
+
+    if (get().providerId !== providerId) {
+      set((state) => ({
+        providerId,
+        providerStates: ensureProviderSlice(state.providerStates, providerId),
+      }));
+    }
+
+    await runRuntimeAction(providerId, "connect", set, get, async () => {
+      await hydrateProviderAfterConnect(
+        providerId,
+        rootPath,
+        runtime,
+        set,
+        get,
+      );
     });
   },
 

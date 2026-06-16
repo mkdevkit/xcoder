@@ -153,6 +153,12 @@ export function GeneralConfigTab() {
         await useChatStore.getState().refreshProviderRuntime(providerId);
       }
       await refreshRuntimeStatus();
+      if (action === "start" || action === "restart") {
+        await useChatStore
+          .getState()
+          .autoConnectAfterRuntimeService(providerId)
+          .catch(console.error);
+      }
     } catch (error) {
       setStatus("err");
       setStatusMessage(String(error));
