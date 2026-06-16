@@ -153,11 +153,56 @@ export const preferencesStyles = `
     margin-bottom: 4px;
   }
   .preferences-model-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: end;
     margin-bottom: 8px;
+  }
+  .preferences-model-compact-field {
+    width: 240px;
+    max-width: 50%;
+    flex: 0 0 auto;
+  }
+  .preferences-model-compact-field .preferences-input {
+    max-width: 100%;
+  }
+  .preferences-model-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: var(--bg-elevated);
+  }
+  .preferences-model-limit-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .preferences-modalities-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .preferences-modality-field {
+    margin-bottom: 0;
+    flex: 0 0 auto;
+  }
+  .preferences-modality-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-top: 4px;
+  }
+  .preferences-modality-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
   }
   .preferences-link-btn {
     padding: 4px 8px;

@@ -150,6 +150,7 @@ export function GeneralConfigTab() {
         }
       } else {
         await tauriInvoke(commands.stopRuntime);
+        await useChatStore.getState().refreshProviderRuntime(providerId);
       }
       await refreshRuntimeStatus();
     } catch (error) {

@@ -17,6 +17,7 @@ use crate::agent::opencode::{
     OpencodeState,
 };
 use crate::commands::project_config::sync_project_opencode_from_config;
+use crate::utils::runtime_lifecycle::{kill_child_tree, kill_tcp_listener};
 use futures_util::StreamExt;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
@@ -111,8 +112,7 @@ pub async fn codewhale_start_runtime(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut child) = guard.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_child_tree(&mut child);
         }
         guard.base_url = None;
     }
@@ -144,8 +144,7 @@ pub async fn codewhale_restart_runtime(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut child) = guard.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_child_tree(&mut child);
         }
         guard.base_url = None;
     }
@@ -179,15 +178,33 @@ pub async fn codewhale_restart_runtime(
 }
 
 #[tauri::command]
-pub fn codewhale_stop_runtime(state: State<'_, Mutex<CodewhaleState>>) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|e| e.to_string())?;
-    guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+pub async fn codewhale_stop_runtime(state: State<'_, Mutex<CodewhaleState>>) -> Result<(), String> {
+    let target_url = {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        let target_url = guard
+            .base_url
+            .clone()
+            .unwrap_or_else(base_url);
+        if let Some(mut child) = guard.child.take() {
+            kill_child_tree(&mut child);
+        }
+        guard.base_url = None;
+        target_url
+    };
 
-    if let Some(mut child) = guard.child.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+    let client = reqwest::Client::new();
+    if codewhale_is_healthy(&client, &target_url).await {
+        kill_tcp_listener(&target_url)?;
+        for _ in 0..15 {
+            if !codewhale_is_healthy(&client, &target_url).await {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        return Err("CodeWhale 进程仍在运行，无法停止".to_string());
     }
-    guard.base_url = None;
+
     Ok(())
 }
 
@@ -600,8 +617,7 @@ pub async fn opencode_start_runtime(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut child) = guard.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_child_tree(&mut child);
         }
         guard.base_url = None;
         guard.workspace = None;
@@ -638,8 +654,7 @@ pub async fn opencode_restart_runtime(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut child) = guard.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_child_tree(&mut child);
         }
         guard.base_url = None;
         guard.workspace = None;
@@ -676,16 +691,34 @@ pub async fn opencode_restart_runtime(
 }
 
 #[tauri::command]
-pub fn opencode_stop_runtime(state: State<'_, Mutex<OpencodeState>>) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|e| e.to_string())?;
-    guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+pub async fn opencode_stop_runtime(state: State<'_, Mutex<OpencodeState>>) -> Result<(), String> {
+    let target_url = {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
+        let target_url = guard
+            .base_url
+            .clone()
+            .unwrap_or_else(opencode_base_url);
+        if let Some(mut child) = guard.child.take() {
+            kill_child_tree(&mut child);
+        }
+        guard.base_url = None;
+        guard.workspace = None;
+        target_url
+    };
 
-    if let Some(mut child) = guard.child.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+    let client = reqwest::Client::new();
+    if opencode_is_healthy(&client, &target_url).await {
+        kill_tcp_listener(&target_url)?;
+        for _ in 0..15 {
+            if !opencode_is_healthy(&client, &target_url).await {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        return Err("OpenCode 进程仍在运行，无法停止".to_string());
     }
-    guard.base_url = None;
-    guard.workspace = None;
+
     Ok(())
 }
 

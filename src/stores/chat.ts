@@ -115,6 +115,8 @@ interface ChatState {
   connectRuntime: (workspace?: string) => Promise<void>;
   disconnectRuntime: () => Promise<void>;
   restartRuntime: (workspace?: string) => Promise<void>;
+  reloadProviderConfig: (providerId: string) => Promise<void>;
+  refreshProviderRuntime: (providerId?: string) => Promise<void>;
   startRuntimeHealthMonitor: () => () => void;
   loadThreads: (workspace: string, providerId?: string) => Promise<void>;
   selectThread: (threadId: string, workspace: string) => Promise<void>;
@@ -1175,6 +1177,19 @@ async function hydrateProviderAfterConnect(
   }
 }
 
+async function restartProviderRuntime(
+  providerId: string,
+  workspace: string | undefined,
+) {
+  const commands = getAgentCommands(providerId);
+  if (providerId === "opencode") {
+    return tauriInvoke<RuntimeStatus>(commands.restartRuntime, {
+      workspace: workspace ?? "",
+    });
+  }
+  return tauriInvoke<RuntimeStatus>(commands.restartRuntime);
+}
+
 async function startProviderRuntime(
   providerId: string,
   workspace: string | undefined,
@@ -1502,18 +1517,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
 
     await runRuntimeAction(providerId, "connect", set, get, async () => {
-      const runtime = await startProviderRuntime(providerId, workspace, true);
+      const resolvedWorkspace = resolveProviderWorkspace(
+        get,
+        providerId,
+        workspace,
+      );
+      const status = await pollProviderRuntimeStatus(providerId);
+      const runtime = status.running
+        ? await restartProviderRuntime(providerId, resolvedWorkspace)
+        : await startProviderRuntime(providerId, resolvedWorkspace, true);
       if (!runtime.running) {
         throw new Error(t("error.aiServiceStartFailed"));
       }
       await hydrateProviderAfterConnect(
         providerId,
-        workspace,
+        resolvedWorkspace,
         runtime,
         set,
         get,
       );
-      const resolvedWorkspace = resolveProviderWorkspace(get, providerId, workspace);
       if (resolvedWorkspace) {
         await get().loadThreads(resolvedWorkspace, providerId).catch(() => undefined);
       }
@@ -1572,6 +1594,74 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       await reattachLinkedProviders(resolvedWorkspace, providerId, set, get);
+    });
+  },
+
+  reloadProviderConfig: async (providerId) => {
+    if (providerId !== "opencode" && providerId !== "codewhale") {
+      return;
+    }
+
+    const status = await pollProviderRuntimeStatus(providerId);
+    if (!status.running) {
+      return;
+    }
+
+    const slice = getProviderSlice(get, providerId);
+    const wasLinked = slice.connectedIntent;
+    const resolvedWorkspace = resolveProviderWorkspace(get, providerId);
+
+    await runRuntimeAction(providerId, "restart", set, get, async () => {
+      patchProvider(set, providerId, {
+        streaming: false,
+        pendingApproval: null,
+      });
+
+      const runtime = await restartProviderRuntime(
+        providerId,
+        resolvedWorkspace,
+      );
+      if (!runtime.running) {
+        throw new Error(t("error.aiServiceRestartFailed"));
+      }
+
+      if (wasLinked) {
+        await hydrateProviderAfterConnect(
+          providerId,
+          resolvedWorkspace,
+          runtime,
+          set,
+          get,
+        );
+      } else {
+        patchProvider(set, providerId, { runtime });
+      }
+    });
+  },
+
+  refreshProviderRuntime: async (providerId) => {
+    const id = providerId ?? get().providerId;
+    if (id !== "opencode" && id !== "codewhale") {
+      return;
+    }
+
+    const status = await pollProviderRuntimeStatus(id);
+    const slice = getProviderSlice(get, id);
+    if (!status.running) {
+      stopStreamingHistorySync(id);
+      cancelScheduledCompleteTurn(id);
+      patchProvider(set, id, {
+        runtime: status,
+        connectedIntent: false,
+        streaming: false,
+        pendingApproval: null,
+      });
+      return;
+    }
+
+    patchProvider(set, id, {
+      runtime: status,
+      connectedIntent: slice.connectedIntent,
     });
   },
 

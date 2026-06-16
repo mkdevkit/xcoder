@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "../../i18n";
+import { useChatStore } from "../../stores/chat";
 import { tauriInvoke } from "../../utils/tauri";
 import { ConfigPathRow } from "./ConfigPathRow";
 import { ProviderNotInstalledNotice } from "./ProviderNotInstalledNotice";
@@ -89,6 +90,7 @@ export function CodewhaleConfigTab() {
         apiKey: primary?.apiKey ?? config.apiKey,
       };
       await tauriInvoke("save_codewhale_provider_config", { config: payload });
+      await useChatStore.getState().reloadProviderConfig("codewhale");
       setStatus("ok");
       setStatusMessage(t("preferences.saved"));
       await load();

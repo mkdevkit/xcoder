@@ -237,6 +237,24 @@ pub fn list_models() -> Result<Vec<CodewhaleModelOption>, String> {
     Ok(options)
 }
 
+pub fn clear_provider_auth(provider: &str) -> Result<(), String> {
+    let id = provider.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+    let program = resolve_codewhale_command()?;
+    let output = run_command(&program, &["auth", "clear", "--provider", id])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("codewhale auth clear failed for provider: {id}")
+    } else {
+        stderr
+    })
+}
+
 fn run_command(program: &std::path::Path, args: &[&str]) -> Result<Output, String> {
     build_command(program, args)
         .output()

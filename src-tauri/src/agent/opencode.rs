@@ -2,6 +2,7 @@ use crate::agent::history::{HistoryMessage, ThreadSummary};
 use crate::config::runtime_args::{
     default_opencode_serve_args, opencode_serve_args_with_cors, runtime_http_base_url,
 };
+use crate::config::provider_config::resolve_provider_config_path;
 use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
 use serde::{Deserialize, Serialize};
@@ -401,7 +402,7 @@ fn parse_config_provider_map(payload: &Value) -> Vec<OpencodeModelOption> {
 }
 
 fn local_opencode_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("opencode").join("opencode.json"))
+    resolve_provider_config_path("opencode").ok()
 }
 
 fn parse_local_opencode_providers() -> Vec<OpencodeModelOption> {
@@ -1641,6 +1642,24 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             None
         }
         _ => None,
+    }
+}
+
+pub fn logout_provider_auth(provider: &str) -> Result<(), String> {
+    let id = provider.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+    let program = resolve_opencode_command()?;
+    let output = run_command(&program, &["auth", "logout", id])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Ok(())
+    } else {
+        Err(stderr)
     }
 }
 

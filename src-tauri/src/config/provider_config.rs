@@ -198,7 +198,7 @@ pub fn save_codewhale_config(view: CodewhaleConfigView) -> Result<(), String> {
         );
     }
 
-    let primary_provider = if !view.provider.trim().is_empty() {
+    let mut primary_provider = if !view.provider.trim().is_empty() {
         view.provider.trim().to_string()
     } else {
         view.providers
@@ -206,6 +206,13 @@ pub fn save_codewhale_config(view: CodewhaleConfigView) -> Result<(), String> {
             .map(|item| item.id.trim().to_string())
             .unwrap_or_default()
     };
+    if !primary_provider.is_empty() && !providers_map.contains_key(&primary_provider) {
+        primary_provider = providers_map
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_default();
+    }
 
     let primary_api_key = view
         .providers
@@ -238,12 +245,29 @@ pub fn save_codewhale_config(view: CodewhaleConfigView) -> Result<(), String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpencodeModelEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_context: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_output: Option<u64>,
+    #[serde(default)]
+    pub modalities_input: Vec<String>,
+    #[serde(default)]
+    pub modalities_output: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpencodeProviderEntry {
     pub id: String,
     pub npm: String,
     pub base_url: String,
     pub api_key: String,
     pub set_cache_key: bool,
+    #[serde(default)]
+    pub models: Vec<OpencodeModelEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -374,6 +398,180 @@ pub fn apply_opencode_permissions(
     }
 }
 
+fn opencode_model_name(model_id: &str, model_value: Option<&Value>) -> String {
+    model_value
+        .and_then(|value| {
+            value
+                .get("name")
+                .or_else(|| value.get("title"))
+                .or_else(|| value.get("label"))
+                .and_then(|v| v.as_str())
+        })
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| model_id.to_string())
+}
+
+fn parse_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_model_limit(model_value: &Value) -> (Option<u64>, Option<u64>) {
+    let Some(limit) = model_value.get("limit").and_then(|v| v.as_object()) else {
+        return (None, None);
+    };
+    let context = limit.get("context").and_then(|v| v.as_u64());
+    let output = limit.get("output").and_then(|v| v.as_u64());
+    (context, output)
+}
+
+fn parse_model_modalities(model_value: &Value) -> (Vec<String>, Vec<String>) {
+    let Some(modalities) = model_value.get("modalities").and_then(|v| v.as_object()) else {
+        return (Vec::new(), Vec::new());
+    };
+    let input = parse_string_array(modalities.get("input"));
+    let output = parse_string_array(modalities.get("output"));
+    (input, output)
+}
+
+fn build_model_value_json(model: &OpencodeModelEntry) -> Value {
+    let mut obj = Map::new();
+    let name = model.name.trim();
+    if !name.is_empty() {
+        obj.insert("name".to_string(), Value::String(name.to_string()));
+    }
+
+    if model.limit_context.is_some() || model.limit_output.is_some() {
+        let mut limit = Map::new();
+        if let Some(context) = model.limit_context {
+            limit.insert("context".to_string(), Value::Number(context.into()));
+        }
+        if let Some(output) = model.limit_output {
+            limit.insert("output".to_string(), Value::Number(output.into()));
+        }
+        obj.insert("limit".to_string(), Value::Object(limit));
+    }
+
+    if !model.modalities_input.is_empty() || !model.modalities_output.is_empty() {
+        let mut modalities = Map::new();
+        if !model.modalities_input.is_empty() {
+            modalities.insert(
+                "input".to_string(),
+                Value::Array(
+                    model
+                        .modalities_input
+                        .iter()
+                        .map(|item| Value::String(item.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !model.modalities_output.is_empty() {
+            modalities.insert(
+                "output".to_string(),
+                Value::Array(
+                    model
+                        .modalities_output
+                        .iter()
+                        .map(|item| Value::String(item.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        obj.insert("modalities".to_string(), Value::Object(modalities));
+    }
+
+    Value::Object(obj)
+}
+
+fn parse_opencode_models(value: &Value) -> Vec<OpencodeModelEntry> {
+    let Some(models) = value.get("models") else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    match models {
+        Value::Object(map) => {
+            for (id, model_value) in map {
+                if id.is_empty() {
+                    continue;
+                }
+                let (limit_context, limit_output) = parse_model_limit(model_value);
+                let (modalities_input, modalities_output) =
+                    parse_model_modalities(model_value);
+                entries.push(OpencodeModelEntry {
+                    id: id.clone(),
+                    name: opencode_model_name(id, Some(model_value)),
+                    limit_context,
+                    limit_output,
+                    modalities_input,
+                    modalities_output,
+                });
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                let id = item
+                    .get("id")
+                    .or_else(|| item.get("modelID"))
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let (limit_context, limit_output) = parse_model_limit(item);
+                let (modalities_input, modalities_output) = parse_model_modalities(item);
+                entries.push(OpencodeModelEntry {
+                    id: id.clone(),
+                    name: opencode_model_name(&id, Some(item)),
+                    limit_context,
+                    limit_output,
+                    modalities_input,
+                    modalities_output,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries
+}
+
+fn build_opencode_models_json(models: &[OpencodeModelEntry]) -> Value {
+    let mut map = Map::new();
+    for model in models {
+        let id = model.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let name = model.name.trim();
+        let model_json = if name.is_empty()
+            && model.limit_context.is_none()
+            && model.limit_output.is_none()
+            && model.modalities_input.is_empty()
+            && model.modalities_output.is_empty()
+        {
+            json!({})
+        } else {
+            build_model_value_json(model)
+        };
+        map.insert(id.to_string(), model_json);
+    }
+    Value::Object(map)
+}
+
 fn parse_opencode_provider(id: &str, value: &Value) -> OpencodeProviderEntry {
     let options = value.get("options").and_then(|v| v.as_object());
     let base_url = options
@@ -402,6 +600,7 @@ fn parse_opencode_provider(id: &str, value: &Value) -> OpencodeProviderEntry {
         base_url,
         api_key,
         set_cache_key,
+        models: parse_opencode_models(value),
     }
 }
 
@@ -455,10 +654,8 @@ pub fn load_opencode_config() -> Result<OpencodeConfigView, String> {
     })
 }
 
-fn build_opencode_provider_json(entry: &OpencodeProviderEntry, existing: Option<&Value>) -> Value {
-    let models = existing
-        .and_then(|value| value.get("models").cloned())
-        .unwrap_or_else(|| Value::Object(Map::new()));
+fn build_opencode_provider_json(entry: &OpencodeProviderEntry, _existing: Option<&Value>) -> Value {
+    let models = build_opencode_models_json(&entry.models);
 
     let mut options = Map::new();
     if !entry.base_url.trim().is_empty() {
@@ -527,6 +724,7 @@ pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
                 build_opencode_provider_json(entry, existing),
             );
         }
+        let configured_ids: Vec<String> = provider_map.keys().cloned().collect();
         obj.insert("provider".to_string(), Value::Object(provider_map));
 
         let default_agent = view.default_agent.trim();
@@ -544,6 +742,14 @@ pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
             &view.permissions,
             existing_permission.as_ref(),
         );
+
+        if let Some(model) = obj.get("model").and_then(|value| value.as_str()) {
+            if let Some((provider, _)) = model.split_once('/') {
+                if !configured_ids.iter().any(|id| id == provider) {
+                    obj.remove("model");
+                }
+            }
+        }
     }
 
     let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;

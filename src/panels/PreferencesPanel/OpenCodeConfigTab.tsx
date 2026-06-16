@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "../../i18n";
+import { useChatStore } from "../../stores/chat";
 import { tauriInvoke } from "../../utils/tauri";
 import { ConfigPathRow } from "./ConfigPathRow";
 import { ProviderNotInstalledNotice } from "./ProviderNotInstalledNotice";
@@ -10,16 +11,40 @@ import {
 } from "../../utils/opencodeModels";
 import type {
   OpencodeConfigView,
+  OpencodeModelEntry,
   OpencodeProviderEntry,
 } from "../../types/providerConfig";
+import { ModalityMultiSelect } from "./ModalityMultiSelect";
+
+function emptyModel(): OpencodeModelEntry {
+  return {
+    id: "",
+    name: "",
+    limitContext: null,
+    limitOutput: null,
+    modalitiesInput: [],
+    modalitiesOutput: [],
+  };
+}
+
+function normalizeModel(model: OpencodeModelEntry): OpencodeModelEntry {
+  return {
+    ...model,
+    limitContext: model.limitContext ?? null,
+    limitOutput: model.limitOutput ?? null,
+    modalitiesInput: model.modalitiesInput ?? [],
+    modalitiesOutput: model.modalitiesOutput ?? [],
+  };
+}
 
 function emptyProvider(): OpencodeProviderEntry {
   return {
     id: "",
     npm: "@ai-sdk/openai-compatible",
-    baseUrl: "https://api.deepseek.com/v1",
+    baseUrl: "",
     apiKey: "",
     setCacheKey: true,
+    models: [],
   };
 }
 
@@ -38,7 +63,7 @@ function emptyConfig(): OpencodeConfigView {
     installed: true,
     defaultAgent: "build",
     permissions: emptyPermissions(),
-    providers: [emptyProvider()],
+    providers: [],
   };
 }
 
@@ -61,7 +86,10 @@ export function OpenCodeConfigTab() {
         ...data,
         defaultAgent: normalizeOpencodeDefaultAgent(data.defaultAgent),
         permissions: data.permissions ?? emptyPermissions(),
-        providers: data.providers.length > 0 ? data.providers : [emptyProvider()],
+        providers: data.providers.map((provider) => ({
+          ...provider,
+          models: (provider.models ?? []).map(normalizeModel),
+        })),
       });
     } catch (error) {
       setStatus("err");
@@ -101,11 +129,59 @@ export function OpenCodeConfigTab() {
     }));
   };
 
+  const updateModel = (
+    providerIndex: number,
+    modelIndex: number,
+    patch: Partial<OpencodeModelEntry>,
+  ) => {
+    setConfig((prev) => ({
+      ...prev,
+      providers: prev.providers.map((provider, i) => {
+        if (i !== providerIndex) {
+          return provider;
+        }
+        return {
+          ...provider,
+          models: provider.models.map((model, j) =>
+            j === modelIndex ? { ...model, ...patch } : model,
+          ),
+        };
+      }),
+    }));
+  };
+
+  const addModel = (providerIndex: number) => {
+    setConfig((prev) => ({
+      ...prev,
+      providers: prev.providers.map((provider, i) =>
+        i === providerIndex
+          ? { ...provider, models: [...provider.models, emptyModel()] }
+          : provider,
+      ),
+    }));
+  };
+
+  const removeModel = (providerIndex: number, modelIndex: number) => {
+    setConfig((prev) => ({
+      ...prev,
+      providers: prev.providers.map((provider, i) => {
+        if (i !== providerIndex) {
+          return provider;
+        }
+        return {
+          ...provider,
+          models: provider.models.filter((_, j) => j !== modelIndex),
+        };
+      }),
+    }));
+  };
+
   const save = async () => {
     setSaving(true);
     setStatus("idle");
     try {
       await tauriInvoke("save_opencode_provider_config", { config });
+      await useChatStore.getState().reloadProviderConfig("opencode");
       setStatus("ok");
       setStatusMessage(t("preferences.saved"));
       await load();
@@ -207,21 +283,22 @@ export function OpenCodeConfigTab() {
 
       <section className="preferences-section">
         <div className="preferences-label">{t("preferences.provider")}</div>
+        {config.providers.length === 0 && (
+          <p className="preferences-hint">{t("preferences.noProvidersConfigured")}</p>
+        )}
         {config.providers.map((entry, providerIndex) => (
           <div key={`${entry.id}-${providerIndex}`} className="preferences-card">
             <div className="preferences-card-header">
               <span className="preferences-card-title">
                 {entry.id || t("preferences.providerId")}
               </span>
-              {config.providers.length > 1 && (
-                <button
-                  type="button"
-                  className="preferences-link-btn"
-                  onClick={() => removeProvider(providerIndex)}
-                >
-                  {t("preferences.remove")}
-                </button>
-              )}
+              <button
+                type="button"
+                className="preferences-link-btn"
+                onClick={() => removeProvider(providerIndex)}
+              >
+                {t("preferences.remove")}
+              </button>
             </div>
 
             <div className="preferences-field">
@@ -279,6 +356,132 @@ export function OpenCodeConfigTab() {
                 />{" "}
                 {t("preferences.setCacheKey")}
               </label>
+            </div>
+
+            <div className="preferences-field">
+              <label>{t("preferences.models")}</label>
+              <p className="preferences-hint">
+                {t("preferences.opencodeModelFormat")}
+              </p>
+              {entry.models.map((model, modelIndex) => (
+                <div
+                  key={`${providerIndex}-model-${modelIndex}`}
+                  className="preferences-model-card"
+                >
+                  <div className="preferences-model-row">
+                    <div className="preferences-model-compact-field">
+                      <label>{t("preferences.modelId")}</label>
+                      <input
+                        className="preferences-input"
+                        value={model.id}
+                        onChange={(e) =>
+                          updateModel(providerIndex, modelIndex, {
+                            id: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="preferences-model-compact-field">
+                      <label>{t("preferences.modelName")}</label>
+                      <input
+                        className="preferences-input"
+                        value={model.name}
+                        onChange={(e) =>
+                          updateModel(providerIndex, modelIndex, {
+                            name: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="preferences-link-btn"
+                      onClick={() => removeModel(providerIndex, modelIndex)}
+                    >
+                      {t("preferences.remove")}
+                    </button>
+                  </div>
+
+                  <div className="preferences-model-limit-row">
+                    <div className="preferences-model-compact-field">
+                      <label>{t("preferences.limitContext")}</label>
+                      <input
+                        className="preferences-input"
+                        type="number"
+                        min={0}
+                        value={model.limitContext ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          if (raw === "") {
+                            updateModel(providerIndex, modelIndex, {
+                              limitContext: null,
+                            });
+                            return;
+                          }
+                          const parsed = Number.parseInt(raw, 10);
+                          updateModel(providerIndex, modelIndex, {
+                            limitContext: Number.isNaN(parsed) ? null : parsed,
+                          });
+                        }}
+                      />
+                    </div>
+                    <div className="preferences-model-compact-field">
+                      <label>{t("preferences.limitOutput")}</label>
+                      <input
+                        className="preferences-input"
+                        type="number"
+                        min={0}
+                        value={model.limitOutput ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          if (raw === "") {
+                            updateModel(providerIndex, modelIndex, {
+                              limitOutput: null,
+                            });
+                            return;
+                          }
+                          const parsed = Number.parseInt(raw, 10);
+                          updateModel(providerIndex, modelIndex, {
+                            limitOutput: Number.isNaN(parsed) ? null : parsed,
+                          });
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="preferences-label" style={{ marginTop: 8 }}>
+                    {t("preferences.modalities")}
+                  </div>
+                  <div className="preferences-modalities-row">
+                    <ModalityMultiSelect
+                      label={t("preferences.modalitiesInput")}
+                      value={model.modalitiesInput}
+                      onChange={(modalitiesInput) =>
+                        updateModel(providerIndex, modelIndex, {
+                          modalitiesInput,
+                        })
+                      }
+                    />
+                    <ModalityMultiSelect
+                      label={t("preferences.modalitiesOutput")}
+                      value={model.modalitiesOutput}
+                      onChange={(modalitiesOutput) =>
+                        updateModel(providerIndex, modelIndex, {
+                          modalitiesOutput,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="preferences-link-btn"
+                style={{ marginTop: 8 }}
+                onClick={() => addModel(providerIndex)}
+              >
+                {t("preferences.addModel")}
+              </button>
             </div>
           </div>
         ))}

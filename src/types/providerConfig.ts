@@ -15,12 +15,32 @@ export interface CodewhaleConfigView {
   reasoningEffort: string;
 }
 
+export const OPENCODE_MODALITY_OPTIONS = [
+  "text",
+  "audio",
+  "image",
+  "video",
+  "pdf",
+] as const;
+
+export type OpencodeModality = (typeof OPENCODE_MODALITY_OPTIONS)[number];
+
+export interface OpencodeModelEntry {
+  id: string;
+  name: string;
+  limitContext: number | null;
+  limitOutput: number | null;
+  modalitiesInput: string[];
+  modalitiesOutput: string[];
+}
+
 export interface OpencodeProviderEntry {
   id: string;
   npm: string;
   baseUrl: string;
   apiKey: string;
   setCacheKey: boolean;
+  models: OpencodeModelEntry[];
 }
 
 export interface OpencodePermissionsView {
