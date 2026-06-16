@@ -8,6 +8,30 @@ use agent::opencode::OpencodeState;
 use commands::terminal::TerminalState;
 use commands::watch::WatchState;
 use std::sync::Mutex;
+use tauri::{Manager, PhysicalSize};
+
+fn fit_and_center_main_window(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let work_area = monitor.work_area();
+        let max_width = work_area.size.width;
+        let max_height = work_area.size.height;
+
+        if let Ok(outer) = window.outer_size() {
+            if outer.width > max_width || outer.height > max_height {
+                let _ = window.set_size(tauri::Size::Physical(PhysicalSize {
+                    width: outer.width.min(max_width),
+                    height: outer.height.min(max_height),
+                }));
+            }
+        }
+    }
+
+    let _ = window.center();
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,6 +42,10 @@ pub fn run() {
         .manage(Mutex::new(OpencodeState::default()))
         .manage(Mutex::new(WatchState::default()))
         .manage(Mutex::new(TerminalState::default()))
+        .setup(|app| {
+            fit_and_center_main_window(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::fs::list_directory,
             commands::fs::read_file,
