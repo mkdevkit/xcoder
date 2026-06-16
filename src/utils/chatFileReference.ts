@@ -1,4 +1,5 @@
 export const XCODER_PATH_MIME = "application/xcoder-path";
+export const XCODER_PATHS_MIME = "application/xcoder-paths";
 
 export function toChatFileReference(
   absolutePath: string,
@@ -75,6 +76,21 @@ export function isInternalPathDrag(dataTransfer: DataTransfer): boolean {
 }
 
 export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
+  const multi = dataTransfer.getData(XCODER_PATHS_MIME);
+  if (multi) {
+    try {
+      const parsed = JSON.parse(multi) as unknown;
+      if (Array.isArray(parsed)) {
+        const paths = parsed.filter(
+          (item): item is string => typeof item === "string" && item.trim().length > 0,
+        );
+        if (paths.length > 0) return paths;
+      }
+    } catch {
+      // fall through to single-path payload
+    }
+  }
+
   const custom = dataTransfer.getData(XCODER_PATH_MIME);
   if (custom) {
     return [custom];
@@ -110,16 +126,29 @@ export function pointInDropArea(
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
+export function startExplorerDrag(
+  event: React.DragEvent,
+  absolutePaths: string[],
+  rootPath: string | null,
+) {
+  const paths = absolutePaths.filter((path) => path.trim().length > 0);
+  if (paths.length === 0) return;
+
+  event.stopPropagation();
+  const references = paths.map((path) => toChatFileReference(path, rootPath));
+  event.dataTransfer.clearData();
+  event.dataTransfer.setData(XCODER_PATH_MIME, paths[0]);
+  event.dataTransfer.setData(XCODER_PATHS_MIME, JSON.stringify(paths));
+  event.dataTransfer.setData("text/plain", references.join(" "));
+  // Explorer drops use move; chat input attaches a copy of the file reference.
+  event.dataTransfer.effectAllowed = "copyMove";
+}
+
+/** @deprecated Use startExplorerDrag */
 export function startFileDrag(
   event: React.DragEvent,
   absolutePath: string,
   rootPath: string | null,
 ) {
-  event.stopPropagation();
-  const reference = toChatFileReference(absolutePath, rootPath);
-  event.dataTransfer.clearData();
-  event.dataTransfer.setData(XCODER_PATH_MIME, absolutePath);
-  event.dataTransfer.setData("text/plain", reference);
-  // Explorer drops use move; chat input attaches a copy of the file reference.
-  event.dataTransfer.effectAllowed = "copyMove";
+  startExplorerDrag(event, [absolutePath], rootPath);
 }

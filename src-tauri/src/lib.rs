@@ -23,6 +23,7 @@ pub fn run() {
             commands::fs::read_file,
             commands::fs::write_file,
             commands::fs::reveal_path_in_explorer,
+            commands::fs::open_directory_in_explorer,
             commands::fs::rename_path,
             commands::fs::delete_path,
             commands::fs::create_path,

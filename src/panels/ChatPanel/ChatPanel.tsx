@@ -10,6 +10,7 @@ import { createProviderChatSlice } from "../../stores/providerChatSlice";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useChatInputDrop } from "../../hooks/useChatInputDrop";
+import { isInternalPathDrag } from "../../utils/chatFileReference";
 import { getProviderLabel } from "../../utils/agentProvider";
 import {
   deriveOpencodeVendors,
@@ -214,8 +215,29 @@ export function ChatPanel() {
     });
   }, []);
 
+  const handlePanelDragOver = useCallback((event: React.DragEvent) => {
+    if (!isInternalPathDrag(event.dataTransfer)) return;
+    const inInput = (event.target as HTMLElement).closest(".chat-input-area");
+    if (inInput) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "none";
+  }, []);
+
+  const handlePanelDrop = useCallback((event: React.DragEvent) => {
+    if (!isInternalPathDrag(event.dataTransfer)) return;
+    const inInput = (event.target as HTMLElement).closest(".chat-input-area");
+    if (inInput) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, []);
+
   return (
-    <div className="chat-panel" ref={panelRef}>
+    <div
+      className="chat-panel"
+      ref={panelRef}
+      onDragOver={handlePanelDragOver}
+      onDrop={handlePanelDrop}
+    >
       <div className="chat-header">
         <div className="chat-header-top">
           <div className="panel-title">{providerLabel}</div>

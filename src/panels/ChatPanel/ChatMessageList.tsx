@@ -54,25 +54,18 @@ export function ChatMessageList() {
       )}
       {chatTurns.map((turn) => {
         const streamActive = streaming && turn.isLast;
-        const lastTextPart = [...turn.inlineParts]
-          .reverse()
-          .find((part) => part.type === "text");
-        const showPlaceholder =
-          streamActive && !lastTextPart?.content.trim();
         const hasTools = turn.inlineParts.some((part) => part.type === "tools");
+        const hasAssistantBody = turnHasAssistantBody(turn.inlineParts);
 
         return (
           <div key={turn.id} className="chat-turn">
             {turn.user && <MessageBubble message={turn.user} />}
-            {(turnHasAssistantBody(turn.inlineParts) ||
-              showPlaceholder ||
-              hasTools) && (
+            {(hasAssistantBody || hasTools) && (
               <AssistantTurnBubble
                 turnId={turn.id}
                 parts={turn.inlineParts}
                 streamActive={streamActive}
                 toolsActive={streamActive && hasTools}
-                showPlaceholder={showPlaceholder}
               />
             )}
           </div>

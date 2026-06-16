@@ -78,6 +78,18 @@ pub fn reveal_path_in_explorer(app: AppHandle, path: String) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub fn open_directory_in_explorer(app: AppHandle, path: String) -> Result<(), String> {
+    let path_ref = Path::new(&path);
+    if !path_ref.is_dir() {
+        return Err(format!("Not a directory: {path}"));
+    }
+
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn rename_path(path: String, new_name: String) -> Result<String, String> {
     let trimmed = new_name.trim();
     if trimmed.is_empty() {

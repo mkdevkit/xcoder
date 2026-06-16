@@ -2,11 +2,11 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useDropZone } from "../../hooks/useDropZone";
-import { isInternalPathDrag } from "../../utils/externalFileDrop";
+import { isInternalPathDrag, hasExternalFilePayload } from "../../utils/externalFileDrop";
 import type { ExplorerEditState } from "../../stores/workspace";
 import type { FsEntry } from "../../types/fs";
 import { parentPath, workspacesMatch } from "../../utils/path";
-import { startFileDrag } from "../../utils/chatFileReference";
+import { startExplorerDrag } from "../../utils/chatFileReference";
 
 interface InlineNameInputProps {
   initialName: string;
@@ -82,10 +82,13 @@ interface TreeNodeProps {
   depth: number;
   refreshKey: number;
   rootPath: string;
-  selectedPath: string | null;
+  siblingEntries: FsEntry[];
+  isPathSelected: (path: string) => boolean;
+  selectedPaths: string[];
   explorerEdit: ExplorerEditState | null;
   dropTargetDir: string | null;
-  onSelect: (path: string, isDir: boolean) => void;
+  onSelect: (path: string, isDir: boolean, additive: boolean) => void;
+  onRangeSelect: (entry: FsEntry, siblings: FsEntry[]) => void;
   onOpen: (entry: FsEntry) => void;
   onCommitEdit: (name: string) => void;
   onCancelEdit: () => void;
@@ -96,10 +99,13 @@ function TreeNode({
   depth,
   refreshKey,
   rootPath,
-  selectedPath,
+  siblingEntries,
+  isPathSelected,
+  selectedPaths,
   explorerEdit,
   dropTargetDir,
   onSelect,
+  onRangeSelect,
   onOpen,
   onCommitEdit,
   onCancelEdit,
@@ -113,9 +119,11 @@ function TreeNode({
     explorerEdit?.mode === "rename" && explorerEdit.targetPath === entry.path;
   const isCreatingHere =
     explorerEdit?.mode === "create" && explorerEdit.parentDir === entry.path;
-  const isSelected = pathsEqual(selectedPath, entry.path);
+  const isSelected = isPathSelected(entry.path);
   const itemDropDir = entry.is_dir ? entry.path : parentPath(entry.path);
   const isDropTarget = pathsEqual(dropTargetDir, itemDropDir);
+  const dragPaths =
+    isSelected && selectedPaths.length > 0 ? selectedPaths : [entry.path];
 
   const loadChildren = async (expand = true) => {
     if (!entry.is_dir) return;
@@ -143,8 +151,13 @@ function TreeNode({
 
   const handleClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    onSelect(entry.path, entry.is_dir);
-    if (entry.is_dir) {
+    if (e.shiftKey) {
+      onRangeSelect(entry, siblingEntries);
+      return;
+    }
+    const additive = e.ctrlKey || e.metaKey;
+    onSelect(entry.path, entry.is_dir, additive);
+    if (entry.is_dir && !additive) {
       if (expanded) {
         setExpanded(false);
       } else {
@@ -152,7 +165,9 @@ function TreeNode({
       }
       return;
     }
-    await onOpen(entry);
+    if (!entry.is_dir && !additive) {
+      await onOpen(entry);
+    }
   };
 
   return (
@@ -165,7 +180,7 @@ function TreeNode({
         data-path={entry.path}
         data-is-dir={entry.is_dir ? "1" : "0"}
         draggable={!isRenaming}
-        onDragStart={(event) => startFileDrag(event, entry.path, rootPath)}
+        onDragStart={(event) => startExplorerDrag(event, dragPaths, rootPath)}
         onClick={handleClick}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -197,10 +212,13 @@ function TreeNode({
               depth={depth + 1}
               refreshKey={refreshKey}
               rootPath={rootPath}
-              selectedPath={selectedPath}
+              siblingEntries={children}
+              isPathSelected={isPathSelected}
+              selectedPaths={selectedPaths}
               explorerEdit={explorerEdit}
               dropTargetDir={dropTargetDir}
               onSelect={onSelect}
+              onRangeSelect={onRangeSelect}
               onOpen={onOpen}
               onCommitEdit={onCommitEdit}
               onCancelEdit={onCancelEdit}
@@ -231,14 +249,17 @@ export function FileExplorer() {
     listDirectory,
     explorerRefreshKey,
     explorerSelectedPath,
-    explorerSelectedIsDir,
+    explorerSelectedPaths,
     explorerEdit,
     explorerError,
     setExplorerSelectedPath,
+    selectExplorerEntry,
+    selectExplorerRange,
+    isExplorerPathSelected,
     beginExplorerRename,
     cancelExplorerEdit,
     commitExplorerEdit,
-    deleteExplorerEntry,
+    deleteExplorerEntries,
     openFile,
     importPathsIntoExplorer,
     movePathsInExplorer,
@@ -258,6 +279,11 @@ export function FileExplorer() {
 
   const explorerDrop = useDropZone({
     enabled: Boolean(rootPath),
+    accept: (event) => {
+      const transfer = event.dataTransfer;
+      if (!transfer) return false;
+      return isInternalPathDrag(transfer) || hasExternalFilePayload(transfer);
+    },
     getDropEffect: (event) =>
       event.dataTransfer && isInternalPathDrag(event.dataTransfer)
         ? "move"
@@ -305,9 +331,23 @@ export function FileExplorer() {
     listDirectory(rootPath).then(setEntries).catch(console.error);
   }, [rootPath, explorerRefreshKey, listDirectory]);
 
+  const handleExplorerRangeSelect = useCallback(
+    (entry: FsEntry, siblings: FsEntry[]) => {
+      selectExplorerRange(entry.path, siblings);
+    },
+    [selectExplorerRange],
+  );
+
+  const handleExplorerSelect = useCallback(
+    (path: string, isDir: boolean, additive: boolean) => {
+      selectExplorerEntry(path, isDir, { additive });
+    },
+    [selectExplorerEntry],
+  );
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!rootPath || !explorerSelectedPath || explorerEdit) return;
+      if (!rootPath || explorerSelectedPaths.length === 0 || explorerEdit) return;
       if (
         (e.target as HTMLElement).closest(
           "input, textarea, .monaco-editor, .rich-chat-composer, .chat-input-area",
@@ -315,17 +355,18 @@ export function FileExplorer() {
       ) {
         return;
       }
+      if (!explorerRef.current?.contains(document.activeElement)) {
+        const focusedInExplorer = (e.target as HTMLElement).closest(".file-explorer");
+        if (!focusedInExplorer) return;
+      }
 
-      if (e.key === "F2") {
+      if (e.key === "F2" && explorerSelectedPaths.length === 1 && explorerSelectedPath) {
         e.preventDefault();
         beginExplorerRename(explorerSelectedPath);
       }
       if (e.key === "Delete") {
         e.preventDefault();
-        deleteExplorerEntry(
-          explorerSelectedPath,
-          explorerSelectedIsDir ?? undefined,
-        ).catch(console.error);
+        deleteExplorerEntries(explorerSelectedPaths).catch(console.error);
       }
     };
 
@@ -334,10 +375,10 @@ export function FileExplorer() {
   }, [
     rootPath,
     explorerSelectedPath,
-    explorerSelectedIsDir,
+    explorerSelectedPaths,
     explorerEdit,
     beginExplorerRename,
-    deleteExplorerEntry,
+    deleteExplorerEntries,
   ]);
 
   const handleOpen = async (entry: FsEntry) => {
@@ -399,10 +440,13 @@ export function FileExplorer() {
           depth={0}
           refreshKey={explorerRefreshKey}
           rootPath={rootPath}
-          selectedPath={explorerSelectedPath}
+          siblingEntries={entries}
+          isPathSelected={isExplorerPathSelected}
+          selectedPaths={explorerSelectedPaths}
           explorerEdit={explorerEdit}
           dropTargetDir={dropTargetDir}
-          onSelect={setExplorerSelectedPath}
+          onSelect={handleExplorerSelect}
+          onRangeSelect={handleExplorerRangeSelect}
           onOpen={handleOpen}
           onCommitEdit={(name) => commitExplorerEdit(name).catch(console.error)}
           onCancelEdit={cancelExplorerEdit}

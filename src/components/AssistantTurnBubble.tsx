@@ -11,7 +11,6 @@ interface AssistantTurnBubbleProps {
   parts: TurnInlinePart[];
   streamActive: boolean;
   toolsActive: boolean;
-  showPlaceholder: boolean;
 }
 
 function AssistantTurnBubbleInner({
@@ -19,7 +18,6 @@ function AssistantTurnBubbleInner({
   parts,
   streamActive,
   toolsActive,
-  showPlaceholder,
 }: AssistantTurnBubbleProps) {
   const providerId = useChatStore((state) => state.providerId);
   const assistantLabel = getProviderLabel(providerId);
@@ -29,7 +27,7 @@ function AssistantTurnBubbleInner({
   );
   const hasTools = parts.some((part) => part.type === "tools");
 
-  if (!hasVisibleText && !hasTools && !showPlaceholder) {
+  if (!hasVisibleText && !hasTools) {
     return null;
   }
 
@@ -49,13 +47,13 @@ function AssistantTurnBubbleInner({
             );
           }
 
-          const isStreamingPart =
-            streamActive && isLastTextPart(parts, partIndex);
           const hasText = part.content.trim().length > 0;
-
-          if (!hasText && !isStreamingPart) {
+          if (!hasText) {
             return null;
           }
+
+          const isStreamingPart =
+            streamActive && isLastTextPart(parts, partIndex);
 
           return (
             <div
@@ -63,13 +61,9 @@ function AssistantTurnBubbleInner({
               className={`assistant-turn-text ${isStreamingPart ? "is-streaming-slot" : ""}`}
             >
               {isStreamingPart ? (
-                <pre className="message-streaming">
-                  {hasText ? part.content : "…"}
-                </pre>
-              ) : hasText ? (
-                <MarkdownContent content={part.content} />
+                <pre className="message-streaming">{part.content}</pre>
               ) : (
-                <span className="message-placeholder">…</span>
+                <MarkdownContent content={part.content} />
               )}
             </div>
           );
@@ -110,6 +104,5 @@ export const AssistantTurnBubble = memo(
     prev.turnId === next.turnId &&
     partsEqual(prev.parts, next.parts) &&
     prev.streamActive === next.streamActive &&
-    prev.toolsActive === next.toolsActive &&
-    prev.showPlaceholder === next.showPlaceholder,
+    prev.toolsActive === next.toolsActive,
 );

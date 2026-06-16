@@ -5,6 +5,7 @@ import { useTerminalStore } from "../stores/terminal";
 import { useWorkspaceStore } from "../stores/workspace";
 import type { ContextMenuItem } from "../types/contextMenu";
 import { getTerminalSelection } from "../utils/terminalRegistry";
+import { workspacesMatch } from "../utils/path";
 import { tauriInvoke } from "../utils/tauri";
 
 async function copyText(text: string) {
@@ -15,6 +16,14 @@ async function copyText(text: string) {
   }
 }
 
+function revealInSystemExplorer(path: string) {
+  tauriInvoke("reveal_path_in_explorer", { path }).catch(console.error);
+}
+
+function openDirectoryInSystemExplorer(path: string) {
+  tauriInvoke("open_directory_in_explorer", { path }).catch(console.error);
+}
+
 export function useWorkbenchContextMenu() {
   const { showMenu, setMenuHandler } = useContextMenu();
   const {
@@ -22,15 +31,16 @@ export function useWorkbenchContextMenu() {
     activeFile,
     bumpExplorerRefresh,
     saveActiveFile,
-    openFolder,
     reloadActiveFile,
     closeTab,
     getActiveTab,
     explorerSelectedPath,
-    explorerSelectedIsDir,
+    explorerSelectedPaths,
+    setExplorerSelectedPath,
     beginExplorerRename,
     beginExplorerCreate,
     deleteExplorerEntry,
+    deleteExplorerEntries,
     getExplorerParentDir,
   } = useWorkspaceStore();
   const { createTerminal, activeId } = useTerminalStore();
@@ -75,65 +85,69 @@ export function useWorkbenchContextMenu() {
           {
             id: "explorer-open-folder",
             label: t("context.openProjectFolder"),
-            onClick: () => openFolder(),
+            disabled: !rootPath,
+            onClick: () => {
+              if (rootPath) openDirectoryInSystemExplorer(rootPath);
+            },
           },
         );
 
+        const workspaceState = useWorkspaceStore.getState();
+        let menuPaths = workspaceState.explorerSelectedPaths;
         if (filePath) {
+          const inSelection = menuPaths.some((path) =>
+            workspacesMatch(path, filePath),
+          );
+          if (!inSelection) {
+            workspaceState.setExplorerSelectedPath(filePath, isDir);
+            menuPaths = [filePath];
+          }
+        } else {
+          menuPaths = workspaceState.explorerSelectedPaths;
+        }
+        const multiSelected = menuPaths.length > 1;
+        const primaryPath = menuPaths[menuPaths.length - 1] ?? filePath ?? explorerSelectedPath;
+
+        if (filePath || menuPaths.length > 0) {
           items.push(
             {
               id: "explorer-rename",
               label: t("context.rename"),
-              onClick: () => beginExplorerRename(filePath),
+              disabled: multiSelected || !primaryPath,
+              onClick: () => {
+                if (primaryPath) beginExplorerRename(primaryPath);
+              },
             },
             {
               id: "explorer-delete",
               label: t("context.delete"),
-              onClick: () => deleteExplorerEntry(filePath, isDir),
+              disabled: menuPaths.length === 0,
+              onClick: () => {
+                if (menuPaths.length === 1) {
+                  const path = menuPaths[0];
+                  const resolvedIsDir =
+                    workspaceState.explorerPathIsDir[path] ??
+                    (filePath && workspacesMatch(path, filePath) ? isDir : undefined);
+                  deleteExplorerEntry(path, resolvedIsDir).catch(console.error);
+                  return;
+                }
+                deleteExplorerEntries(menuPaths).catch(console.error);
+              },
             },
             {
               id: "explorer-copy-path",
               label: t("context.copyPath"),
-              onClick: () => copyText(filePath),
+              disabled: !primaryPath,
+              onClick: () => {
+                if (primaryPath) copyText(primaryPath);
+              },
             },
             {
               id: "explorer-reveal",
               label: t("context.revealInExplorer"),
+              disabled: multiSelected || !primaryPath,
               onClick: () => {
-                tauriInvoke("reveal_path_in_explorer", { path: filePath }).catch(
-                  console.error,
-                );
-              },
-            },
-          );
-        } else if (explorerSelectedPath) {
-          items.push(
-            {
-              id: "explorer-rename-selected",
-              label: t("context.rename"),
-              onClick: () => beginExplorerRename(explorerSelectedPath),
-            },
-            {
-              id: "explorer-delete-selected",
-              label: t("context.delete"),
-              onClick: () =>
-                deleteExplorerEntry(
-                  explorerSelectedPath,
-                  explorerSelectedIsDir ?? undefined,
-                ),
-            },
-            {
-              id: "explorer-copy-path-selected",
-              label: t("context.copyPath"),
-              onClick: () => copyText(explorerSelectedPath),
-            },
-            {
-              id: "explorer-reveal-selected",
-              label: t("context.revealInExplorer"),
-              onClick: () => {
-                tauriInvoke("reveal_path_in_explorer", {
-                  path: explorerSelectedPath,
-                }).catch(console.error);
+                if (primaryPath) revealInSystemExplorer(primaryPath);
               },
             },
           );
@@ -165,11 +179,7 @@ export function useWorkbenchContextMenu() {
           items.push({
             id: "editor-reveal-in-explorer",
             label: t("context.revealInExplorer"),
-            onClick: () => {
-              tauriInvoke("reveal_path_in_explorer", { path: tabPath }).catch(
-                console.error,
-              );
-            },
+            onClick: () => revealInSystemExplorer(tabPath),
           });
           items.push({
             id: "editor-close-tab",
@@ -200,7 +210,10 @@ export function useWorkbenchContextMenu() {
           {
             id: "general-open-folder",
             label: t("context.openProjectFolder"),
-            onClick: () => openFolder(),
+            disabled: !rootPath,
+            onClick: () => {
+              if (rootPath) openDirectoryInSystemExplorer(rootPath);
+            },
           },
           {
             id: "general-new-terminal",
@@ -229,11 +242,12 @@ export function useWorkbenchContextMenu() {
       closeTab,
       createTerminal,
       deleteExplorerEntry,
+      deleteExplorerEntries,
       explorerSelectedPath,
-      explorerSelectedIsDir,
+      explorerSelectedPaths,
+      setExplorerSelectedPath,
       getActiveTab,
       getExplorerParentDir,
-      openFolder,
       reloadActiveFile,
       rootPath,
       saveActiveFile,

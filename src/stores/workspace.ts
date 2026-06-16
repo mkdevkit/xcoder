@@ -48,15 +48,27 @@ interface WorkspaceState {
   explorerRefreshKey: number;
   explorerSelectedPath: string | null;
   explorerSelectedIsDir: boolean | null;
+  explorerSelectedPaths: string[];
+  explorerPathIsDir: Record<string, boolean>;
+  explorerSelectionAnchor: string | null;
   explorerEdit: ExplorerEditState | null;
   explorerError: string | null;
   bumpExplorerRefresh: () => void;
   setExplorerSelectedPath: (path: string | null, isDir?: boolean) => void;
+  selectExplorerEntry: (
+    path: string,
+    isDir: boolean,
+    options?: { additive?: boolean },
+  ) => void;
+  selectExplorerRange: (targetPath: string, siblings: FsEntry[]) => void;
+  isExplorerPathSelected: (path: string) => boolean;
+  getExplorerSelectedPaths: () => string[];
   beginExplorerRename: (path: string) => void;
   beginExplorerCreate: (parentDir: string, isDir: boolean) => void;
   cancelExplorerEdit: () => void;
   commitExplorerEdit: (name: string) => Promise<void>;
   deleteExplorerEntry: (path: string, isDir?: boolean) => Promise<void>;
+  deleteExplorerEntries: (paths: string[], isDirHint?: boolean) => Promise<void>;
   getExplorerParentDir: (path?: string | null, isDir?: boolean) => string | null;
   openFolder: () => Promise<void>;
   openFile: (path: string) => Promise<void>;
@@ -176,6 +188,32 @@ function remapPath(
   return current;
 }
 
+function findSelectedIndex(paths: string[], target: string): number {
+  return paths.findIndex((path) => workspacesMatch(path, target));
+}
+
+function buildExplorerSelection(
+  paths: string[],
+  isDirMap: Record<string, boolean>,
+): Pick<
+  WorkspaceState,
+  | "explorerSelectedPaths"
+  | "explorerPathIsDir"
+  | "explorerSelectedPath"
+  | "explorerSelectedIsDir"
+> {
+  const uniquePaths = paths.filter((path, index) => {
+    return paths.findIndex((item) => workspacesMatch(item, path)) === index;
+  });
+  const primary = uniquePaths[uniquePaths.length - 1] ?? null;
+  return {
+    explorerSelectedPaths: uniquePaths,
+    explorerPathIsDir: isDirMap,
+    explorerSelectedPath: primary,
+    explorerSelectedIsDir: primary ? (isDirMap[primary] ?? null) : null,
+  };
+}
+
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   rootPath: null,
   projectConfig: null,
@@ -186,6 +224,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   explorerRefreshKey: 0,
   explorerSelectedPath: null,
   explorerSelectedIsDir: null,
+  explorerSelectedPaths: [],
+  explorerPathIsDir: {},
+  explorerSelectionAnchor: null,
   explorerEdit: null,
   explorerError: null,
 
@@ -194,11 +235,129 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   bumpExplorerRefresh: () =>
     set((state) => ({ explorerRefreshKey: state.explorerRefreshKey + 1 })),
 
-  setExplorerSelectedPath: (path, isDir) =>
+  setExplorerSelectedPath: (path, isDir) => {
+    if (!path) {
+      set({
+        explorerSelectedPath: null,
+        explorerSelectedIsDir: null,
+        explorerSelectedPaths: [],
+        explorerPathIsDir: {},
+        explorerSelectionAnchor: null,
+      });
+      return;
+    }
     set({
-      explorerSelectedPath: path,
-      explorerSelectedIsDir: isDir ?? null,
-    }),
+      explorerSelectionAnchor: path,
+      ...buildExplorerSelection([path], {
+        [path]: isDir ?? false,
+      }),
+    });
+  },
+
+  selectExplorerEntry: (path, isDir, options = {}) => {
+    const { additive = false } = options;
+    const { explorerSelectedPaths, explorerPathIsDir } = get();
+
+    if (!additive) {
+      set({
+        explorerSelectionAnchor: path,
+        ...buildExplorerSelection([path], { [path]: isDir }),
+      });
+      return;
+    }
+
+    const existingIndex = findSelectedIndex(explorerSelectedPaths, path);
+    if (existingIndex >= 0) {
+      const nextPaths = explorerSelectedPaths.filter((_, index) => index !== existingIndex);
+      const nextMap = { ...explorerPathIsDir };
+      for (const key of Object.keys(nextMap)) {
+        if (workspacesMatch(key, path)) {
+          delete nextMap[key];
+        }
+      }
+      if (nextPaths.length === 0) {
+        set({
+          explorerSelectedPath: null,
+          explorerSelectedIsDir: null,
+          explorerSelectedPaths: [],
+          explorerPathIsDir: {},
+          explorerSelectionAnchor: null,
+        });
+        return;
+      }
+      set(buildExplorerSelection(nextPaths, nextMap));
+      return;
+    }
+
+    set(
+      buildExplorerSelection(
+        [...explorerSelectedPaths, path],
+        { ...explorerPathIsDir, [path]: isDir },
+      ),
+    );
+  },
+
+  selectExplorerRange: (targetPath, siblings) => {
+    const state = get();
+    const anchor = state.explorerSelectionAnchor ?? state.explorerSelectedPath;
+    const targetEntry = siblings.find((entry) =>
+      workspacesMatch(entry.path, targetPath),
+    );
+    if (!targetEntry) return;
+
+    const selectSingle = () => {
+      set({
+        explorerSelectionAnchor: targetPath,
+        ...buildExplorerSelection([targetPath], {
+          [targetPath]: targetEntry.is_dir,
+        }),
+      });
+    };
+
+    if (!anchor) {
+      selectSingle();
+      return;
+    }
+
+    const anchorParent = parentPath(anchor);
+    const targetParent = parentPath(targetPath);
+    if (!workspacesMatch(anchorParent, targetParent)) {
+      selectSingle();
+      return;
+    }
+
+    const anchorIndex = siblings.findIndex((entry) =>
+      workspacesMatch(entry.path, anchor),
+    );
+    const targetIndex = siblings.findIndex((entry) =>
+      workspacesMatch(entry.path, targetPath),
+    );
+    if (anchorIndex < 0 || targetIndex < 0) {
+      selectSingle();
+      return;
+    }
+
+    const start = Math.min(anchorIndex, targetIndex);
+    const end = Math.max(anchorIndex, targetIndex);
+    const range = siblings.slice(start, end + 1);
+    const isDirMap: Record<string, boolean> = { ...state.explorerPathIsDir };
+    for (const entry of range) {
+      isDirMap[entry.path] = entry.is_dir;
+    }
+
+    set({
+      explorerSelectionAnchor: anchor,
+      ...buildExplorerSelection(
+        range.map((entry) => entry.path),
+        isDirMap,
+      ),
+    });
+  },
+
+  isExplorerPathSelected: (path) =>
+    findSelectedIndex(get().explorerSelectedPaths, path) >= 0,
+
+  getExplorerSelectedPaths: () => get().explorerSelectedPaths,
 
   getExplorerParentDir: (path, isDir) => {
     const { rootPath, explorerSelectedPath } = get();
@@ -211,7 +370,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   beginExplorerRename: (path) => {
     set({
-      explorerSelectedPath: path,
+      ...buildExplorerSelection([path], { [path]: false }),
       explorerEdit: {
         mode: "rename",
         targetPath: path,
@@ -261,7 +420,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set((state) => ({
           explorerEdit: null,
           explorerError: null,
-          explorerSelectedPath: newPath,
+          ...buildExplorerSelection([newPath], { [newPath]: false }),
           openTabs: state.openTabs.map((tab) =>
             tab.path === explorerEdit.targetPath
               ? { ...tab, path: newPath }
@@ -285,7 +444,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set((state) => ({
           explorerEdit: null,
           explorerError: null,
-          explorerSelectedPath: newPath,
+          ...buildExplorerSelection([newPath], {
+            [newPath]: explorerEdit.isDir,
+          }),
           explorerRefreshKey: state.explorerRefreshKey + 1,
         }));
         if (!explorerEdit.isDir) {
@@ -298,17 +459,78 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   deleteExplorerEntry: async (path, isDir) => {
+    await get().deleteExplorerEntries([path], isDir);
+  },
+
+  deleteExplorerEntries: async (paths, isDirHint) => {
     const state = get();
-    const resolvedIsDir =
-      isDir ??
-      (state.explorerSelectedPath === path
-        ? (state.explorerSelectedIsDir ?? false)
-        : false);
-    const label = fileName(path);
-    const kind = resolvedIsDir
-      ? t("explorer.deleteKind.folder")
-      : t("explorer.deleteKind.file");
-    const message = t("explorer.deleteConfirm", { kind, label });
+    const uniquePaths = paths.filter((path, index, array) => {
+      const trimmed = path.trim();
+      if (!trimmed) return false;
+      return array.findIndex((item) => workspacesMatch(item, trimmed)) === index;
+    });
+    if (uniquePaths.length === 0) return;
+
+    if (uniquePaths.length === 1) {
+      const path = uniquePaths[0];
+      const resolvedIsDir =
+        isDirHint ??
+        state.explorerPathIsDir[path] ??
+        (state.explorerSelectedPath && workspacesMatch(state.explorerSelectedPath, path)
+          ? (state.explorerSelectedIsDir ?? false)
+          : false);
+      const label = fileName(path);
+      const kind = resolvedIsDir
+        ? t("explorer.deleteKind.folder")
+        : t("explorer.deleteKind.file");
+      const message = t("explorer.deleteConfirm", { kind, label });
+      const confirmed = await safeConfirm(message, {
+        title: t("dialog.confirmDelete"),
+        kind: "warning",
+        okLabel: t("dialog.delete"),
+        cancelLabel: t("dialog.cancel"),
+      });
+      if (!confirmed) return;
+
+      try {
+        await tauriInvoke("delete_path", { path });
+        set((state) => {
+          const openTabs = state.openTabs.filter((tab) => !workspacesMatch(tab.path, path));
+          let activeFile = state.activeFile;
+          if (activeFile && workspacesMatch(activeFile, path)) {
+            activeFile = openTabs[openTabs.length - 1]?.path ?? null;
+          }
+          const nextSelectedPaths = state.explorerSelectedPaths.filter(
+            (item) => !workspacesMatch(item, path),
+          );
+          const nextMap = { ...state.explorerPathIsDir };
+          for (const key of Object.keys(nextMap)) {
+            if (workspacesMatch(key, path)) {
+              delete nextMap[key];
+            }
+          }
+          return {
+            openTabs,
+            activeFile,
+            ...buildExplorerSelection(nextSelectedPaths, nextMap),
+            explorerEdit:
+              state.explorerEdit?.targetPath &&
+              workspacesMatch(state.explorerEdit.targetPath, path)
+                ? null
+                : state.explorerEdit,
+            explorerError: null,
+            explorerRefreshKey: state.explorerRefreshKey + 1,
+          };
+        });
+      } catch (error) {
+        set({ explorerError: String(error) });
+      }
+      return;
+    }
+
+    const message = t("explorer.deleteConfirmMultiple", {
+      count: String(uniquePaths.length),
+    });
     const confirmed = await safeConfirm(message, {
       title: t("dialog.confirmDelete"),
       kind: "warning",
@@ -318,22 +540,42 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!confirmed) return;
 
     try {
-      await tauriInvoke("delete_path", { path });
+      for (const path of uniquePaths) {
+        await tauriInvoke("delete_path", { path });
+      }
       set((state) => {
-        const openTabs = state.openTabs.filter((tab) => tab.path !== path);
+        const openTabs = state.openTabs.filter(
+          (tab) => !uniquePaths.some((path) => workspacesMatch(tab.path, path)),
+        );
         let activeFile = state.activeFile;
-        if (activeFile === path) {
+        const currentActive = state.activeFile;
+        const deletedActive =
+          currentActive !== null &&
+          uniquePaths.some((path) => workspacesMatch(currentActive, path));
+        if (deletedActive) {
           activeFile = openTabs[openTabs.length - 1]?.path ?? null;
         }
+        const nextSelectedPaths = state.explorerSelectedPaths.filter(
+          (item) => !uniquePaths.some((path) => workspacesMatch(item, path)),
+        );
+        const nextMap = { ...state.explorerPathIsDir };
+        for (const key of Object.keys(nextMap)) {
+          if (uniquePaths.some((path) => workspacesMatch(key, path))) {
+            delete nextMap[key];
+          }
+        }
+        const clearedEdit =
+          state.explorerEdit?.targetPath &&
+          uniquePaths.some((path) =>
+            workspacesMatch(state.explorerEdit?.targetPath ?? "", path),
+          )
+            ? null
+            : state.explorerEdit;
         return {
           openTabs,
           activeFile,
-          explorerSelectedPath:
-            state.explorerSelectedPath === path
-              ? null
-              : state.explorerSelectedPath,
-          explorerEdit:
-            state.explorerEdit?.targetPath === path ? null : state.explorerEdit,
+          ...buildExplorerSelection(nextSelectedPaths, nextMap),
+          explorerEdit: clearedEdit,
           explorerError: null,
           explorerRefreshKey: state.explorerRefreshKey + 1,
         };
@@ -546,21 +788,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         sources: uniqueSources,
         destinationDir: targetDir,
       });
-      set((state) => ({
-        explorerError: null,
-        explorerRefreshKey: state.explorerRefreshKey + 1,
-        explorerSelectedPath:
-          remapPath(state.explorerSelectedPath, uniqueSources, moved) ??
-          moved[moved.length - 1] ??
-          state.explorerSelectedPath,
-        activeFile: remapPath(state.activeFile, uniqueSources, moved),
-        openTabs: state.openTabs.map((tab) => {
-          const nextPath = remapPath(tab.path, uniqueSources, moved);
-          return nextPath && !workspacesMatch(nextPath, tab.path)
-            ? { ...tab, path: nextPath }
-            : tab;
-        }),
-      }));
+      set((state) => {
+        const nextPaths: string[] = [];
+        const nextMap: Record<string, boolean> = {};
+        for (const oldPath of state.explorerSelectedPaths) {
+          const newPath = remapPath(oldPath, uniqueSources, moved) ?? oldPath;
+          if (!nextPaths.some((item) => workspacesMatch(item, newPath))) {
+            nextPaths.push(newPath);
+          }
+          nextMap[newPath] = state.explorerPathIsDir[oldPath] ?? false;
+        }
+        return {
+          explorerError: null,
+          explorerRefreshKey: state.explorerRefreshKey + 1,
+          ...buildExplorerSelection(nextPaths, nextMap),
+          activeFile: remapPath(state.activeFile, uniqueSources, moved),
+          openTabs: state.openTabs.map((tab) => {
+            const nextPath = remapPath(tab.path, uniqueSources, moved);
+            return nextPath && !workspacesMatch(nextPath, tab.path)
+              ? { ...tab, path: nextPath }
+              : tab;
+          }),
+        };
+      });
       return moved;
     } catch (error) {
       set({ explorerError: String(error) });

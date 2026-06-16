@@ -174,6 +174,7 @@ export type TranslationKey =
   | "explorer.newFolderName"
   | "explorer.newFileName"
   | "explorer.deleteConfirm"
+  | "explorer.deleteConfirmMultiple"
   | "explorer.deleteKind.folder"
   | "explorer.deleteKind.file"
   | "dialog.confirmDelete"
