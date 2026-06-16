@@ -26,6 +26,7 @@ import { t } from "../i18n";
 import { useSettingsStore } from "./settings";
 import { useWorkspaceStore } from "./workspace";
 import { workspacesMatch } from "../utils/path";
+import { applyAppTheme } from "../utils/appTheme";
 import { isMeaningfulToolArgs } from "../utils/toolMessage";
 import {
   clearSavedThreadId,
@@ -44,6 +45,7 @@ import {
 } from "../utils/localChatHistory";
 import {
   modelsForOpencodeVendor,
+  normalizeOpencodeDefaultAgent,
   pickOpencodeDefaults,
   resolveOpencodeVendor,
 } from "../utils/opencodeModels";
@@ -51,11 +53,50 @@ import {
   CODEWHALE_MODES,
   pickCodewhaleDefaults,
 } from "../utils/codewhaleModels";
+import type { ProjectConfig, ProjectConfigInfo } from "../types/projectConfig";
+import {
+  buildProjectConfigPayload,
+  resolveProjectPreferredModel,
+} from "../utils/projectConfig";
+import type { OpencodeConfigView, OpencodePermissionsView } from "../types/providerConfig";
 import {
   createProviderChatSlice,
   ensureProviderSlice,
   type ProviderChatSlice,
 } from "./providerChatSlice";
+
+let runtimeHealthTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollProviderRuntimeStatus(
+  providerId: string,
+): Promise<RuntimeStatus> {
+  try {
+    const commands = getAgentCommands(providerId);
+    return await tauriInvoke<RuntimeStatus>(commands.runtimeStatus);
+  } catch {
+    return { running: false, owned: false };
+  }
+}
+
+async function softDisconnectProvider(
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+) {
+  stopStreamingHistorySync(providerId);
+  cancelScheduledCompleteTurn(providerId);
+  const status = await pollProviderRuntimeStatus(providerId);
+  patchProvider(set, providerId, {
+    connectedIntent: false,
+    streaming: false,
+    pendingApproval: null,
+    error: null,
+    runtime: status,
+  });
+}
 
 interface ChatState {
   config: AppConfig | null;
@@ -65,10 +106,16 @@ interface ChatState {
 
   loadConfig: () => Promise<void>;
   setProvider: (providerId: string) => void;
-  onProjectOpened: (workspace: string) => Promise<void>;
+  setProjectProvider: (providerId: string) => Promise<void>;
+  setProjectDefaultModel: (defaultModel: string) => Promise<void>;
+  setProjectOpencodePermissions: (
+    permissions: Partial<OpencodePermissionsView>,
+  ) => Promise<void>;
+  onProjectOpened: (workspace: string, projectConfig: ProjectConfig) => Promise<void>;
   connectRuntime: (workspace?: string) => Promise<void>;
   disconnectRuntime: () => Promise<void>;
   restartRuntime: (workspace?: string) => Promise<void>;
+  startRuntimeHealthMonitor: () => () => void;
   loadThreads: (workspace: string, providerId?: string) => Promise<void>;
   selectThread: (threadId: string, workspace: string) => Promise<void>;
   createNewThread: (workspace: string) => Promise<void>;
@@ -161,19 +208,37 @@ function shouldSkipAssistantSnapshot(
   return false;
 }
 
-function findAssistantTextTargetIndex(messages: ChatMessage[]): number {
+function findLastToolIndexInTurn(messages: ChatMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i].role === "user") return -1;
-    if (messages[i].role === "assistant") {
-      if (!messages[i].content.trim()) {
-        for (let j = i - 1; j >= 0; j -= 1) {
-          if (messages[j].role === "user") break;
-          if (messages[j].role === "assistant" && messages[j].content.trim()) {
-            return i;
-          }
-          if (messages[j].role === "tool") continue;
-        }
-      }
+    if (messages[i].role === "tool") return i;
+  }
+  return -1;
+}
+
+function findAssistantTextTargetIndex(messages: ChatMessage[]): number {
+  const trailingEmpty = findTrailingEmptyAssistantIndex(messages);
+  if (trailingEmpty >= 0) return trailingEmpty;
+
+  const lastTool = findLastToolIndexInTurn(messages);
+  if (lastTool >= 0) {
+    for (let i = lastTool + 1; i < messages.length; i += 1) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") return -1;
+    if (messages[i].role === "assistant") return i;
+  }
+  return -1;
+}
+
+function findTrailingEmptyAssistantIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") break;
+    if (messages[i].role === "assistant" && !messages[i].content.trim()) {
       return i;
     }
   }
@@ -192,6 +257,11 @@ function findToolInsertIndex(
     return messages.length;
   }
 
+  const trailingEmpty = findTrailingEmptyAssistantIndex(messages);
+  if (trailingEmpty >= 0) {
+    return trailingEmpty;
+  }
+
   let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i].role === "user") break;
@@ -204,7 +274,25 @@ function findToolInsertIndex(
   if (!messages[lastAssistant].content.trim()) {
     return lastAssistant;
   }
+
+  // Tool runs after any text already emitted in this turn.
   return lastAssistant + 1;
+}
+
+function ensureAssistantAfterTools(messages: ChatMessage[]) {
+  const lastTool = findLastToolIndexInTurn(messages);
+  if (lastTool < 0) return;
+
+  for (let i = lastTool + 1; i < messages.length; i += 1) {
+    if (messages[i].role === "assistant") return;
+  }
+
+  messages.push({
+    id: uid(),
+    role: "assistant",
+    content: "",
+    timestamp: Date.now(),
+  });
 }
 
 function parseAgentEnvelope(raw: Record<string, unknown>) {
@@ -393,6 +481,7 @@ async function saveProviderChatLocally(
 
 const STREAMING_POLL_MS: Record<string, number> = {
   opencode: 200,
+  codewhale: 250,
 };
 const OPENCODE_SSE_POLL_MS = 120;
 const DEFAULT_STREAMING_POLL_MS = 1000;
@@ -548,7 +637,7 @@ function lastAssistantMessage(messages: ChatMessage[]) {
   return undefined;
 }
 
-function markOpencodeTextSseActivity(providerId: string) {
+function markOpencodeSseActivity(providerId: string) {
   if (providerId === "opencode") {
     lastOpencodeTextSseAt.set(providerId, Date.now());
   }
@@ -630,12 +719,13 @@ async function syncMessagesFromServerOnce(
   const useCodewhaleStreaming =
     providerId === "codewhale" && slice.streaming;
   const assistantEmpty = !lastAssistantMessage(slice.messages)?.content?.trim();
-  const sseFresh =
-    !forceFullHistory &&
-    !assistantEmpty &&
+  const opencodeSseRecent =
     useOpencodeStreaming &&
+    slice.streaming &&
     Date.now() - (lastOpencodeTextSseAt.get(providerId) ?? 0) <
       OPENCODE_SSE_FALLBACK_MS;
+  const sseFresh =
+    !forceFullHistory && useOpencodeStreaming && opencodeSseRecent;
   const syncStartedAt = import.meta.env.DEV ? performance.now() : 0;
   try {
     let history: HistoryMessage[] | undefined;
@@ -999,7 +1089,22 @@ async function hydrateProviderAfterConnect(
         const agents = await tauriInvoke<string[]>(commands.listAgents);
         if (agents.length > 0) {
           patch.dynamicModes = agents;
-          patch.mode = agents.includes(slice.mode) ? slice.mode : agents[0];
+          let nextMode = slice.mode;
+          if (!nextMode || !agents.includes(nextMode)) {
+            try {
+              const ocConfig = await tauriInvoke<OpencodeConfigView>(
+                "load_opencode_provider_config",
+              );
+              const preferred = normalizeOpencodeDefaultAgent(
+                ocConfig.defaultAgent,
+              );
+              nextMode =
+                preferred && agents.includes(preferred) ? preferred : agents[0];
+            } catch {
+              nextMode = agents[0];
+            }
+          }
+          patch.mode = nextMode;
         }
       } catch {
         // ignore
@@ -1011,17 +1116,17 @@ async function hydrateProviderAfterConnect(
           commands.listProviderModels,
         );
         if (catalog.models.length > 0) {
-          const defaults = pickOpencodeDefaults(catalog.models, slice.model);
+          const preferredModel = resolveProjectPreferredModel(
+            useWorkspaceStore.getState().projectConfig,
+            get().config,
+          );
+          const defaults = pickOpencodeDefaults(catalog.models, preferredModel);
           patch.opencodeModelCatalog = catalog.models;
           patch.opencodeConnectedProviders = catalog.connectedProviderIds;
-          if (slice.model) {
-            patch.opencodeVendor = resolveOpencodeVendor(
-              slice.model,
-              slice.opencodeVendor || defaults.vendor,
-            );
-          } else {
-            patch.opencodeVendor = defaults.vendor;
-            patch.model = defaults.model;
+          patch.opencodeVendor = defaults.vendor;
+          patch.model = defaults.model;
+          if (slice.thread) {
+            patch.thread = { ...slice.thread, model: defaults.model };
           }
         }
       } catch {
@@ -1037,15 +1142,20 @@ async function hydrateProviderAfterConnect(
       : "agent";
     if (commands.listProviderModels) {
       try {
-        const [catalog, doctor] = await Promise.all([
-          tauriInvoke<CodewhaleModelOption[]>(commands.listProviderModels),
-          tauriInvoke<{ default_text_model?: string }>(commands.doctor),
-        ]);
+        const catalog = await tauriInvoke<CodewhaleModelOption[]>(
+          commands.listProviderModels,
+        );
         if (catalog.length > 0) {
-          const preferred = slice.model || doctor.default_text_model || "";
-          const defaults = pickCodewhaleDefaults(catalog, preferred);
+          const preferredModel = resolveProjectPreferredModel(
+            useWorkspaceStore.getState().projectConfig,
+            get().config,
+          );
+          const defaults = pickCodewhaleDefaults(catalog, preferredModel);
           patch.codewhaleModelCatalog = catalog;
-          if (!slice.model) patch.model = defaults.model;
+          patch.model = defaults.model;
+          if (slice.thread) {
+            patch.thread = { ...slice.thread, model: defaults.model };
+          }
         }
       } catch {
         // ignore
@@ -1216,7 +1326,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadConfig: async () => {
     const config = await tauriInvoke<AppConfig>("load_config");
-    const providerId = config.app.default_provider || "codewhale";
+    const projectConfig = useWorkspaceStore.getState().projectConfig;
+    let providerId = config.app.default_provider || "codewhale";
+    if (projectConfig?.provider) {
+      providerId = projectConfig.provider;
+    }
     let providerStates = get().providerStates;
     for (const provider of config.providers) {
       providerStates = ensureProviderSlice(providerStates, provider.id);
@@ -1227,6 +1341,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       providerId,
       providerStates,
     });
+    applyAppTheme(config.app.theme);
   },
 
   setProvider: (providerId) => {
@@ -1242,28 +1357,142 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void tryReattachProvider(providerId, workspace, set, get);
   },
 
-  onProjectOpened: async (workspace) => {
+  onProjectOpened: async (workspace, projectConfig) => {
     const { config } = get();
     if (!config) return;
-    for (const provider of config.providers) {
-      try {
-        const runtime = await startProviderRuntime(
-          provider.id,
-          workspace,
-          false,
-        );
-        if (!runtime.running) continue;
-        await hydrateProviderAfterConnect(
-          provider.id,
-          workspace,
-          runtime,
-          set,
-          get,
-        );
-      } catch {
-        // service not running
-      }
+
+    const providerId = config.providers.some(
+      (provider) => provider.id === projectConfig.provider,
+    )
+      ? projectConfig.provider
+      : config.app.default_provider || "codewhale";
+
+    set((state) => ({
+      providerId,
+      providerStates: ensureProviderSlice(state.providerStates, providerId),
+    }));
+
+    await get().connectRuntime(workspace);
+  },
+
+  setProjectProvider: async (nextProviderId) => {
+    const workspace = useWorkspaceStore.getState().rootPath;
+    if (!workspace) {
+      set((state) => ({
+        providerId: nextProviderId,
+        providerStates: ensureProviderSlice(state.providerStates, nextProviderId),
+      }));
+      return;
     }
+
+    const currentId = get().providerId;
+    if (currentId === nextProviderId) return;
+
+    const currentSlice = getProviderSlice(get, currentId);
+    if (currentSlice.connectedIntent) {
+      await softDisconnectProvider(set, currentId);
+    }
+
+    const info = await tauriInvoke<ProjectConfigInfo>("save_project_config_cmd", {
+      workspace,
+      config: buildProjectConfigPayload(
+        useWorkspaceStore.getState().projectConfig,
+        get().providerId,
+        { provider: nextProviderId },
+      ),
+    });
+    useWorkspaceStore.setState({
+      projectConfig: info.config,
+      projectConfigPath: info.path,
+    });
+
+    set((state) => ({
+      providerId: nextProviderId,
+      providerStates: ensureProviderSlice(state.providerStates, nextProviderId),
+    }));
+
+    await get().connectRuntime(workspace);
+  },
+
+  setProjectDefaultModel: async (defaultModel) => {
+    const workspace = useWorkspaceStore.getState().rootPath;
+    if (!workspace) return;
+
+    const info = await tauriInvoke<ProjectConfigInfo>("save_project_config_cmd", {
+      workspace,
+      config: buildProjectConfigPayload(
+        useWorkspaceStore.getState().projectConfig,
+        get().providerId,
+        { defaultModel },
+      ),
+    });
+    useWorkspaceStore.setState({
+      projectConfig: info.config,
+      projectConfigPath: info.path,
+    });
+  },
+
+  setProjectOpencodePermissions: async (permissions) => {
+    const workspace = useWorkspaceStore.getState().rootPath;
+    if (!workspace) return;
+
+    const info = await tauriInvoke<ProjectConfigInfo>("save_project_config_cmd", {
+      workspace,
+      config: buildProjectConfigPayload(
+        useWorkspaceStore.getState().projectConfig,
+        get().providerId,
+        { opencodePermissions: permissions },
+      ),
+    });
+    useWorkspaceStore.setState({
+      projectConfig: info.config,
+      projectConfigPath: info.path,
+    });
+  },
+
+  startRuntimeHealthMonitor: () => {
+    if (runtimeHealthTimer) {
+      clearInterval(runtimeHealthTimer);
+    }
+    runtimeHealthTimer = setInterval(() => {
+      const rootPath = useWorkspaceStore.getState().rootPath;
+      const { providerId } = get();
+      if (!rootPath) return;
+
+      void (async () => {
+        const slice = getProviderSlice(get, providerId);
+        try {
+          const status = await pollProviderRuntimeStatus(providerId);
+          if (!status.running && slice.connectedIntent) {
+            stopStreamingHistorySync(providerId);
+            cancelScheduledCompleteTurn(providerId);
+            patchProvider(set, providerId, {
+              connectedIntent: false,
+              streaming: false,
+              pendingApproval: null,
+              runtime: status,
+            });
+            return;
+          }
+          if (
+            status.running !== slice.runtime.running ||
+            status.base_url !== slice.runtime.base_url ||
+            status.owned !== slice.runtime.owned
+          ) {
+            patchProvider(set, providerId, { runtime: status });
+          }
+        } catch {
+          // ignore polling errors
+        }
+      })();
+    }, 3000);
+
+    return () => {
+      if (runtimeHealthTimer) {
+        clearInterval(runtimeHealthTimer);
+        runtimeHealthTimer = null;
+      }
+    };
   },
 
   connectRuntime: async (workspace) => {
@@ -1284,21 +1513,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set,
         get,
       );
+      const resolvedWorkspace = resolveProviderWorkspace(get, providerId, workspace);
+      if (resolvedWorkspace) {
+        await get().loadThreads(resolvedWorkspace, providerId).catch(() => undefined);
+      }
     });
   },
 
   disconnectRuntime: async () => {
     const { providerId } = get();
     await runRuntimeAction(providerId, "disconnect", set, get, async () => {
-      const commands = getAgentCommands(providerId);
-      await tauriInvoke(commands.stopRuntime);
-      patchProvider(set, providerId, {
-        runtime: { running: false, owned: false },
-        connectedIntent: false,
-        streaming: false,
-        pendingApproval: null,
-        error: null,
-      });
+      await softDisconnectProvider(set, providerId);
     });
   },
 
@@ -1353,7 +1578,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadThreads: async (workspace, providerId) => {
     const id = providerId ?? get().providerId;
     const slice = getProviderSlice(get, id);
-    if (!slice.runtime.running) return;
+    if (!slice.connectedIntent) return;
 
     const commands = getAgentCommands(id);
     patchProvider(set, id, { threadsLoading: true, error: null });
@@ -1382,13 +1607,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     if (slice.thread?.id === threadId) {
-      if (!slice.runtime.running) {
+      if (!slice.connectedIntent) {
         await get().connectRuntime(workspace);
       }
       await ensureEventSubscription(providerId, threadId);
       return;
     }
-    if (!slice.runtime.running) {
+    if (!slice.connectedIntent) {
       await get().connectRuntime(workspace);
     }
 
@@ -1483,7 +1708,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   createNewThread: async (workspace) => {
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
-    if (!slice.runtime.running) {
+    if (!slice.connectedIntent) {
       await get().connectRuntime(workspace);
     }
     const current = getProviderSlice(get, providerId);
@@ -1655,7 +1880,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    await saveProviderChatLocally(get, providerId).catch(() => undefined);
+    startStreamingHistorySync(get, set, providerId);
+    void saveProviderChatLocally(get, providerId).catch(() => undefined);
 
     const commands = getAgentCommands(providerId);
     try {
@@ -1679,8 +1905,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           message: trimmed,
         });
       }
-
-      startStreamingHistorySync(get, set, providerId);
 
       if (providerId === "opencode" || providerId === "codewhale") {
         window.setTimeout(() => {
@@ -1861,7 +2085,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const resolvedId = eventProviderId || get().providerId;
 
           if (mapped.type === "text_delta") {
-            markOpencodeTextSseActivity(resolvedId);
+            markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1892,7 +2116,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
             ensureStreamingHistorySync(get, set, resolvedId);
           } else if (mapped.type === "text_snapshot") {
-            markOpencodeTextSseActivity(resolvedId);
+            markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1932,6 +2156,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return { messages, streaming: true };
             });
           } else if (mapped.type === "reasoning_delta") {
+            markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1956,6 +2181,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return { messages, streaming: true };
             });
           } else if (mapped.type === "reasoning_snapshot") {
+            markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -1988,6 +2214,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return;
             }
 
+            markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
               const messages = [...slice.messages];
@@ -2012,10 +2239,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
 
               const insertAt = findToolInsertIndex(messages, mapped.name);
-
-              const last = messages[messages.length - 1];
-              const hasTrailingEmptyAssistant =
-                last?.role === "assistant" && !last.content.trim();
+              const insertedBeforeEmptyAssistant =
+                insertAt < messages.length &&
+                messages[insertAt]?.role === "assistant" &&
+                !messages[insertAt].content.trim();
 
               messages.splice(insertAt, 0, {
                 id: toolId,
@@ -2025,13 +2252,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 timestamp: Date.now(),
               });
 
-              if (!hasTrailingEmptyAssistant) {
-                messages.push({
-                  id: uid(),
-                  role: "assistant",
-                  content: "",
-                  timestamp: Date.now(),
-                });
+              if (!insertedBeforeEmptyAssistant) {
+                ensureAssistantAfterTools(messages);
               }
 
               return { messages, streaming: true };

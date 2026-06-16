@@ -8,6 +8,7 @@ export interface AgentCommands {
   startRuntime: string;
   restartRuntime: string;
   stopRuntime: string;
+  runtimeStatus: string;
   createThread: string;
   sendTurn: string;
   cancelTurn?: string;
@@ -30,6 +31,7 @@ export function getAgentCommands(providerId: string): AgentCommands {
     startRuntime: `${providerId}_start_runtime`,
     restartRuntime: `${providerId}_restart_runtime`,
     stopRuntime: `${providerId}_stop_runtime`,
+    runtimeStatus: `${providerId}_runtime_status`,
     createThread: `${providerId}_create_thread`,
     sendTurn: `${providerId}_send_turn`,
     cancelTurn:

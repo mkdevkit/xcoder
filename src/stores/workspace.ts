@@ -15,6 +15,7 @@ import {
 import { resolveDroppedOpenPath } from "../utils/externalFileDrop";
 import { PREFERENCES_TAB_PATH } from "../utils/virtualTabs";
 import type { FsEntry } from "../types/fs";
+import type { ProjectConfig, ProjectConfigInfo } from "../types/projectConfig";
 
 export interface EditorTab {
   path: string;
@@ -39,6 +40,8 @@ export interface ExplorerEditState {
 
 interface WorkspaceState {
   rootPath: string | null;
+  projectConfig: ProjectConfig | null;
+  projectConfigPath: string | null;
   openTabs: EditorTab[];
   activeFile: string | null;
   editorReveal: EditorRevealTarget | null;
@@ -175,6 +178,8 @@ function remapPath(
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   rootPath: null,
+  projectConfig: null,
+  projectConfigPath: null,
   openTabs: [],
   activeFile: null,
   editorReveal: null,
@@ -342,17 +347,37 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const selected = await safePickDirectory();
     if (!selected) return;
 
+    const { useChatStore } = await import("./chat");
+    const chat = useChatStore.getState();
+    if (!chat.config) {
+      await chat.loadConfig();
+    }
+    if (get().rootPath) {
+      await chat.disconnectRuntime();
+    }
+
     await get().stopWorkspaceWatch();
     set({
       rootPath: selected,
+      projectConfig: null,
+      projectConfigPath: null,
       openTabs: [],
       activeFile: null,
       editorReveal: null,
       explorerRefreshKey: get().explorerRefreshKey + 1,
     });
     await get().startWorkspaceWatch(selected);
-    const { useChatStore } = await import("./chat");
-    void useChatStore.getState().onProjectOpened(selected);
+
+    const projectInfo = await tauriInvoke<ProjectConfigInfo>(
+      "ensure_project_config_cmd",
+      { workspace: selected },
+    );
+    set({
+      projectConfig: projectInfo.config,
+      projectConfigPath: projectInfo.path,
+    });
+
+    await chat.onProjectOpened(selected, projectInfo.config);
   },
 
   openFile: async (path) => {

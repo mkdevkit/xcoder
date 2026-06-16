@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useTranslation } from "../../i18n";
 import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
+import { useChatStore } from "../../stores/chat";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
 import { isPreferencesTab } from "../../utils/virtualTabs";
@@ -24,6 +25,8 @@ export function EditorPanel() {
     rootPath,
     openDroppedPaths,
   } = useWorkspaceStore();
+  const appTheme = useChatStore((state) => state.config?.app.theme ?? "dark");
+  const monacoTheme = appTheme === "light" ? "vs" : "vs-dark";
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const editorDrop = useDropZone({
@@ -150,7 +153,7 @@ export function EditorPanel() {
             key={activeFile}
             height="100%"
             language={languageFromPath(activeFile)}
-            theme="vs-dark"
+            theme={monacoTheme}
             value={activeTab.content}
             onMount={handleEditorMount}
             onChange={(value) => setFileContent(value ?? "")}

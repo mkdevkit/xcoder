@@ -1,8 +1,11 @@
 import { isTauri } from "./utils/tauri";
+import { applyAppTheme } from "./utils/appTheme";
 import { ContextMenuProvider } from "./components/ContextMenuProvider";
 import { WorkbenchLayout } from "./layouts/WorkbenchLayout";
 import { useTranslation } from "./i18n";
 import "./styles/global.css";
+
+applyAppTheme("dark");
 
 function BrowserFallback() {
   const { t } = useTranslation();

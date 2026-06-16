@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApprovalGate } from "../../components/ApprovalGate";
-import { MessageBubble } from "../../components/MessageBubble";
+import { useShallow } from "zustand/react/shallow";
 import { PanelResizeHandle } from "../../components/PanelResizeHandle";
 import {
   RichChatComposer,
   type RichChatComposerHandle,
 } from "../../components/RichChatComposer";
-import { useChatStore, useActiveProviderChat } from "../../stores/chat";
+import { useChatStore } from "../../stores/chat";
+import { createProviderChatSlice } from "../../stores/providerChatSlice";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useChatInputDrop } from "../../hooks/useChatInputDrop";
@@ -19,6 +19,7 @@ import {
 import { formatCodewhaleModelLabel } from "../../utils/codewhaleModels";
 import { localizeSessionTitle } from "../../utils/localChatHistory";
 import { isTauri } from "../../utils/tauri";
+import { ChatMessageList } from "./ChatMessageList";
 
 const CHAT_INPUT_HEIGHT_KEY = "xcoder:chat-input-height";
 const CHAT_INPUT_MIN_HEIGHT = 112;
@@ -52,11 +53,9 @@ function persistInputHeight(height: number) {
 export function ChatPanel() {
   const panelRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<RichChatComposerHandle>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const [hasContent, setHasContent] = useState(false);
   const [inputAreaHeight, setInputAreaHeight] = useState(readStoredInputHeight);
   const {
-    config,
     providerId,
     runtime,
     mode,
@@ -65,24 +64,43 @@ export function ChatPanel() {
     thread,
     threads,
     threadsLoading,
-    messages,
     streaming,
-    pendingApproval,
     error,
     initialized,
     runtimeBusy,
-    runtimeAction,
+    connectedIntent,
     opencodeModelCatalog,
     opencodeConnectedProviders,
     opencodeVendor,
     codewhaleModelCatalog,
-  } = useActiveProviderChat();
+  } = useChatStore(
+    useShallow((state) => {
+      const slice =
+        state.providerStates[state.providerId] ??
+        createProviderChatSlice(state.providerId);
+      return {
+        providerId: state.providerId,
+        initialized: state.initialized,
+        runtime: slice.runtime,
+        connectedIntent: slice.connectedIntent,
+        thread: slice.thread,
+        threads: slice.threads,
+        threadsLoading: slice.threadsLoading,
+        mode: slice.mode,
+        model: slice.model,
+        dynamicModes: slice.dynamicModes,
+        streaming: slice.streaming,
+        runtimeBusy: slice.runtimeBusy,
+        error: slice.error,
+        opencodeModelCatalog: slice.opencodeModelCatalog,
+        opencodeConnectedProviders: slice.opencodeConnectedProviders,
+        opencodeVendor: slice.opencodeVendor,
+        codewhaleModelCatalog: slice.codewhaleModelCatalog,
+      };
+    }),
+  );
   const {
     loadConfig,
-    setProvider,
-    connectRuntime,
-    disconnectRuntime,
-    restartRuntime,
     selectThread,
     createNewThread,
     deleteThread,
@@ -91,24 +109,13 @@ export function ChatPanel() {
     setOpencodeVendor,
     sendMessage,
     cancelGeneration,
-    approve,
     setupEventListener,
   } = useChatStore();
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
-  const canChat = Boolean(rootPath && runtime.running && thread);
-  const canCompose = Boolean(rootPath && runtime.running && !streaming);
+  const canChat = Boolean(rootPath && connectedIntent && runtime.running && thread);
+  const canCompose = Boolean(rootPath && connectedIntent && runtime.running && !streaming);
   const controlsLocked = streaming || runtimeBusy;
-
-  const connectButtonLabel = runtimeBusy
-    ? runtimeAction === "disconnect"
-      ? t("chat.disconnecting")
-      : runtimeAction === "restart"
-        ? t("chat.restarting")
-        : t("chat.connecting")
-    : runtime.running
-      ? t("chat.disconnect")
-      : t("chat.connect");
 
   const handleAttachReferences = useCallback((refs: string[]) => {
     composerRef.current?.insertReferences(refs);
@@ -141,7 +148,7 @@ export function ChatPanel() {
     opencodeVendor,
   );
   const showOpencodeVendor =
-    isOpencode && runtime.running && opencodeVendors.length > 0;
+    isOpencode && connectedIntent && runtime.running && opencodeVendors.length > 0;
   const showModelSelect = isOpencode
     ? opencodeModels.length > 0
     : isCodewhale
@@ -151,8 +158,10 @@ export function ChatPanel() {
 
   const composerPlaceholder = !rootPath
     ? t("chat.openFolderToChat")
-    : !runtime.running
-      ? t("chat.connectFirst")
+    : !connectedIntent
+      ? t("chat.connectInProjectPrefs")
+      : !runtime.running
+        ? t("chat.serviceNotRunning")
       : !thread
         ? t("chat.selectOrCreateSession")
         : t("chat.inputPlaceholder");
@@ -170,22 +179,9 @@ export function ChatPanel() {
     return () => cleanup?.();
   }, [loadConfig, setupEventListener]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, pendingApproval]);
-
-  const handleConnect = async () => {
-    if (runtime.running) {
-      await disconnectRuntime();
-      return;
-    }
-    if (!rootPath) return;
-    await connectRuntime(rootPath);
-  };
-
   const handleSend = async () => {
     const message = composerRef.current?.getMessage() ?? "";
-    if (!message || streaming || !runtime.running || !thread) return;
+    if (!message || streaming || !connectedIntent || !runtime.running || !thread) return;
     if (!rootPath) return;
 
     await sendMessage(message);
@@ -223,95 +219,8 @@ export function ChatPanel() {
       <div className="chat-header">
         <div className="chat-header-top">
           <div className="panel-title">{providerLabel}</div>
-          {config && config.providers.length > 1 && (
-            <select
-              className="provider-select"
-              value={providerId}
-              onChange={(e) => setProvider(e.target.value)}
-              disabled={controlsLocked}
-            >
-              {config.providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {getProviderLabel(provider.id)}
-                </option>
-              ))}
-            </select>
-          )}
         </div>
-        <div className="chat-controls">
-          <div className="chat-runtime-actions">
-            <button
-              className={runtime.running ? "" : "primary"}
-              onClick={handleConnect}
-              disabled={controlsLocked || (!rootPath && !runtime.running)}
-            >
-              {connectButtonLabel}
-            </button>
-            {runtime.running && (
-              <button
-                type="button"
-                onClick={() => restartRuntime(rootPath ?? undefined).catch(console.error)}
-                disabled={controlsLocked}
-                title={t("chat.restart")}
-              >
-                {runtimeBusy && runtimeAction === "restart"
-                  ? t("chat.restarting")
-                  : t("chat.restart")}
-              </button>
-            )}
-          </div>
-          <div className="chat-controls-selects">
-            <select
-              className="chat-mode-select"
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              disabled={!initialized || controlsLocked}
-            >
-              {modeOptions.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            {showOpencodeVendor && (
-              <select
-                className="chat-vendor-select"
-                value={opencodeVendor}
-                onChange={(e) => setOpencodeVendor(e.target.value)}
-                disabled={!initialized || controlsLocked}
-                title={t("chat.modelProvider")}
-              >
-                {opencodeVendors.map((vendor) => (
-                  <option key={vendor.id} value={vendor.id}>
-                    {formatOpencodeVendorLabel(vendor)}
-                  </option>
-                ))}
-              </select>
-            )}
-            {showModelSelect && (
-              <select
-                className="chat-model-select"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                disabled={!initialized || controlsLocked}
-                title={model}
-              >
-                {isOpencode
-                  ? opencodeModels.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.modelName}
-                      </option>
-                    ))
-                  : codewhaleModelCatalog.map((item) => (
-                      <option key={`${item.value}-${item.provider}`} value={item.value}>
-                        {formatCodewhaleModelLabel(item)}
-                      </option>
-                    ))}
-              </select>
-            )}
-          </div>
-        </div>
-        {runtime.running && (
+        {connectedIntent && (
           <div className="chat-thread-row">
             <select
               className="thread-select"
@@ -370,28 +279,7 @@ export function ChatPanel() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="chat-messages">
-        {messages.length === 0 && (
-          <div className="chat-placeholder">
-            {!runtime.running
-              ? t("chat.hintDisconnected", { provider: providerLabel })
-              : !thread
-                ? t("chat.hintNoSession")
-                : t("chat.hintReady", { provider: providerLabel })}
-          </div>
-        )}
-        {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
-        ))}
-        {pendingApproval && (
-          <ApprovalGate
-            description={pendingApproval.description}
-            onApprove={() => approve(true).catch(console.error)}
-            onDeny={() => approve(false).catch(console.error)}
-          />
-        )}
-        <div ref={bottomRef} />
-      </div>
+      <ChatMessageList />
 
       <PanelResizeHandle
         direction="vertical"
@@ -418,13 +306,65 @@ export function ChatPanel() {
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         />
-        <button
-          className={`send-btn ${streaming ? "" : "primary"}`}
-          disabled={streaming ? !canChat : !canChat || !hasContent}
-          onClick={() => handleSendOrCancel().catch(console.error)}
-        >
-          {streaming ? t("chat.cancel") : t("chat.send")}
-        </button>
+        <div className="chat-composer-toolbar">
+          <div className="chat-controls-selects">
+            <select
+              className="chat-mode-select"
+              value={mode}
+              onChange={(e) => setMode(e.target.value)}
+              disabled={!initialized || controlsLocked}
+            >
+              {modeOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            {showOpencodeVendor && (
+              <select
+                className="chat-vendor-select"
+                value={opencodeVendor}
+                onChange={(e) => setOpencodeVendor(e.target.value)}
+                disabled={!initialized || controlsLocked}
+                title={t("chat.modelProvider")}
+              >
+                {opencodeVendors.map((vendor) => (
+                  <option key={vendor.id} value={vendor.id}>
+                    {formatOpencodeVendorLabel(vendor)}
+                  </option>
+                ))}
+              </select>
+            )}
+            {showModelSelect && (
+              <select
+                className="chat-model-select"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={!initialized || controlsLocked}
+                title={model}
+              >
+                {isOpencode
+                  ? opencodeModels.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.modelName}
+                      </option>
+                    ))
+                  : codewhaleModelCatalog.map((item) => (
+                      <option key={`${item.value}-${item.provider}`} value={item.value}>
+                        {formatCodewhaleModelLabel(item)}
+                      </option>
+                    ))}
+              </select>
+            )}
+          </div>
+          <button
+            className={`send-btn ${streaming ? "" : "primary"}`}
+            disabled={streaming ? !canChat : !canChat || !hasContent}
+            onClick={() => handleSendOrCancel().catch(console.error)}
+          >
+            {streaming ? t("chat.cancel") : t("chat.send")}
+          </button>
+        </div>
       </div>
 
       <style>{`
@@ -447,18 +387,13 @@ export function ChatPanel() {
         .provider-select {
           min-width: 120px;
         }
-        .chat-controls {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          margin-top: 8px;
-          min-width: 0;
-        }
         .chat-controls-selects {
           display: flex;
           gap: 8px;
           min-width: 0;
+          flex: 1;
           flex-wrap: wrap;
+          align-items: center;
         }
         .chat-controls-selects select {
           flex: 1 1 0;
@@ -475,10 +410,11 @@ export function ChatPanel() {
         .chat-model-select {
           flex: 2 1 160px;
         }
-        .chat-runtime-actions {
+        .chat-composer-toolbar {
           display: flex;
+          align-items: center;
           gap: 8px;
-          flex-wrap: wrap;
+          flex-shrink: 0;
         }
         .chat-thread-row {
           display: flex;
@@ -498,18 +434,6 @@ export function ChatPanel() {
         }
         .thread-delete-btn:disabled {
           opacity: 0.4;
-        }
-        .chat-hint,
-        .chat-placeholder {
-          color: var(--text-muted);
-          padding: 12px;
-          font-size: 12px;
-        }
-        .chat-messages {
-          flex: 1;
-          min-height: 0;
-          overflow: auto;
-          padding: 12px;
         }
         .chat-panel .panel-resize-handle.vertical {
           flex-shrink: 0;
@@ -555,7 +479,7 @@ export function ChatPanel() {
           cursor: copy;
         }
         .send-btn {
-          align-self: flex-end;
+          flex-shrink: 0;
         }
       `}</style>
     </div>

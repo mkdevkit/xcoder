@@ -6,6 +6,15 @@ export interface OpencodeModelOption {
   value: string;
 }
 
+export const OPENCODE_DEFAULT_AGENTS = ["build", "plan"] as const;
+export type OpencodeDefaultAgent = (typeof OPENCODE_DEFAULT_AGENTS)[number];
+
+export function normalizeOpencodeDefaultAgent(value: string): OpencodeDefaultAgent {
+  return OPENCODE_DEFAULT_AGENTS.includes(value as OpencodeDefaultAgent)
+    ? (value as OpencodeDefaultAgent)
+    : "build";
+}
+
 export interface OpencodeVendorOption {
   id: string;
   name: string;
@@ -48,6 +57,22 @@ export function resolveOpencodeVendor(model: string, fallback = "") {
   return model.slice(0, slash);
 }
 
+export function findOpencodeModelMatch(
+  catalog: OpencodeModelOption[],
+  preferredModel: string,
+) {
+  const trimmed = preferredModel.trim();
+  if (!trimmed) return undefined;
+
+  const exact = catalog.find((item) => item.value === trimmed);
+  if (exact) return exact;
+
+  const byModelId = catalog.find((item) => item.modelId === trimmed);
+  if (byModelId) return byModelId;
+
+  return catalog.find((item) => item.value.endsWith(`/${trimmed}`));
+}
+
 export function pickOpencodeDefaults(
   catalog: OpencodeModelOption[],
   preferredModel = "",
@@ -56,7 +81,7 @@ export function pickOpencodeDefaults(
     return { vendor: "", model: "" };
   }
 
-  const preferred = catalog.find((item) => item.value === preferredModel);
+  const preferred = findOpencodeModelMatch(catalog, preferredModel);
   if (preferred) {
     return { vendor: preferred.providerId, model: preferred.value };
   }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import appIcon from "../../src-tauri/icons/icon.png";
 import { MenuBar } from "../components/MenuBar";
 import { PanelResizeHandle } from "../components/PanelResizeHandle";
@@ -13,8 +13,8 @@ import {
 } from "../stores/settings";
 import { useTerminalStore } from "../stores/terminal";
 import { useWorkspaceStore } from "../stores/workspace";
+import { useChatStore, useActiveProviderChat } from "../stores/chat";
 import { useTranslation } from "../i18n";
-import { tauriInvoke } from "../utils/tauri";
 
 export function WorkbenchLayout() {
   const {
@@ -27,11 +27,12 @@ export function WorkbenchLayout() {
     resizeTerminalBy,
   } = useSettingsStore();
   const centerColumnRef = useRef<HTMLElement>(null);
-  const { openFolder, openFile, openPreferencesTab, rootPath, activeFile, setupWorkspaceListener } =
+  const { openFolder, openPreferencesTab, rootPath, activeFile, setupWorkspaceListener } =
     useWorkspaceStore();
   const { createTerminal } = useTerminalStore();
+  const { connectedIntent } = useActiveProviderChat();
+  const showChatPanel = Boolean(rootPath && connectedIntent);
   const { t } = useTranslation();
-  const [menuError, setMenuError] = useState<string | null>(null);
   useWorkbenchContextMenu();
 
   useEffect(() => {
@@ -44,44 +45,13 @@ export function WorkbenchLayout() {
     return () => cleanup?.();
   }, [setupWorkspaceListener]);
 
+  useEffect(() => {
+    if (!rootPath) return;
+    return useChatStore.getState().startRuntimeHealthMonitor();
+  }, [rootPath]);
+
   const handleNewTerminal = () => {
     createTerminal(rootPath ?? undefined).catch(console.error);
-  };
-
-  const handleOpenConfigDir = async () => {
-    try {
-      setMenuError(null);
-      await tauriInvoke("open_config_directory");
-    } catch (error) {
-      setMenuError(String(error));
-      console.error(error);
-    }
-  };
-
-  const handleOpenConfigFile = async () => {
-    try {
-      setMenuError(null);
-      const paths = await tauriInvoke<{ dir: string; file: string }>(
-        "get_config_paths",
-      );
-      await openFile(paths.file);
-    } catch (error) {
-      setMenuError(String(error));
-      console.error(error);
-    }
-  };
-
-  const handleOpenProviderConfig = async (providerId: string) => {
-    try {
-      setMenuError(null);
-      const path = await tauriInvoke<string>("get_provider_config_path", {
-        providerId,
-      });
-      await openFile(path);
-    } catch (error) {
-      setMenuError(String(error));
-      console.error(error);
-    }
   };
 
   const menuBarMenus = [
@@ -99,40 +69,6 @@ export function WorkbenchLayout() {
           label: t("menu.preferences"),
           dividerBefore: true,
           onClick: () => openPreferencesTab(),
-        },
-        {
-          id: "config-submenu",
-          label: t("menu.config"),
-          children: [
-            {
-              id: "open-config-dir",
-              label: t("menu.openConfigDir"),
-              onClick: () => {
-                handleOpenConfigDir().catch(console.error);
-              },
-            },
-            {
-              id: "open-config-file",
-              label: t("menu.openConfigFile"),
-              onClick: () => {
-                handleOpenConfigFile().catch(console.error);
-              },
-            },
-            {
-              id: "open-opencode-config",
-              label: t("menu.openOpencode"),
-              onClick: () => {
-                handleOpenProviderConfig("opencode").catch(console.error);
-              },
-            },
-            {
-              id: "open-codewhale-config",
-              label: t("menu.openCodewhale"),
-              onClick: () => {
-                handleOpenProviderConfig("codewhale").catch(console.error);
-              },
-            },
-          ],
         },
       ],
     },
@@ -161,7 +97,6 @@ export function WorkbenchLayout() {
       <header className="toolbar">
         <img className="app-logo" src={appIcon} alt="xcoder" />
         <MenuBar menus={menuBarMenus} />
-        {menuError && <div className="menu-error">{menuError}</div>}
         <div className="toolbar-meta">
           {rootPath && (
             <span className="workspace-path" title={rootPath}>
@@ -203,11 +138,15 @@ export function WorkbenchLayout() {
           )}
         </main>
 
-        <PanelResizeHandle direction="horizontal" onResizeDelta={resizeChatBy} />
+        {showChatPanel && (
+          <>
+            <PanelResizeHandle direction="horizontal" onResizeDelta={resizeChatBy} />
 
-        <aside className="chat-sidebar" style={{ width: chatWidth }}>
-          <ChatPanel />
-        </aside>
+            <aside className="chat-sidebar" style={{ width: chatWidth }}>
+              <ChatPanel />
+            </aside>
+          </>
+        )}
       </div>
 
       <style>{`

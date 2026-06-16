@@ -103,6 +103,7 @@ export interface AppConfig {
   app: {
     default_provider: string;
     theme: string;
+    default_model: string;
   };
   providers: ProviderConfig[];
 }

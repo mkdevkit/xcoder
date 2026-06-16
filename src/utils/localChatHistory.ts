@@ -213,40 +213,28 @@ export function mergeThreadLists(
   remote: ThreadSummary[],
   local: LocalSessionMeta[],
 ): ThreadSummary[] {
-  const merged = new Map<string, ThreadSummary>();
   const localById = new Map(local.map((item) => [item.id, item]));
 
-  for (const item of remote) {
-    const localItem = localById.get(item.id);
-    const title =
-      localItem &&
-      isGenericSessionTitle(item.title) &&
-      !isGenericSessionTitle(localItem.title)
-        ? localItem.title
-        : item.title;
-    merged.set(item.id, {
-      ...item,
-      title,
-      preview: item.preview ?? localItem?.preview,
+  return remote
+    .map((item) => {
+      const localItem = localById.get(item.id);
+      const title =
+        localItem &&
+        isGenericSessionTitle(item.title) &&
+        !isGenericSessionTitle(localItem.title)
+          ? localItem.title
+          : item.title;
+      return {
+        ...item,
+        title,
+        preview: item.preview ?? localItem?.preview,
+      };
+    })
+    .sort((a, b) => {
+      const left = Date.parse(a.updated_at ?? "") || 0;
+      const right = Date.parse(b.updated_at ?? "") || 0;
+      return right - left;
     });
-  }
-
-  for (const item of local) {
-    if (merged.has(item.id)) continue;
-    merged.set(item.id, {
-      id: item.id,
-      title: item.title,
-      preview: item.preview,
-      workspace: undefined,
-      updated_at: item.updated_at,
-    });
-  }
-
-  return Array.from(merged.values()).sort((a, b) => {
-    const left = Date.parse(a.updated_at ?? "") || 0;
-    const right = Date.parse(b.updated_at ?? "") || 0;
-    return right - left;
-  });
 }
 
 export function sessionTitleFromMessages(messages: ChatMessage[], fallback: string) {

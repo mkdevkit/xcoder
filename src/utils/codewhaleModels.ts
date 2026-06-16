@@ -21,10 +21,18 @@ export function pickCodewhaleDefaults(
 
   const usable = catalog.filter(isCodewhaleModelAvailable);
   const pool = usable.length > 0 ? usable : catalog;
+  const trimmed = preferredModel.trim();
 
-  const preferred = pool.find((item) => item.value === preferredModel);
-  if (preferred) {
-    return { model: preferred.value };
+  if (trimmed) {
+    const preferred = pool.find(
+      (item) =>
+        item.value === trimmed ||
+        item.modelId === trimmed ||
+        item.label === trimmed,
+    );
+    if (preferred) {
+      return { model: preferred.value };
+    }
   }
 
   const auto = pool.find((item) => item.value === "auto");

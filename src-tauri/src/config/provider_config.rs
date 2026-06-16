@@ -1,0 +1,551 @@
+use crate::config::load_app_config;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~\\") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+pub fn resolve_provider_config_path(provider_id: &str) -> Result<PathBuf, String> {
+    let config = load_app_config()?;
+    let provider = config
+        .providers
+        .into_iter()
+        .find(|item| item.id == provider_id)
+        .ok_or_else(|| format!("Provider not found: {provider_id}"))?;
+
+    let raw = provider
+        .config_path
+        .ok_or_else(|| format!("{provider_id} has no config_path"))?;
+    Ok(expand_tilde(&raw))
+}
+
+fn ensure_parent(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodewhaleProviderEntry {
+    pub id: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodewhaleConfigView {
+    pub path: String,
+    #[serde(default)]
+    pub installed: bool,
+    pub api_key: String,
+    pub provider: String,
+    pub auth_mode: String,
+    pub providers: Vec<CodewhaleProviderEntry>,
+    pub default_mode: String,
+    pub approval_mode: String,
+    pub reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CodewhaleProviderSection {
+    #[serde(default)]
+    api_key: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CodewhaleUiSection {
+    #[serde(default)]
+    default_mode: String,
+    #[serde(default)]
+    approval_mode: String,
+    #[serde(default)]
+    reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CodewhaleConfigFile {
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    auth_mode: String,
+    #[serde(default)]
+    default_text_model: String,
+    #[serde(default)]
+    providers: HashMap<String, CodewhaleProviderSection>,
+    #[serde(default)]
+    ui: CodewhaleUiSection,
+}
+
+pub fn read_codewhale_default_text_model() -> Option<String> {
+    let path = resolve_provider_config_path("codewhale").ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let content = fs::read_to_string(&path).ok()?;
+    let parsed: CodewhaleConfigFile = toml::from_str(&content).ok()?;
+    if parsed.default_text_model.is_empty() {
+        None
+    } else {
+        Some(parsed.default_text_model)
+    }
+}
+
+pub fn load_codewhale_config() -> Result<CodewhaleConfigView, String> {
+    let path = resolve_provider_config_path("codewhale")?;
+    if !path.exists() {
+        return Ok(CodewhaleConfigView {
+            path: path.to_string_lossy().to_string(),
+            installed: false,
+            api_key: String::new(),
+            provider: String::new(),
+            auth_mode: "api_key".to_string(),
+            providers: Vec::new(),
+            default_mode: "agent".to_string(),
+            approval_mode: "suggest".to_string(),
+            reasoning_effort: "high".to_string(),
+        });
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let parsed: CodewhaleConfigFile = toml::from_str(&content).unwrap_or_default();
+
+    let mut providers: Vec<CodewhaleProviderEntry> = parsed
+        .providers
+        .into_iter()
+        .map(|(id, section)| CodewhaleProviderEntry {
+            id,
+            api_key: section.api_key,
+        })
+        .collect();
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+
+    if providers.is_empty() && !parsed.provider.is_empty() {
+        providers.push(CodewhaleProviderEntry {
+            id: parsed.provider.clone(),
+            api_key: parsed.api_key.clone(),
+        });
+    }
+
+    Ok(CodewhaleConfigView {
+        path: path.to_string_lossy().to_string(),
+        installed: true,
+        api_key: parsed.api_key,
+        provider: parsed.provider,
+        auth_mode: if parsed.auth_mode.is_empty() {
+            "api_key".to_string()
+        } else {
+            parsed.auth_mode
+        },
+        providers,
+        default_mode: if parsed.ui.default_mode.is_empty() {
+            "agent".to_string()
+        } else {
+            parsed.ui.default_mode
+        },
+        approval_mode: if parsed.ui.approval_mode.is_empty() {
+            "suggest".to_string()
+        } else {
+            parsed.ui.approval_mode
+        },
+        reasoning_effort: if parsed.ui.reasoning_effort.is_empty() {
+            "high".to_string()
+        } else {
+            parsed.ui.reasoning_effort
+        },
+    })
+}
+
+pub fn save_codewhale_config(view: CodewhaleConfigView) -> Result<(), String> {
+    let path = resolve_provider_config_path("codewhale")?;
+    if !path.exists() {
+        return Err("CodeWhale 配置文件不存在，请先安装并初始化 CodeWhale".to_string());
+    }
+    ensure_parent(&path)?;
+
+    let existing_content = fs::read_to_string(&path).unwrap_or_default();
+    let existing: CodewhaleConfigFile =
+        toml::from_str(&existing_content).unwrap_or_default();
+
+    let mut providers_map = HashMap::new();
+    for entry in &view.providers {
+        let id = entry.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        providers_map.insert(
+            id.to_string(),
+            CodewhaleProviderSection {
+                api_key: entry.api_key.clone(),
+            },
+        );
+    }
+
+    let primary_provider = if !view.provider.trim().is_empty() {
+        view.provider.trim().to_string()
+    } else {
+        view.providers
+            .first()
+            .map(|item| item.id.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let primary_api_key = view
+        .providers
+        .iter()
+        .find(|item| item.id == primary_provider)
+        .map(|item| item.api_key.clone())
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| view.api_key.clone());
+
+    let file = CodewhaleConfigFile {
+        api_key: primary_api_key,
+        provider: primary_provider,
+        auth_mode: if view.auth_mode.trim().is_empty() {
+            "api_key".to_string()
+        } else {
+            view.auth_mode
+        },
+        default_text_model: existing.default_text_model,
+        providers: providers_map,
+        ui: CodewhaleUiSection {
+            default_mode: view.default_mode,
+            approval_mode: view.approval_mode,
+            reasoning_effort: view.reasoning_effort,
+        },
+    };
+
+    let content = toml::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeProviderEntry {
+    pub id: String,
+    pub npm: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub set_cache_key: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodePermissionsView {
+    pub edit: String,
+    pub bash: String,
+    pub read: String,
+    pub webfetch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeConfigView {
+    pub path: String,
+    #[serde(default)]
+    pub installed: bool,
+    pub default_agent: String,
+    pub permissions: OpencodePermissionsView,
+    pub providers: Vec<OpencodeProviderEntry>,
+}
+
+fn permission_value_to_action(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(map) = value.as_object() {
+        if let Some(star) = map.get("*").and_then(|v| v.as_str()) {
+            return star.to_string();
+        }
+    }
+    String::new()
+}
+
+fn parse_permission_action(permission: Option<&Value>, key: &str) -> String {
+    let Some(permission) = permission else {
+        return String::new();
+    };
+    if let Some(text) = permission.as_str() {
+        return text.to_string();
+    }
+    let Some(map) = permission.as_object() else {
+        return String::new();
+    };
+    if let Some(value) = map.get(key) {
+        return permission_value_to_action(value);
+    }
+    if let Some(value) = map.get("*") {
+        return permission_value_to_action(value);
+    }
+    String::new()
+}
+
+pub fn project_opencode_config_path(workspace: &str) -> PathBuf {
+    Path::new(workspace).join("opencode.json")
+}
+
+pub fn sync_project_opencode_permissions(
+    workspace: &str,
+    permissions: &OpencodePermissionsView,
+) -> Result<(), String> {
+    let path = project_opencode_config_path(workspace);
+    let has_any = !permissions.edit.trim().is_empty()
+        || !permissions.bash.trim().is_empty()
+        || !permissions.read.trim().is_empty()
+        || !permissions.webfetch.trim().is_empty();
+
+    if !has_any && !path.is_file() {
+        return Ok(());
+    }
+
+    let existing_content = if path.is_file() {
+        fs::read_to_string(&path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+
+    let mut json: Value = if existing_content.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&existing_content).unwrap_or_else(|_| json!({}))
+    };
+
+    if let Some(obj) = json.as_object_mut() {
+        if obj.get("$schema").is_none() {
+            obj.insert(
+                "$schema".to_string(),
+                Value::String("https://opencode.ai/config.json".to_string()),
+            );
+        }
+
+        let existing_permission = obj.get("permission").cloned();
+        apply_opencode_permissions(obj, permissions, existing_permission.as_ref());
+    }
+
+    ensure_parent(&path)?;
+    let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{content}\n")).map_err(|e| e.to_string())
+}
+
+pub fn apply_opencode_permissions(
+    obj: &mut Map<String, Value>,
+    view: &OpencodePermissionsView,
+    existing: Option<&Value>,
+) {
+    let mut permission = existing
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    for (key, value) in [
+        ("edit", view.edit.trim()),
+        ("bash", view.bash.trim()),
+        ("read", view.read.trim()),
+        ("webfetch", view.webfetch.trim()),
+    ] {
+        if value.is_empty() {
+            permission.remove(key);
+        } else {
+            permission.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+
+    if permission.is_empty() {
+        obj.remove("permission");
+    } else {
+        obj.insert("permission".to_string(), Value::Object(permission));
+    }
+}
+
+fn parse_opencode_provider(id: &str, value: &Value) -> OpencodeProviderEntry {
+    let options = value.get("options").and_then(|v| v.as_object());
+    let base_url = options
+        .and_then(|opts| {
+            opts.get("baseURL")
+                .or_else(|| opts.get("baseUrl"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("")
+        .to_string();
+    let api_key = options
+        .and_then(|opts| opts.get("apiKey").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let set_cache_key = options
+        .and_then(|opts| opts.get("setCacheKey").and_then(|v| v.as_bool()))
+        .unwrap_or(true);
+
+    OpencodeProviderEntry {
+        id: id.to_string(),
+        npm: value
+            .get("npm")
+            .and_then(|v| v.as_str())
+            .unwrap_or("@ai-sdk/openai-compatible")
+            .to_string(),
+        base_url,
+        api_key,
+        set_cache_key,
+    }
+}
+
+pub fn load_opencode_config() -> Result<OpencodeConfigView, String> {
+    let path = resolve_provider_config_path("opencode")?;
+    if !path.exists() {
+        return Ok(OpencodeConfigView {
+            path: path.to_string_lossy().to_string(),
+            installed: false,
+            default_agent: String::new(),
+            permissions: OpencodePermissionsView {
+                edit: String::new(),
+                bash: String::new(),
+                read: String::new(),
+                webfetch: String::new(),
+            },
+            providers: Vec::new(),
+        });
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let json: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+
+    let mut providers = Vec::new();
+    if let Some(provider_map) = json.get("provider").and_then(|v| v.as_object()) {
+        for (id, value) in provider_map {
+            providers.push(parse_opencode_provider(id, value));
+        }
+    }
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let default_agent = json
+        .get("default_agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let permission = json.get("permission");
+    let permissions = OpencodePermissionsView {
+        edit: parse_permission_action(permission, "edit"),
+        bash: parse_permission_action(permission, "bash"),
+        read: parse_permission_action(permission, "read"),
+        webfetch: parse_permission_action(permission, "webfetch"),
+    };
+
+    Ok(OpencodeConfigView {
+        path: path.to_string_lossy().to_string(),
+        installed: true,
+        default_agent,
+        permissions,
+        providers,
+    })
+}
+
+fn build_opencode_provider_json(entry: &OpencodeProviderEntry, existing: Option<&Value>) -> Value {
+    let models = existing
+        .and_then(|value| value.get("models").cloned())
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    let mut options = Map::new();
+    if !entry.base_url.trim().is_empty() {
+        options.insert(
+            "baseURL".to_string(),
+            Value::String(entry.base_url.trim().to_string()),
+        );
+    }
+    if !entry.api_key.is_empty() {
+        options.insert("apiKey".to_string(), Value::String(entry.api_key.clone()));
+    }
+    if entry.set_cache_key {
+        options.insert("setCacheKey".to_string(), Value::Bool(true));
+    }
+
+    let npm = if entry.npm.trim().is_empty() {
+        "@ai-sdk/openai-compatible".to_string()
+    } else {
+        entry.npm.trim().to_string()
+    };
+
+    json!({
+        "npm": npm,
+        "options": Value::Object(options),
+        "models": models,
+    })
+}
+
+pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
+    let path = resolve_provider_config_path("opencode")?;
+    if !path.exists() {
+        return Err("OpenCode 配置文件不存在，请先安装并初始化 OpenCode".to_string());
+    }
+    ensure_parent(&path)?;
+
+    let existing_content = fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut json: Value =
+        serde_json::from_str(&existing_content).unwrap_or_else(|_| json!({}));
+    let existing_permission = json.get("permission").cloned();
+
+    if json.get("$schema").is_none() {
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert(
+                "$schema".to_string(),
+                Value::String("https://opencode.ai/config.json".to_string()),
+            );
+        }
+    }
+
+    if let Some(obj) = json.as_object_mut() {
+        let existing_providers = obj
+            .get("provider")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut provider_map = Map::new();
+        for entry in &view.providers {
+            let id = entry.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            let existing = existing_providers.get(id);
+            provider_map.insert(
+                id.to_string(),
+                build_opencode_provider_json(entry, existing),
+            );
+        }
+        obj.insert("provider".to_string(), Value::Object(provider_map));
+
+        let default_agent = view.default_agent.trim();
+        if default_agent.is_empty() {
+            obj.remove("default_agent");
+        } else {
+            obj.insert(
+                "default_agent".to_string(),
+                Value::String(default_agent.to_string()),
+            );
+        }
+
+        apply_opencode_permissions(
+            obj,
+            &view.permissions,
+            existing_permission.as_ref(),
+        );
+    }
+
+    let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{content}\n")).map_err(|e| e.to_string())
+}

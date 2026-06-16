@@ -1,4 +1,7 @@
 use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
+use crate::config::runtime_args::{
+    default_codewhale_serve_args, runtime_http_base_url, serve_args_or_default,
+};
 use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
 use serde::{Deserialize, Serialize};
@@ -59,7 +62,16 @@ fn resolve_codewhale_command() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn base_url() -> String {
-    "http://127.0.0.1:7878".to_string()
+    let provider = provider_config().unwrap_or_else(|_| ProviderConfig {
+        id: "codewhale".to_string(),
+        provider_type: "http".to_string(),
+        command: "codewhale".to_string(),
+        args: default_codewhale_serve_args(),
+        config_path: None,
+        health_cmd: vec![],
+        ui_options: None,
+    });
+    runtime_http_base_url(&provider.args, "127.0.0.1", "7878")
 }
 
 pub async fn is_healthy(client: &reqwest::Client, url: &str) -> bool {
@@ -88,19 +100,11 @@ pub async fn wait_for_health(client: &reqwest::Client, url: &str) -> Result<(), 
 }
 
 pub fn spawn_runtime() -> Result<Child, String> {
-    let program = resolve_codewhale_command()?;
-    let child = build_command(
-        &program,
-        &[
-            "serve",
-            "--http",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "7878",
-            "--insecure",
-        ],
-    )
+    let provider = provider_config()?;
+    let program = resolve_executable(&provider.command)?;
+    let args = serve_args_or_default(&provider.args, &default_codewhale_serve_args());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let child = build_command(&program, &arg_refs)
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()

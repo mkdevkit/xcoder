@@ -1,4 +1,7 @@
 use crate::agent::history::{HistoryMessage, ThreadSummary};
+use crate::config::runtime_args::{
+    default_opencode_serve_args, opencode_serve_args_with_cors, runtime_http_base_url,
+};
 use crate::config::{load_app_config, ProviderConfig};
 use crate::utils::command::{build_command, resolve_executable};
 use serde::{Deserialize, Serialize};
@@ -47,7 +50,25 @@ fn resolve_opencode_command() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn base_url() -> String {
-    "http://127.0.0.1:4096".to_string()
+    let provider = provider_config().unwrap_or_else(|_| ProviderConfig {
+        id: "opencode".to_string(),
+        provider_type: "http".to_string(),
+        command: "opencode".to_string(),
+        args: default_opencode_serve_args(),
+        config_path: None,
+        health_cmd: vec![],
+        ui_options: None,
+    });
+    runtime_http_base_url(&provider.args, "127.0.0.1", "4096")
+}
+
+fn resolve_spawn_workspace(workspace: &str) -> String {
+    if workspace.trim().is_empty() {
+        return dirs::home_dir()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+    }
+    workspace.to_string()
 }
 
 pub fn check_installed() -> Result<Value, String> {
@@ -84,22 +105,13 @@ pub async fn wait_for_health(client: &reqwest::Client, url: &str) -> Result<(), 
 }
 
 pub fn spawn_runtime(workspace: &str) -> Result<Child, String> {
+    let provider = provider_config()?;
     let program = resolve_opencode_command()?;
-    let child = build_command(
-        &program,
-        &[
-            "serve",
-            "--hostname",
-            "127.0.0.1",
-            "--port",
-            "4096",
-            "--cors",
-            "http://localhost:1420",
-            "--cors",
-            "tauri://localhost",
-        ],
-    )
-    .current_dir(workspace)
+    let args = opencode_serve_args_with_cors(&provider.args);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cwd = resolve_spawn_workspace(workspace);
+    let child = build_command(&program, &arg_refs)
+    .current_dir(&cwd)
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
@@ -792,12 +804,25 @@ pub async fn list_sessions(
     limit: u32,
 ) -> Result<Vec<ThreadSummary>, String> {
     let limit_str = limit.to_string();
-    let response = client
+    let mut response = client
         .get(format!("{url}/session"))
-        .query(&[("directory", workspace), ("limit", limit_str.as_str())])
+        .query(&[
+            ("directory", workspace),
+            ("limit", limit_str.as_str()),
+            ("roots", "true"),
+        ])
         .send()
         .await
         .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        response = client
+            .get(format!("{url}/session"))
+            .query(&[("directory", workspace), ("limit", limit_str.as_str())])
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -810,6 +835,13 @@ pub async fn list_sessions(
     Ok(items
         .into_iter()
         .filter_map(|item| {
+            if item
+                .get("parentID")
+                .and_then(|value| value.as_str())
+                .is_some_and(|parent| !parent.is_empty())
+            {
+                return None;
+            }
             let directory = item["directory"].as_str().unwrap_or("");
             if !workspaces_match(directory, workspace) {
                 return None;
@@ -1397,6 +1429,42 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
     }
 
     match event_type {
+        "message.part.delta" => {
+            let delta = properties
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+
+            let field = properties
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text");
+
+            let kind = if field == "reasoning" {
+                "reasoning"
+            } else {
+                "agent_message"
+            };
+
+            let mut payload = serde_json::json!({
+                "delta": delta,
+                "kind": kind,
+            });
+
+            if let Some(part_id) = properties
+                .get("partID")
+                .or_else(|| properties.get("partId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                payload["partId"] = serde_json::json!(part_id);
+            }
+
+            Some(serde_json::json!({
+                "event": "item.delta",
+                "payload": payload,
+            }))
+        }
         "message.part.updated" => {
             let part = properties.get("part")?;
             let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");

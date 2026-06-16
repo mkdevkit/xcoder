@@ -315,3 +315,20 @@ export function getToolRoleLabel(toolName?: string): string {
   const key = TOOL_ROLE_KEYS[toolName];
   return key ? t(key) : t("tool.genericNamed", { name: toolName });
 }
+
+const RUNNING_STATUSES = new Set([
+  "running",
+  "pending",
+  "in_progress",
+  "in-progress",
+  "awaiting",
+  "awaiting_approval",
+]);
+
+export function isToolRunning(content: string): boolean {
+  const record = asRecord(parseToolContent(content));
+  if (!record) return false;
+  const status = String(record.status ?? "").trim().toLowerCase();
+  if (!status) return false;
+  return RUNNING_STATUSES.has(status);
+}

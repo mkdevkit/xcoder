@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiOptions {
@@ -37,6 +37,8 @@ pub struct AppSection {
     pub default_provider: String,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_text_model")]
+    pub default_model: String,
 }
 
 fn default_provider() -> String {
@@ -47,11 +49,16 @@ fn default_theme() -> String {
     "dark".to_string()
 }
 
+fn default_text_model() -> String {
+    "deepseek-v4-pro".to_string()
+}
+
 impl Default for AppSection {
     fn default() -> Self {
         Self {
             default_provider: default_provider(),
             theme: default_theme(),
+            default_model: default_text_model(),
         }
     }
 }
@@ -70,6 +77,7 @@ impl Default for AppConfig {
             app: AppSection {
                 default_provider: "codewhale".to_string(),
                 theme: "dark".to_string(),
+                default_model: default_text_model(),
             },
             providers: vec![
                 ProviderConfig {
@@ -111,6 +119,9 @@ impl Default for AppConfig {
     }
 }
 
+pub mod provider_config;
+pub mod runtime_args;
+
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -121,16 +132,33 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+const DEFAULT_CONFIG_TOML: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../public/config.toml"));
+
+fn ensure_default_config_file(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, DEFAULT_CONFIG_TOML).map_err(|e| e.to_string())
+}
+
 pub fn load_app_config() -> Result<AppConfig, String> {
     let path = config_path();
-    if !path.exists() {
-        let default = AppConfig::default();
-        save_app_config(&default)?;
-        return Ok(default);
-    }
+    ensure_default_config_file(&path)?;
 
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    toml::from_str(&content).map_err(|e| e.to_string())
+    let mut config: AppConfig = toml::from_str(&content).map_err(|e| e.to_string())?;
+
+    if config.app.default_model.is_empty() {
+        if let Some(model) = provider_config::read_codewhale_default_text_model() {
+            config.app.default_model = model;
+        }
+    }
+
+    Ok(config)
 }
 
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {

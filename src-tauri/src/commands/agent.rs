@@ -16,6 +16,7 @@ use crate::agent::opencode::{
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
 };
+use crate::commands::project_config::sync_project_opencode_from_config;
 use futures_util::StreamExt;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
@@ -554,6 +555,8 @@ pub async fn opencode_start_runtime(
     spawn_if_missing: Option<bool>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<RuntimeStatus, String> {
+    sync_project_opencode_from_config(&workspace)?;
+
     let spawn_if_missing = spawn_if_missing.unwrap_or(true);
     let url = opencode_base_url();
     let client = reqwest::Client::new();
@@ -626,6 +629,8 @@ pub async fn opencode_restart_runtime(
     workspace: String,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<RuntimeStatus, String> {
+    sync_project_opencode_from_config(&workspace)?;
+
     let url = opencode_base_url();
     let client = reqwest::Client::new();
 

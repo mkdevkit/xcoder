@@ -31,7 +31,7 @@ document.documentElement.lang = initialLocale;
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 600;
 export const CHAT_MIN_WIDTH = 280;
-export const CHAT_MAX_WIDTH = 800;
+export const CHAT_MAX_WIDTH = 1200;
 export const TERMINAL_MIN_HEIGHT = 120;
 export const EDITOR_MIN_HEIGHT = 160;
 
@@ -58,7 +58,7 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   locale: initialLocale,
   sidebarWidth: 260,
-  chatWidth: 380,
+  chatWidth: 600,
   terminalVisible: false,
   terminalHeight: 220,
   setLocale: (locale) => {
