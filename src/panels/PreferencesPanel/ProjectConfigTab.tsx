@@ -5,6 +5,7 @@ import { useWorkspaceStore } from "../../stores/workspace";
 import { ConfigPathRow } from "./ConfigPathRow";
 import { ProjectSkillsSection } from "./ProjectSkillsSection";
 import { ProjectMcpSection } from "./ProjectMcpSection";
+import { ProjectRulesSection } from "./ProjectRulesSection";
 import { PermissionActionSelect } from "./PermissionActionSelect";
 import {
   PreferencesSubTabs,
@@ -24,7 +25,7 @@ import type {
   OpencodePermissionsView,
 } from "../../types/providerConfig";
 
-type ProjectSubTab = "permissions" | "skills" | "mcp";
+type ProjectSubTab = "permissions" | "skills" | "mcp" | "rules";
 
 export function ProjectConfigTab() {
   const { t } = useTranslation();
@@ -59,6 +60,7 @@ export function ProjectConfigTab() {
   const showProjectPermissions = isOpencodeProject || isCodewhaleProject;
   const showProjectSkills = showProjectPermissions;
   const showProjectMcp = showProjectSkills;
+  const showProjectRules = showProjectPermissions;
 
   const projectSubTabs = useMemo((): PreferencesSubTabItem<ProjectSubTab>[] => {
     const tabs: PreferencesSubTabItem<ProjectSubTab>[] = [];
@@ -74,8 +76,11 @@ export function ProjectConfigTab() {
     if (showProjectMcp) {
       tabs.push({ id: "mcp", labelKey: "preferences.projectMcp" });
     }
+    if (showProjectRules) {
+      tabs.push({ id: "rules", labelKey: "preferences.projectRules" });
+    }
     return tabs;
-  }, [showProjectMcp, showProjectPermissions, showProjectSkills]);
+  }, [showProjectMcp, showProjectPermissions, showProjectRules, showProjectSkills]);
 
   useEffect(() => {
     if (projectSubTabs.length === 0) return;
@@ -317,6 +322,15 @@ export function ProjectConfigTab() {
               <ProjectMcpSection
                 workspace={rootPath}
                 providerId={projectMcpProviderId}
+                disabled={runtimeBusy}
+                embedded
+              />
+            )}
+
+            {activeSubTab === "rules" && showProjectRules && (
+              <ProjectRulesSection
+                workspace={rootPath}
+                providerId={effectiveProvider as "codewhale" | "opencode"}
                 disabled={runtimeBusy}
                 embedded
               />

@@ -120,6 +120,9 @@ impl Default for AppConfig {
 }
 
 pub mod mcp_config;
+pub mod project_codewhale_config;
+pub mod project_opencode_config;
+pub mod project_rules;
 pub mod provider_config;
 pub mod runtime_args;
 

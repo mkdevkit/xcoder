@@ -4,6 +4,7 @@ pub mod fs;
 pub mod history;
 pub mod mcp;
 pub mod project_config;
+pub mod project_rules;
 pub mod skills;
 pub mod terminal;
 pub mod watch;

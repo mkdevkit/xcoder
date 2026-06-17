@@ -334,99 +334,66 @@ fn parse_permission_action(permission: Option<&Value>, key: &str) -> String {
 }
 
 pub fn project_codewhale_config_path(workspace: &str) -> PathBuf {
-    Path::new(workspace).join(".codewhale").join("config.toml")
-}
-
-fn is_codewhale_project_config_empty(file: &CodewhaleConfigFile) -> bool {
-    file.api_key.is_empty()
-        && file.provider.is_empty()
-        && file.auth_mode.is_empty()
-        && file.default_text_model.is_empty()
-        && file.providers.is_empty()
-        && file.ui.default_mode.is_empty()
-        && file.ui.approval_mode.is_empty()
-        && file.ui.reasoning_effort.is_empty()
+    crate::config::project_codewhale_config::project_codewhale_config_path(workspace)
 }
 
 pub fn sync_project_codewhale_approval(workspace: &str, approval_mode: &str) -> Result<(), String> {
-    let path = project_codewhale_config_path(workspace);
+    use crate::config::project_codewhale_config::update_project_codewhale_config;
+
     let mode = approval_mode.trim();
-
-    if mode.is_empty() && !path.is_file() {
-        return Ok(());
+    if mode.is_empty() {
+        return update_project_codewhale_config(workspace, |table| {
+            if let Some(ui) = table.get_mut("ui").and_then(|value| value.as_table_mut()) {
+                ui.remove("approval_mode");
+                if ui.is_empty() {
+                    table.remove("ui");
+                }
+            }
+            Ok(())
+        });
     }
 
-    let existing_content = if path.is_file() {
-        fs::read_to_string(&path).map_err(|e| e.to_string())?
-    } else {
-        String::new()
-    };
-
-    let mut parsed: CodewhaleConfigFile = if existing_content.trim().is_empty() {
-        CodewhaleConfigFile::default()
-    } else {
-        toml::from_str(&existing_content).unwrap_or_default()
-    };
-
-    parsed.ui.approval_mode = mode.to_string();
-
-    if is_codewhale_project_config_empty(&parsed) {
-        if path.is_file() {
-            fs::remove_file(&path).map_err(|e| e.to_string())?;
+    update_project_codewhale_config(workspace, |table| {
+        let ui = table
+            .entry("ui".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(ui_table) = ui.as_table_mut() {
+            ui_table.insert(
+                "approval_mode".to_string(),
+                toml::Value::String(mode.to_string()),
+            );
         }
-        return Ok(());
-    }
-
-    ensure_parent(&path)?;
-    let content = toml::to_string_pretty(&parsed).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())
+        Ok(())
+    })
 }
 
 pub fn project_opencode_config_path(workspace: &str) -> PathBuf {
-    Path::new(workspace).join("opencode.json")
+    crate::config::project_opencode_config::project_opencode_config_path(workspace)
 }
 
 pub fn sync_project_opencode_permissions(
     workspace: &str,
     permissions: &OpencodePermissionsView,
 ) -> Result<(), String> {
-    let path = project_opencode_config_path(workspace);
+    use crate::config::project_opencode_config::update_project_opencode_config;
+
     let has_any = !permissions.edit.trim().is_empty()
         || !permissions.bash.trim().is_empty()
         || !permissions.read.trim().is_empty()
         || !permissions.webfetch.trim().is_empty();
 
-    if !has_any && !path.is_file() {
-        return Ok(());
+    if !has_any {
+        return update_project_opencode_config(workspace, |obj| {
+            obj.remove("permission");
+            Ok(())
+        });
     }
 
-    let existing_content = if path.is_file() {
-        fs::read_to_string(&path).map_err(|e| e.to_string())?
-    } else {
-        String::new()
-    };
-
-    let mut json: Value = if existing_content.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(&existing_content).unwrap_or_else(|_| json!({}))
-    };
-
-    if let Some(obj) = json.as_object_mut() {
-        if obj.get("$schema").is_none() {
-            obj.insert(
-                "$schema".to_string(),
-                Value::String("https://opencode.ai/config.json".to_string()),
-            );
-        }
-
+    update_project_opencode_config(workspace, |obj| {
         let existing_permission = obj.get("permission").cloned();
         apply_opencode_permissions(obj, permissions, existing_permission.as_ref());
-    }
-
-    ensure_parent(&path)?;
-    let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{content}\n")).map_err(|e| e.to_string())
+        Ok(())
+    })
 }
 
 pub fn apply_opencode_permissions(

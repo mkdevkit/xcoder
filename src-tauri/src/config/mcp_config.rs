@@ -338,7 +338,17 @@ pub fn save_project_opencode_mcp_config(
     workspace: &str,
     servers: &[McpServerEntry],
 ) -> Result<(), String> {
-    save_opencode_mcp_to_path(&resolve_project_opencode_config_path(workspace), servers)
+    use crate::config::project_opencode_config::update_project_opencode_config;
+
+    update_project_opencode_config(workspace, |obj| {
+        let mcp = build_opencode_mcp_json(servers);
+        if mcp.as_object().is_some_and(|map| map.is_empty()) {
+            obj.remove("mcp");
+        } else {
+            obj.insert("mcp".to_string(), mcp);
+        }
+        Ok(())
+    })
 }
 
 fn parse_opencode_mcp_server(id: &str, value: &Value) -> McpServerEntry {

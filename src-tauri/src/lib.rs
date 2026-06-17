@@ -67,6 +67,8 @@ pub fn run() {
             commands::project_config::ensure_project_config_cmd,
             commands::project_config::load_project_config_cmd,
             commands::project_config::save_project_config_cmd,
+            commands::project_rules::load_project_rules_cmd,
+            commands::project_rules::save_project_rules_cmd,
             commands::skills::load_skill_catalog_cmd,
             commands::skills::list_project_skills_cmd,
             commands::skills::install_project_skill_cmd,

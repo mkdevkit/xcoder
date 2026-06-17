@@ -146,11 +146,19 @@ export const preferencesStyles = `
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   .preferences-input,
-  .preferences-select {
+  .preferences-select,
+  .preferences-textarea {
     width: 100%;
     max-width: 480px;
     padding: 8px 10px;
     box-sizing: border-box;
+  }
+  .preferences-textarea {
+    max-width: 720px;
+    min-height: 180px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.5;
   }
   .preferences-input-readonly {
     cursor: default;
