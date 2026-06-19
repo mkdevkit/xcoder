@@ -51,6 +51,14 @@ function remoteHasUserText(messages: ChatMessage[], text: string) {
   );
 }
 
+function remoteHasDisplayableContent(messages: ChatMessage[]) {
+  return messages.some(
+    (msg) =>
+      (msg.role === "assistant" && msg.content.trim().length > 0) ||
+      msg.role === "tool",
+  );
+}
+
 function latestAssistantText(messages: ChatMessage[]) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i].role === "assistant") {
@@ -149,6 +157,9 @@ export function mergeServerMessagesWithLocal(
 
   if (options?.pollOnly) {
     if (localUser && !remoteHasUserText(remote, localUser.content)) {
+      if (remoteHasDisplayableContent(remote)) {
+        return mergeRemoteTailOntoLocal(local, remote);
+      }
       return local;
     }
     return appendStreamingPlaceholder(remote, local);
@@ -157,6 +168,9 @@ export function mergeServerMessagesWithLocal(
   if (localUser) {
     const localText = localUser.content.trim();
     if (localText && !remoteHasUserText(remote, localText)) {
+      if (remoteHasDisplayableContent(remote)) {
+        return mergeRemoteTailOntoLocal(local, remote);
+      }
       return local;
     }
   }
@@ -183,6 +197,23 @@ export function mergeServerMessagesWithLocal(
   }
 
   return merged;
+}
+
+export function turnHasDisplayableContent(messages: ChatMessage[]): boolean {
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+    const message = messages[index];
+    if (!message) continue;
+    if (message.role === "tool") return true;
+    if (message.role === "assistant" && message.content.trim()) return true;
+  }
+  return false;
 }
 
 function appendStreamingPlaceholder(

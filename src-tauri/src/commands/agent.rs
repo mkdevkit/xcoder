@@ -432,8 +432,13 @@ pub async fn codewhale_subscribe_events(
                     break;
                 }
 
-                match stream.next().await {
-                    Some(Ok(chunk)) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(400),
+                    stream.next(),
+                )
+                .await
+                {
+                    Ok(Some(Ok(chunk))) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                         while let Some(pos) = buffer.find("\n\n") {
@@ -462,7 +467,7 @@ pub async fn codewhale_subscribe_events(
                             }
                         }
                     }
-                    Some(Err(error)) => {
+                    Ok(Some(Err(error))) => {
                         let _ = app.emit(
                             "agent-error",
                             serde_json::json!({
@@ -472,7 +477,8 @@ pub async fn codewhale_subscribe_events(
                         );
                         break;
                     }
-                    None => break,
+                    Ok(None) => break,
+                    Err(_) => continue,
                 }
             }
 

@@ -20,6 +20,7 @@ import {
   mapHistoryToChatMessages,
   mergeServerMessagesWithLocal,
   normalizePlanningMessageOrder,
+  turnHasDisplayableContent,
 } from "../utils/chatHistory";
 import { translate } from "../i18n/locales";
 import { t } from "../i18n";
@@ -616,6 +617,24 @@ async function verifyAndCompleteTurn(
       return;
     }
 
+    const slice = getProviderSlice(get, providerId);
+    if (!turnHasDisplayableContent(slice.messages)) {
+      await syncMessagesFromServerOnce(
+        get,
+        set,
+        providerId,
+        true,
+        providerId === "opencode",
+      );
+      const refreshed = getProviderSlice(get, providerId);
+      if (!turnHasDisplayableContent(refreshed.messages)) {
+        resetTurnCompleteStreak(providerId);
+        patchProvider(set, providerId, { streaming: true });
+        ensureStreamingHistorySync(get, set, providerId);
+        return;
+      }
+    }
+
     const streak = (turnCompleteStreak.get(providerId) ?? 0) + 1;
     turnCompleteStreak.set(providerId, streak);
     if (streak < TURN_COMPLETE_CONFIRMATIONS) {
@@ -974,9 +993,18 @@ async function completeTurnForProvider(
     if (before.thread && before.streaming) {
       await syncMessagesFromServer(get, set, resolvedId, true, true);
     }
+    let current = getProviderSlice(get, resolvedId);
+    if (
+      before.thread &&
+      before.streaming &&
+      !turnHasDisplayableContent(current.messages)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      await syncMessagesFromServer(get, set, resolvedId, true, true);
+      current = getProviderSlice(get, resolvedId);
+    }
     stopStreamingHistorySync(resolvedId);
     cancelScheduledCompleteTurn(resolvedId);
-    const current = getProviderSlice(get, resolvedId);
     patchProvider(set, resolvedId, {
       streaming: false,
       messages: finalizeTurnMessages(current.messages),
