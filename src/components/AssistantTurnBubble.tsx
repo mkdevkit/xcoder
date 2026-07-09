@@ -2,6 +2,7 @@ import { memo } from "react";
 import { useChatStore } from "../stores/chat";
 import { getProviderLabel } from "../utils/agentProvider";
 import { MarkdownContent } from "./MarkdownContent";
+import { CollapsibleMessagePart } from "./CollapsibleMessagePart";
 import { ToolActivityPanel } from "./ToolActivityPanel";
 import type { TurnInlinePart } from "../utils/chatTurns";
 import { isLastTextPart } from "../utils/chatTurns";
@@ -60,11 +61,13 @@ function AssistantTurnBubbleInner({
               key={isStreamingPart ? `streaming-${turnId}` : part.id}
               className={`assistant-turn-text ${isStreamingPart ? "is-streaming-slot" : ""}`}
             >
-              {isStreamingPart ? (
-                <pre className="message-streaming">{part.content}</pre>
-              ) : (
-                <MarkdownContent content={part.content} />
-              )}
+              <CollapsibleMessagePart streamActive={isStreamingPart}>
+                {isStreamingPart ? (
+                  <pre className="message-streaming">{part.content}</pre>
+                ) : (
+                  <MarkdownContent content={part.content} />
+                )}
+              </CollapsibleMessagePart>
             </div>
           );
         })}

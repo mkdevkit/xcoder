@@ -3,6 +3,7 @@ import type { ChatMessage } from "../types/agent";
 import { useChatStore } from "../stores/chat";
 import { getProviderLabel } from "../utils/agentProvider";
 import { MarkdownContent } from "./MarkdownContent";
+import { CollapsibleMessagePart } from "./CollapsibleMessagePart";
 import { useTranslation } from "../i18n";
 
 interface MessageBubbleProps {
@@ -38,15 +39,19 @@ function MessageBubbleInner({
         {isUser ? t("message.you") : assistantLabel}
       </div>
       {isUser ? (
-        <pre className="message-content">{message.content || "…"}</pre>
+        <CollapsibleMessagePart className="user-message-part">
+          <pre className="message-content">{message.content || "…"}</pre>
+        </CollapsibleMessagePart>
       ) : (
         <div className="message-content">
           {message.content ? (
-            streamActive ? (
-              <pre className="message-streaming">{message.content}</pre>
-            ) : (
-              <MarkdownContent content={message.content} />
-            )
+            <CollapsibleMessagePart streamActive={streamActive}>
+              {streamActive ? (
+                <pre className="message-streaming">{message.content}</pre>
+              ) : (
+                <MarkdownContent content={message.content} />
+              )}
+            </CollapsibleMessagePart>
           ) : (
             <span className="message-placeholder">…</span>
           )}

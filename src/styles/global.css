@@ -371,6 +371,73 @@ textarea {
   margin-top: 0;
 }
 
+.collapsible-message-part {
+  position: relative;
+}
+
+.collapsible-message-part.is-clamped .collapsible-message-viewport,
+.collapsible-message-part.is-streaming .collapsible-message-viewport {
+  position: relative;
+  overflow: hidden;
+}
+
+.collapsible-message-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.collapsible-message-toggle:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.collapsible-message-toggle-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.collapsible-message-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2.8em;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    var(--bg-elevated) 0%,
+    color-mix(in srgb, var(--bg-elevated) 72%, transparent) 55%,
+    transparent 100%
+  );
+}
+
+.message-bubble.user .collapsible-message-fade {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--accent) 12%, var(--bg-elevated)) 0%,
+    color-mix(in srgb, var(--accent) 8%, transparent) 55%,
+    transparent 100%
+  );
+}
+
+.collapsible-message-body > .message-content {
+  margin: 0;
+}
+
+.collapsible-message-part .message-streaming {
+  margin: 0;
+}
+
 .tool-activity-panel.active {
   border-color: rgba(78, 201, 176, 0.45);
 }
