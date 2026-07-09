@@ -28,6 +28,30 @@ function persistLocale(locale: AppLocale) {
 const initialLocale = readStoredLocale();
 document.documentElement.lang = initialLocale;
 
+const SIDEBAR_VIEW_STORAGE_KEY = "xcoder:sidebar-view";
+
+export type SidebarView = "explorer" | "search";
+
+function readStoredSidebarView(): SidebarView {
+  try {
+    const value = localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
+    if (value === "explorer" || value === "search") {
+      return value;
+    }
+  } catch {
+    // ignore storage failures
+  }
+  return "explorer";
+}
+
+function persistSidebarView(view: SidebarView) {
+  try {
+    localStorage.setItem(SIDEBAR_VIEW_STORAGE_KEY, view);
+  } catch {
+    // ignore storage failures
+  }
+}
+
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 600;
 export const CHAT_MIN_WIDTH = 280;
@@ -41,11 +65,13 @@ function clamp(value: number, min: number, max: number) {
 
 interface SettingsState {
   locale: AppLocale;
+  sidebarView: SidebarView;
   sidebarWidth: number;
   chatWidth: number;
   terminalVisible: boolean;
   terminalHeight: number;
   setLocale: (locale: AppLocale) => void;
+  setSidebarView: (view: SidebarView) => void;
   setSidebarWidth: (width: number) => void;
   setChatWidth: (width: number) => void;
   setTerminalVisible: (visible: boolean) => void;
@@ -57,6 +83,7 @@ interface SettingsState {
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   locale: initialLocale,
+  sidebarView: readStoredSidebarView(),
   sidebarWidth: 260,
   chatWidth: 600,
   terminalVisible: false,
@@ -64,6 +91,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setLocale: (locale) => {
     persistLocale(locale);
     set({ locale });
+  },
+  setSidebarView: (sidebarView) => {
+    persistSidebarView(sidebarView);
+    set({ sidebarView });
   },
   setSidebarWidth: (width) =>
     set({ sidebarWidth: clamp(width, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH) }),

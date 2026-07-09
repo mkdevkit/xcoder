@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import appIcon from "../../src-tauri/icons/icon.png";
 import { MenuBar, type MenuBarMenu } from "../components/MenuBar";
 import { PanelResizeHandle } from "../components/PanelResizeHandle";
-import { FileExplorer } from "../panels/FileExplorer/FileExplorer";
+import { SidebarPanel } from "../panels/SidebarPanel/SidebarPanel";
 import { EditorPanel } from "../panels/EditorPanel/EditorPanel";
 import { ChatPanel } from "../panels/ChatPanel/ChatPanel";
 import { TerminalPanel } from "../panels/TerminalPanel/TerminalPanel";
@@ -165,12 +165,9 @@ export function WorkbenchLayout() {
       </header>
 
       <div className="workbench-body">
-        <aside className="sidebar" style={{ width: sidebarWidth }}>
-          <div className="panel-header">
-            <span className="panel-title">{t("panel.explorer")}</span>
-          </div>
-          <FileExplorer />
-        </aside>
+        <div className="sidebar-host" style={{ width: sidebarWidth }}>
+          <SidebarPanel />
+        </div>
 
         <PanelResizeHandle direction="horizontal" onResizeDelta={resizeSidebarBy} />
 
@@ -346,6 +343,7 @@ export function WorkbenchLayout() {
           min-height: 0;
           display: flex;
         }
+        .sidebar-host,
         .sidebar,
         .chat-sidebar {
           flex-shrink: 0;
@@ -354,9 +352,12 @@ export function WorkbenchLayout() {
           flex-direction: column;
           min-height: 0;
         }
-        .sidebar {
-          background: var(--bg-sidebar);
-          border-right: 1px solid var(--border);
+        .sidebar-host {
+          height: 100%;
+        }
+        .sidebar-host .sidebar {
+          flex: 1;
+          min-height: 0;
         }
         .chat-sidebar {
           border-left: none;

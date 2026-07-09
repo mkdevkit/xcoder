@@ -55,6 +55,8 @@ pub fn run() {
             commands::fs::create_path,
             commands::fs::copy_paths_into_directory,
             commands::fs::move_paths_into_directory,
+            commands::search::search_in_workspace,
+            commands::search::replace_in_workspace,
             commands::config::load_config,
             commands::config::save_config,
             commands::config::get_config_paths,
