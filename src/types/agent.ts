@@ -1,11 +1,11 @@
 import { t } from "../i18n";
 
 export type AgentEvent =
-  | { type: "text_delta"; content: string; partId?: string }
-  | { type: "text_snapshot"; content: string; partId?: string }
-  | { type: "reasoning_delta"; content: string; partId?: string }
-  | { type: "reasoning_snapshot"; content: string; partId?: string }
-  | { type: "tool_call"; name: string; args: unknown; partId?: string }
+  | { type: "text_delta"; content: string; partId?: string; messageId?: string }
+  | { type: "text_snapshot"; content: string; partId?: string; messageId?: string }
+  | { type: "reasoning_delta"; content: string; partId?: string; messageId?: string }
+  | { type: "reasoning_snapshot"; content: string; partId?: string; messageId?: string }
+  | { type: "tool_call"; name: string; args: unknown; partId?: string; messageId?: string }
   | { type: "tool_result"; output: string }
   | { type: "approval_required"; id: string; description: string }
   | { type: "approval_resolved" }
@@ -15,6 +15,7 @@ export type AgentEvent =
   | { type: "session_busy" }
   | { type: "turn_aborted" }
   | { type: "turn_error"; message: string }
+  | { type: "assistant_message"; messageId: string }
   | { type: "raw"; payload: unknown };
 
 export interface ChatMessage {
@@ -106,6 +107,10 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
   const event = String(raw.event ?? raw.kind ?? "");
   const payload = (raw.payload ?? {}) as Record<string, unknown>;
 
+  const messageId = String(payload.messageId ?? payload.message_id ?? "");
+  const messageIdField =
+    messageId && messageId !== "null" ? { messageId } : {};
+
   if (event === "item.delta") {
     const delta = String(payload.delta ?? "");
     const kind = String(payload.kind ?? "agent_message");
@@ -115,12 +120,14 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
         type: "reasoning_delta",
         content: delta,
         ...(partId ? { partId } : {}),
+        ...messageIdField,
       };
     }
     return {
       type: "text_delta",
       content: delta,
       ...(partId ? { partId } : {}),
+      ...messageIdField,
     };
   }
 
@@ -133,12 +140,14 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
         type: "reasoning_snapshot",
         content: text,
         ...(partId ? { partId } : {}),
+        ...messageIdField,
       };
     }
     return {
       type: "text_snapshot",
       content: text,
       ...(partId ? { partId } : {}),
+      ...messageIdField,
     };
   }
 
@@ -185,6 +194,12 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
     return { type: "session_busy" };
   }
 
+  if (event === "assistant.message") {
+    const messageId = String(payload.messageId ?? payload.message_id ?? "");
+    if (!messageId || messageId === "null") return null;
+    return { type: "assistant_message", messageId };
+  }
+
   if (event === "turn.error") {
     return {
       type: "turn_error",
@@ -213,6 +228,7 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
         name: String(payload.name ?? "tool"),
         args: payload.args ?? {},
         ...(partId ? { partId } : {}),
+        ...messageIdField,
       };
     }
     if (kind === "file_change") {

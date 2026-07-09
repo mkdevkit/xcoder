@@ -916,7 +916,7 @@ pub async fn load_session_history(
                     role: "user".to_string(),
                     content,
                     tool_name: None,
-                    turn_id: None,
+                    turn_id: Some(message_id.clone()),
                     timestamp,
                 });
             }
@@ -934,7 +934,7 @@ pub async fn load_session_history(
                     role: "assistant".to_string(),
                     content: format!("错误：{message}"),
                     tool_name: None,
-                    turn_id: None,
+                    turn_id: Some(message_id.clone()),
                     timestamp,
                 });
             }
@@ -961,7 +961,7 @@ pub async fn load_session_history(
                                     role: "assistant".to_string(),
                                     content: text,
                                     tool_name: None,
-                                    turn_id: None,
+                                    turn_id: Some(message_id.clone()),
                                     timestamp: part_time,
                                 });
                             }
@@ -975,7 +975,7 @@ pub async fn load_session_history(
                                     role: "assistant".to_string(),
                                     content: format!("> {text}"),
                                     tool_name: None,
-                                    turn_id: None,
+                                    turn_id: Some(message_id.clone()),
                                     timestamp: part_time,
                                 });
                             }
@@ -1007,7 +1007,7 @@ pub async fn load_session_history(
                             role: "tool".to_string(),
                             content,
                             tool_name: Some(tool_name),
-                            turn_id: None,
+                            turn_id: Some(message_id.clone()),
                             timestamp: part_time,
                         });
                     }
@@ -1415,6 +1415,29 @@ pub async fn delete_session(
     Err(last_error)
 }
 
+fn attach_message_id(payload: &mut Value, properties: &Value, part: Option<&Value>) {
+    let message_id = properties
+        .get("messageID")
+        .or_else(|| properties.get("messageId"))
+        .or_else(|| properties.get("message_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            part.and_then(|value| {
+                value
+                    .get("messageID")
+                    .or_else(|| value.get("messageId"))
+                    .or_else(|| value.get("message_id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+        });
+
+    if let Some(message_id) = message_id {
+        payload["messageId"] = serde_json::json!(message_id);
+    }
+}
+
 pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
     let event_type = raw.get("type").and_then(|v| v.as_str())?;
     let properties = raw.get("properties").unwrap_or(raw);
@@ -1433,6 +1456,14 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
 
     match event_type {
         "message.part.delta" => {
+            if let Some(part) = properties.get("part") {
+                if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    if part.get("role").and_then(|v| v.as_str()) == Some("user") {
+                        return None;
+                    }
+                }
+            }
+
             let delta = properties
                 .get("delta")
                 .and_then(|v| v.as_str())
@@ -1462,6 +1493,11 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             {
                 payload["partId"] = serde_json::json!(part_id);
             }
+            attach_message_id(
+                &mut payload,
+                properties,
+                properties.get("part"),
+            );
 
             Some(serde_json::json!({
                 "event": "item.delta",
@@ -1479,6 +1515,11 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 .filter(|s| !s.is_empty());
 
             if let Some(delta) = delta {
+                if part_type == "text" {
+                    if part.get("role").and_then(|v| v.as_str()) == Some("user") {
+                        return None;
+                    }
+                }
                 let kind = if part_type == "reasoning" {
                     "reasoning"
                 } else {
@@ -1491,6 +1532,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
                     payload["partId"] = serde_json::json!(part_id);
                 }
+                attach_message_id(&mut payload, properties, Some(part));
                 return Some(serde_json::json!({
                     "event": "item.delta",
                     "payload": payload,
@@ -1521,6 +1563,13 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("tool"),
                         "args": state,
+                        "messageId": properties
+                            .get("messageID")
+                            .or_else(|| properties.get("messageId"))
+                            .or_else(|| part.get("messageID"))
+                            .or_else(|| part.get("messageId"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
                     }
                 }));
             }
@@ -1540,6 +1589,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                         if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
                             payload["partId"] = serde_json::json!(part_id);
                         }
+                        attach_message_id(&mut payload, properties, Some(part));
                         return Some(serde_json::json!({
                             "event": "item.text",
                             "payload": payload,
@@ -1558,6 +1608,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                         if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
                             payload["partId"] = serde_json::json!(part_id);
                         }
+                        attach_message_id(&mut payload, properties, Some(part));
                         return Some(serde_json::json!({
                             "event": "item.text",
                             "payload": payload,
@@ -1617,6 +1668,18 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                     .unwrap_or("OpenCode 会话出错");
                 return Some(turn_abort_or_error_event(message));
             }
+            if let Some(message_id) = info
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(serde_json::json!({
+                    "event": "assistant.message",
+                    "payload": {
+                        "messageId": message_id,
+                    }
+                }));
+            }
             None
         }
         "session.next.text.delta" => {
@@ -1636,6 +1699,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             {
                 payload["partId"] = serde_json::json!(part_id);
             }
+            attach_message_id(&mut payload, properties, None);
             Some(serde_json::json!({
                 "event": "item.delta",
                 "payload": payload,
@@ -1658,6 +1722,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             {
                 payload["partId"] = serde_json::json!(part_id);
             }
+            attach_message_id(&mut payload, properties, None);
             Some(serde_json::json!({
                 "event": "item.delta",
                 "payload": payload,
@@ -1680,6 +1745,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             {
                 payload["partId"] = serde_json::json!(part_id);
             }
+            attach_message_id(&mut payload, properties, None);
             Some(serde_json::json!({
                 "event": "item.text",
                 "payload": payload,
@@ -1702,6 +1768,7 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             {
                 payload["partId"] = serde_json::json!(part_id);
             }
+            attach_message_id(&mut payload, properties, None);
             Some(serde_json::json!({
                 "event": "item.text",
                 "payload": payload,
@@ -1721,14 +1788,16 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 .get("input")
                 .cloned()
                 .unwrap_or(Value::Null);
+            let mut payload = serde_json::json!({
+                "kind": "tool_call",
+                "id": call_id,
+                "name": name,
+                "args": input,
+            });
+            attach_message_id(&mut payload, properties, None);
             Some(serde_json::json!({
                 "event": "item.updated",
-                "payload": {
-                    "kind": "tool_call",
-                    "id": call_id,
-                    "name": name,
-                    "args": input,
-                }
+                "payload": payload,
             }))
         }
         "session.next.step.failed" => {

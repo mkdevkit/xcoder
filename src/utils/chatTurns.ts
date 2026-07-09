@@ -4,9 +4,16 @@ export type TurnInlinePart =
   | { type: "text"; id: string; content: string }
   | { type: "tools"; id: string; tools: ChatMessage[] };
 
+export interface AssistantMessageGroup {
+  messageId: string;
+  parts: TurnInlinePart[];
+}
+
 export interface ChatTurn {
   id: string;
   user?: ChatMessage;
+  assistantGroups: AssistantMessageGroup[];
+  /** @deprecated Use assistantGroups. Kept for transitional references. */
   inlineParts: TurnInlinePart[];
   isLast: boolean;
 }
@@ -74,17 +81,118 @@ function pruneEmptyTextParts(parts: TurnInlinePart[]): TurnInlinePart[] {
   });
 }
 
+function messageGroupKey(
+  message: ChatMessage,
+  fallbackKey: string | null,
+  allowFallback: boolean,
+): string {
+  if (message.turnId) return message.turnId;
+  if (allowFallback && fallbackKey) return fallbackKey;
+  return `part:${message.id}`;
+}
+
+function splitTailByParentMessage(tail: ChatMessage[]): ChatMessage[][] {
+  if (tail.length === 0) return [];
+
+  const hasParentMessageIds = tail.some((message) => Boolean(message.turnId));
+  const allowFallback = !hasParentMessageIds;
+
+  const groups: ChatMessage[][] = [];
+  let current: ChatMessage[] = [];
+  let currentKey: string | null = null;
+
+  for (const message of tail) {
+    const key = messageGroupKey(message, currentKey, allowFallback);
+    if (currentKey !== null && key !== currentKey) {
+      groups.push(current);
+      current = [];
+    }
+    currentKey = key;
+    current.push(message);
+  }
+
+  if (current.length > 0) {
+    groups.push(current);
+  }
+
+  return groups;
+}
+
+/** Keep parts of the same OpenCode message together and ordered by first appearance. */
+export function stabilizeTailByParentMessage(tail: ChatMessage[]): ChatMessage[] {
+  if (tail.length <= 1) return tail;
+
+  const hasTurnIds = tail.some((message) => Boolean(message.turnId));
+  if (!hasTurnIds) return tail;
+
+  const originalIndex = new Map(tail.map((message, index) => [message.id, index]));
+  const turnIdFirstIndex = new Map<string, number>();
+
+  tail.forEach((message, index) => {
+    if (!message.turnId || turnIdFirstIndex.has(message.turnId)) return;
+    turnIdFirstIndex.set(message.turnId, index);
+  });
+
+  return [...tail].sort((left, right) => {
+    const leftGroup = left.turnId
+      ? (turnIdFirstIndex.get(left.turnId) ?? Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    const rightGroup = right.turnId
+      ? (turnIdFirstIndex.get(right.turnId) ?? Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+    return (
+      (originalIndex.get(left.id) ?? 0) - (originalIndex.get(right.id) ?? 0)
+    );
+  });
+}
+
+function buildAssistantGroups(tail: ChatMessage[]): AssistantMessageGroup[] {
+  const orderedTail = stabilizeTailByParentMessage(tail);
+  const groups = splitTailByParentMessage(orderedTail);
+  return groups
+    .map((group, index) => ({
+      group,
+      index,
+      order: groupOrderKey(group, tail),
+    }))
+    .sort(
+      (left, right) =>
+        left.order - right.order || left.index - right.index,
+    )
+    .map(({ group }) => ({
+      messageId: messageGroupKey(group[0], null, false),
+      parts: buildInlineParts(group),
+    }))
+    .filter((group) => turnHasAssistantBody(group.parts));
+}
+
+function groupOrderKey(group: ChatMessage[], tail: ChatMessage[]): number {
+  const originalIndex = new Map(tail.map((message, index) => [message.id, index]));
+  let minIndex = Number.MAX_SAFE_INTEGER;
+  for (const message of group) {
+    const index = originalIndex.get(message.id);
+    if (index !== undefined && index < minIndex) {
+      minIndex = index;
+    }
+  }
+  return minIndex;
+}
+
 export function buildChatTurns(messages: ChatMessage[]): ChatTurn[] {
   const turns: ChatTurn[] = [];
   let currentUser: ChatMessage | undefined;
   let currentTail: ChatMessage[] = [];
 
   const pushTurn = (isLast: boolean) => {
-    if (!currentUser && currentTail.length === 0) return;
+    const assistantGroups = buildAssistantGroups(currentTail);
+    const inlineParts = assistantGroups.flatMap((group) => group.parts);
+    if (!currentUser && inlineParts.length === 0) return;
     turns.push({
-      id: currentUser?.id ?? currentTail[0]?.id ?? `turn-${turns.length}`,
+      id: currentUser?.id ?? inlineParts[0]?.id ?? `turn-${turns.length}`,
       user: currentUser,
-      inlineParts: buildInlineParts(currentTail),
+      assistantGroups,
+      inlineParts,
       isLast,
     });
   };

@@ -46,44 +46,18 @@ function mergeTailByServerOrder(
   return merged;
 }
 
-function mergeFullByServerOrder(
+function mergeRemoteAuthoritative(
   local: SessionEntry[],
   remoteEntries: SessionEntry[],
 ): SessionEntry[] {
+  if (remoteEntries.length === 0) return local;
   const localById = new Map(local.map((entry) => [entry.id, entry]));
-  const merged: SessionEntry[] = [];
-  const seen = new Set<string>();
-
-  for (const remoteEntry of remoteEntries) {
-    seen.add(remoteEntry.id);
+  return remoteEntries.map((remoteEntry) => {
     const localEntry = localById.get(remoteEntry.id);
-    merged.push(
-      localEntry ? pickLongerAssistantText(localEntry, remoteEntry) : remoteEntry,
-    );
-  }
-
-  for (const localEntry of local) {
-    if (!seen.has(localEntry.id) && localEntry.content.trim()) {
-      if (localEntry.role === "user") {
-        let insertAt = merged.length;
-        for (let i = 0; i < merged.length; i += 1) {
-          const candidate = merged[i];
-          if (
-            candidate.role !== "user" &&
-            candidate.timestamp >= localEntry.timestamp
-          ) {
-            insertAt = i;
-            break;
-          }
-        }
-        merged.splice(insertAt, 0, localEntry);
-      } else {
-        merged.push(localEntry);
-      }
-    }
-  }
-
-  return merged;
+    return localEntry
+      ? pickLongerAssistantText(localEntry, remoteEntry)
+      : remoteEntry;
+  });
 }
 
 function normalizeWithAnchor(
@@ -108,22 +82,14 @@ export function syncEntriesFromServer(
   const anchorUserId = options?.anchorUserId;
   const baselineEntryIds = options?.baselineEntryIds;
   if (options?.full || !anchorUserId) {
-    return normalizeWithAnchor(
-      mergeFullByServerOrder(local, remote),
-      anchorUserId,
-      baselineEntryIds,
-    );
+    return mergeRemoteAuthoritative(local, remote);
   }
 
   const localUserIndex = local.findIndex(
     (entry) => entry.role === "user" && entry.id === anchorUserId,
   );
   if (localUserIndex < 0) {
-    return normalizeWithAnchor(
-      mergeFullByServerOrder(local, remote),
-      anchorUserId,
-      baselineEntryIds,
-    );
+    return mergeRemoteAuthoritative(local, remote);
   }
 
   const prefix = local.slice(0, localUserIndex + 1);
@@ -153,8 +119,20 @@ export function upsertEntry(
     return [...entries, entry];
   }
   const next = [...entries];
-  next[index] = { ...next[index], ...entry };
+  next[index] = {
+    ...next[index],
+    ...entry,
+    turn_id: entry.turn_id ?? next[index].turn_id,
+  };
   return next;
+}
+
+function withParentMessageId(
+  entry: SessionEntry,
+  parentMessageId?: string | null,
+): SessionEntry {
+  if (!parentMessageId || entry.turn_id) return entry;
+  return { ...entry, turn_id: parentMessageId };
 }
 
 function formatReasoningContent(text: string): string {
@@ -190,37 +168,53 @@ export function normalizeTurnAnchorOrder(
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
-  if (!anchorUserId) return entries;
+  if (!anchorUserId || !baselineEntryIds?.length) return entries;
+
   const userIndex = entries.findIndex(
     (entry) => entry.role === "user" && entry.id === anchorUserId,
   );
-  if (userIndex <= 0) return entries;
+  if (userIndex < 0) return entries;
 
   const user = entries[userIndex];
-  const before = entries.slice(0, userIndex);
-  const after = entries.slice(userIndex + 1);
-  const previousUserIndex = lastUserEntryIndex(before);
-  if (previousUserIndex < 0) return entries;
+  const baseline = new Set(baselineEntryIds);
+  const previousUserIndex = lastUserEntryIndex(entries.slice(0, userIndex));
+  const turnStart = previousUserIndex + 1;
 
-  const baseline = baselineEntryIds ? new Set(baselineEntryIds) : null;
-  const misplaced = before
-    .slice(previousUserIndex + 1)
-    .filter((entry) => {
-      if (entry.role === "user") return false;
-      if (baseline) {
-        return !baseline.has(entry.id);
-      }
-      return entry.timestamp >= user.timestamp;
-    });
-  if (misplaced.length === 0) return entries;
+  const head = entries.slice(0, turnStart);
+  const middle = entries.slice(turnStart, userIndex);
+  const tail = entries.slice(userIndex + 1);
 
-  const keptBefore = before.slice(0, previousUserIndex + 1);
-  const misplacedIds = new Set(misplaced.map((entry) => entry.id));
-  const remainingBefore = before
-    .slice(previousUserIndex + 1)
-    .filter((entry) => !misplacedIds.has(entry.id));
+  const settled = middle.filter((entry) => baseline.has(entry.id));
+  const incoming = middle.filter(
+    (entry) => entry.role !== "user" && !baseline.has(entry.id),
+  );
 
-  return [...keptBefore, ...remainingBefore, user, ...misplaced, ...after];
+  if (incoming.length === 0 && middle.length === settled.length) {
+    return entries;
+  }
+
+  return [...head, ...settled, user, ...incoming, ...tail];
+}
+
+function anchorUserText(
+  entries: SessionEntry[],
+  anchorUserId?: string | null,
+): string | null {
+  if (!anchorUserId) return null;
+  const entry = entries.find(
+    (item) => item.role === "user" && item.id === anchorUserId,
+  );
+  const text = entry?.content.trim();
+  return text || null;
+}
+
+function stripUserEchoText(text: string, userText: string | null): string {
+  if (!userText || !text) return text;
+  if (text === userText) return "";
+  if (text.startsWith(userText)) {
+    return text.slice(userText.length).replace(/^\s+/, "");
+  }
+  return text;
 }
 
 export function appendTextDelta(
@@ -229,8 +223,10 @@ export function appendTextDelta(
   delta: string,
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
+  parentMessageId?: string | null,
 ): SessionEntry[] {
-  if (!partId || !delta) return entries;
+  const cleanedDelta = stripUserEchoText(delta, anchorUserText(entries, anchorUserId));
+  if (!partId || !cleanedDelta) return entries;
   const turnStart = currentTurnStartIndex(entries, anchorUserId);
   const index = entryIndex(entries, partId);
   if (index >= 0) {
@@ -238,21 +234,37 @@ export function appendTextDelta(
       return entries;
     }
     const next = [...entries];
-    next[index] = {
-      ...next[index],
-      content: next[index].content + delta,
-    };
+    next[index] = withParentMessageId(
+      {
+        ...next[index],
+        content: stripUserEchoText(
+          next[index].content + cleanedDelta,
+          anchorUserText(entries, anchorUserId),
+        ),
+      },
+      parentMessageId,
+    );
+    if (!next[index].content) {
+      return normalizeWithAnchor(
+        next.filter((_, entryIndex) => entryIndex !== index),
+        anchorUserId,
+        baselineEntryIds,
+      );
+    }
     return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
   return normalizeWithAnchor(
     [
       ...entries,
-      {
-        id: partId,
-        role: "assistant",
-        content: delta,
-        timestamp: Date.now(),
-      },
+      withParentMessageId(
+        {
+          id: partId,
+          role: "assistant",
+          content: cleanedDelta,
+          timestamp: Date.now(),
+        },
+        parentMessageId,
+      ),
     ],
     anchorUserId,
     baselineEntryIds,
@@ -265,15 +277,26 @@ export function setTextSnapshot(
   text: string,
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
+  parentMessageId?: string | null,
 ): SessionEntry[] {
-  if (!partId || !text.trim()) return entries;
+  const cleanedText = stripUserEchoText(
+    text,
+    anchorUserText(entries, anchorUserId),
+  );
+  if (!partId || !cleanedText.trim()) return entries;
   return normalizeWithAnchor(
-    upsertEntry(entries, {
-      id: partId,
-      role: "assistant",
-      content: text,
-      timestamp: Date.now(),
-    }),
+    upsertEntry(
+      entries,
+      withParentMessageId(
+        {
+          id: partId,
+          role: "assistant",
+          content: cleanedText,
+          timestamp: Date.now(),
+        },
+        parentMessageId,
+      ),
+    ),
     anchorUserId,
     baselineEntryIds,
   );
@@ -285,26 +308,33 @@ export function appendReasoningDelta(
   delta: string,
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
+  parentMessageId?: string | null,
 ): SessionEntry[] {
   if (!partId || !delta) return entries;
   const index = entryIndex(entries, partId);
   if (index >= 0) {
     const next = [...entries];
-    next[index] = {
-      ...next[index],
-      content: mergeReasoningBlock(next[index].content, delta),
-    };
+    next[index] = withParentMessageId(
+      {
+        ...next[index],
+        content: mergeReasoningBlock(next[index].content, delta),
+      },
+      parentMessageId,
+    );
     return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
   return normalizeWithAnchor(
     [
       ...entries,
-      {
-        id: partId,
-        role: "assistant",
-        content: formatReasoningContent(delta),
-        timestamp: Date.now(),
-      },
+      withParentMessageId(
+        {
+          id: partId,
+          role: "assistant",
+          content: formatReasoningContent(delta),
+          timestamp: Date.now(),
+        },
+        parentMessageId,
+      ),
     ],
     anchorUserId,
     baselineEntryIds,
@@ -317,24 +347,28 @@ export function setReasoningSnapshot(
   text: string,
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
+  parentMessageId?: string | null,
 ): SessionEntry[] {
   if (!partId || !text.trim()) return entries;
   const index = entryIndex(entries, partId);
   const content = formatReasoningContent(text);
   if (index >= 0) {
     const next = [...entries];
-    next[index] = { ...next[index], content };
+    next[index] = withParentMessageId({ ...next[index], content }, parentMessageId);
     return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
   return normalizeWithAnchor(
     [
       ...entries,
-      {
-        id: partId,
-        role: "assistant",
-        content,
-        timestamp: Date.now(),
-      },
+      withParentMessageId(
+        {
+          id: partId,
+          role: "assistant",
+          content,
+          timestamp: Date.now(),
+        },
+        parentMessageId,
+      ),
     ],
     anchorUserId,
     baselineEntryIds,
@@ -348,16 +382,23 @@ export function upsertToolEntry(
   content: string,
   anchorUserId?: string | null,
   baselineEntryIds?: readonly string[] | null,
+  parentMessageId?: string | null,
 ): SessionEntry[] {
   if (!callId) return entries;
   return normalizeWithAnchor(
-    upsertEntry(entries, {
-      id: callId,
-      role: "tool",
-      content,
-      tool_name: toolName,
-      timestamp: Date.now(),
-    }),
+    upsertEntry(
+      entries,
+      withParentMessageId(
+        {
+          id: callId,
+          role: "tool",
+          content,
+          tool_name: toolName,
+          timestamp: Date.now(),
+        },
+        parentMessageId,
+      ),
+    ),
     anchorUserId,
     baselineEntryIds,
   );

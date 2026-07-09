@@ -244,6 +244,37 @@ async function clearRememberedSession(providerId: string, workspace: string) {
   await writeLocalActiveSessionId(workspace, providerId, null);
 }
 
+function rememberAssistantMessageId(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+  messageId?: string,
+) {
+  if (!messageId) return;
+  const slice = getProviderSlice(get, providerId);
+  if (
+    !slice.activeTurn ||
+    slice.activeTurn.assistantMessageId === messageId
+  ) {
+    return;
+  }
+  patchActiveTurn(set, providerId, {
+    ...slice.activeTurn,
+    assistantMessageId: messageId,
+  });
+}
+
+function parentMessageIdForEvent(
+  slice: ProviderChatSlice,
+  messageId?: string,
+) {
+  return messageId ?? slice.activeTurn?.assistantMessageId ?? null;
+}
+
 function patchProvider(
   set: (
     partial:
@@ -2576,6 +2607,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
               messages: appendTextDelta(
                 slice.messages,
@@ -2583,6 +2615,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.content,
                 slice.activeTurn?.anchorId,
                 slice.activeTurn?.baselineEntryIds,
+                parentMessageIdForEvent(slice, mapped.messageId),
               ),
             }));
             ensureStreamingHistorySync(get, set, resolvedId);
@@ -2590,6 +2623,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
               messages: setTextSnapshot(
                 slice.messages,
@@ -2597,12 +2631,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.content,
                 slice.activeTurn?.anchorId,
                 slice.activeTurn?.baselineEntryIds,
+                parentMessageIdForEvent(slice, mapped.messageId),
               ),
             }));
           } else if (mapped.type === "reasoning_delta") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
               messages: appendReasoningDelta(
                 slice.messages,
@@ -2610,12 +2646,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.content,
                 slice.activeTurn?.anchorId,
                 slice.activeTurn?.baselineEntryIds,
+                parentMessageIdForEvent(slice, mapped.messageId),
               ),
             }));
           } else if (mapped.type === "reasoning_snapshot") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
               messages: setReasoningSnapshot(
                 slice.messages,
@@ -2623,6 +2661,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.content,
                 slice.activeTurn?.anchorId,
                 slice.activeTurn?.baselineEntryIds,
+                parentMessageIdForEvent(slice, mapped.messageId),
               ),
             }));
           } else if (mapped.type === "tool_call") {
@@ -2634,6 +2673,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => {
               const toolContent =
                 typeof mapped.args === "string"
@@ -2647,9 +2687,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   toolContent,
                   slice.activeTurn?.anchorId,
                   slice.activeTurn?.baselineEntryIds,
+                  parentMessageIdForEvent(slice, mapped.messageId),
                 ),
               };
             });
+          } else if (mapped.type === "assistant_message") {
+            if (!isActiveStreamingTurn()) return;
+            rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
           } else if (mapped.type === "file_change") {
             const workspace = useWorkspaceStore.getState();
             if (mapped.path) {

@@ -9,6 +9,8 @@ export interface ActiveTurn {
   localUserMessageId: string;
   /** Entry ids that existed before the current user message was sent. */
   baselineEntryIds?: string[];
+  /** OpenCode assistant message id for the active response. */
+  assistantMessageId?: string | null;
 }
 
 export function createActiveTurn(

@@ -359,7 +359,8 @@ textarea {
   gap: 0;
 }
 
-.assistant-turn-text + .assistant-turn-text {
+.assistant-turn-text + .assistant-turn-text,
+.assistant-turn-content > .message-bubble.assistant + .message-bubble.assistant {
   margin-top: 10px;
 }
 
@@ -369,6 +370,10 @@ textarea {
 
 .assistant-turn-text .markdown-content > :first-child {
   margin-top: 0;
+}
+
+.chat-turn > .message-bubble.assistant + .message-bubble.assistant {
+  margin-top: 10px;
 }
 
 .collapsible-message-part {

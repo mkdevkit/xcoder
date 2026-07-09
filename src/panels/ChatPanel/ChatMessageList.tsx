@@ -56,21 +56,30 @@ export function ChatMessageList() {
       {chatTurns.map((turn) => {
         const isAnchorTurn =
           generating && turn.user?.id === activeTurn?.anchorId;
-        const streamActive = isAnchorTurn || (generating && turn.isLast && !activeTurn?.anchorId);
-        const hasTools = turn.inlineParts.some((part) => part.type === "tools");
-        const hasAssistantBody = turnHasAssistantBody(turn.inlineParts);
+        const streamActive =
+          isAnchorTurn ||
+          (generating && turn.isLast && !activeTurn?.anchorId);
 
         return (
           <div key={turn.id} className="chat-turn">
             {turn.user && <MessageBubble message={turn.user} />}
-            {(hasAssistantBody || hasTools) && (
-              <AssistantTurnBubble
-                turnId={turn.id}
-                parts={turn.inlineParts}
-                streamActive={streamActive}
-                toolsActive={streamActive && hasTools}
-              />
-            )}
+            {turn.assistantGroups.map((group, groupIndex) => {
+              const isLastGroup = groupIndex === turn.assistantGroups.length - 1;
+              const groupStreamActive = streamActive && isLastGroup;
+              const hasTools = group.parts.some((part) => part.type === "tools");
+              const hasAssistantBody = turnHasAssistantBody(group.parts);
+              if (!hasAssistantBody && !hasTools) return null;
+
+              return (
+                <AssistantTurnBubble
+                  key={`${group.messageId}:${groupIndex}`}
+                  turnId={group.messageId}
+                  parts={group.parts}
+                  streamActive={groupStreamActive}
+                  toolsActive={groupStreamActive && hasTools}
+                />
+              );
+            })}
           </div>
         );
       })}
