@@ -1082,6 +1082,9 @@ async function syncMessagesFromServerOnce(
         !forceFullHistory;
       let merged = syncEntriesFromServer(latest.messages, history, {
         anchorUserId: useAnchor ? latest.activeTurn?.anchorId ?? null : null,
+        baselineEntryIds: useAnchor
+          ? latest.activeTurn?.baselineEntryIds
+          : null,
         full: !useAnchor || forceFullHistory,
       });
       if (
@@ -2348,7 +2351,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     patchActiveTurn(
       set,
       providerId,
-      createActiveTurn(userMsg.id, "message_id", userMsg.id),
+      createActiveTurn(
+        userMsg.id,
+        "message_id",
+        userMsg.id,
+        "streaming",
+        current.messages.map((message) => message.id),
+      ),
       {
         messages: [...current.messages, userMsg],
         error: null,
@@ -2573,6 +2582,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.partId!,
                 mapped.content,
                 slice.activeTurn?.anchorId,
+                slice.activeTurn?.baselineEntryIds,
               ),
             }));
             ensureStreamingHistorySync(get, set, resolvedId);
@@ -2586,6 +2596,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.partId!,
                 mapped.content,
                 slice.activeTurn?.anchorId,
+                slice.activeTurn?.baselineEntryIds,
               ),
             }));
           } else if (mapped.type === "reasoning_delta") {
@@ -2598,6 +2609,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.partId!,
                 mapped.content,
                 slice.activeTurn?.anchorId,
+                slice.activeTurn?.baselineEntryIds,
               ),
             }));
           } else if (mapped.type === "reasoning_snapshot") {
@@ -2610,6 +2622,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mapped.partId!,
                 mapped.content,
                 slice.activeTurn?.anchorId,
+                slice.activeTurn?.baselineEntryIds,
               ),
             }));
           } else if (mapped.type === "tool_call") {
@@ -2633,6 +2646,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   mapped.name,
                   toolContent,
                   slice.activeTurn?.anchorId,
+                  slice.activeTurn?.baselineEntryIds,
                 ),
               };
             });
@@ -2848,6 +2862,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
         ]);
         const synced = syncEntriesFromServer(slice.messages, poll.messages, {
           anchorUserId: slice.activeTurn?.anchorId ?? null,
+          baselineEntryIds: slice.activeTurn?.baselineEntryIds,
           full: !slice.streaming,
         });
         const projected = projectEntriesToChatMessages(synced);

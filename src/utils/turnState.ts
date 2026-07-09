@@ -7,6 +7,8 @@ export interface ActiveTurn {
   anchorId: string;
   anchorKind: TurnAnchorKind;
   localUserMessageId: string;
+  /** Entry ids that existed before the current user message was sent. */
+  baselineEntryIds?: string[];
 }
 
 export function createActiveTurn(
@@ -14,12 +16,14 @@ export function createActiveTurn(
   anchorKind: TurnAnchorKind,
   localUserMessageId: string,
   phase: TurnPhase = "streaming",
+  baselineEntryIds?: string[],
 ): ActiveTurn {
   return {
     phase,
     anchorId,
     anchorKind,
     localUserMessageId,
+    baselineEntryIds,
   };
 }
 

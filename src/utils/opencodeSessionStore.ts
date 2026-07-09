@@ -86,18 +86,32 @@ function mergeFullByServerOrder(
   return merged;
 }
 
+function normalizeWithAnchor(
+  entries: SessionEntry[],
+  anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
+): SessionEntry[] {
+  return normalizeTurnAnchorOrder(entries, anchorUserId, baselineEntryIds);
+}
+
 export function syncEntriesFromServer(
   local: SessionEntry[],
   remote: SessionEntry[],
-  options?: { anchorUserId?: string | null; full?: boolean },
+  options?: {
+    anchorUserId?: string | null;
+    baselineEntryIds?: readonly string[] | null;
+    full?: boolean;
+  },
 ): SessionEntry[] {
   if (remote.length === 0) return local;
 
   const anchorUserId = options?.anchorUserId;
+  const baselineEntryIds = options?.baselineEntryIds;
   if (options?.full || !anchorUserId) {
-    return normalizeTurnAnchorOrder(
+    return normalizeWithAnchor(
       mergeFullByServerOrder(local, remote),
       anchorUserId,
+      baselineEntryIds,
     );
   }
 
@@ -105,9 +119,10 @@ export function syncEntriesFromServer(
     (entry) => entry.role === "user" && entry.id === anchorUserId,
   );
   if (localUserIndex < 0) {
-    return normalizeTurnAnchorOrder(
+    return normalizeWithAnchor(
       mergeFullByServerOrder(local, remote),
       anchorUserId,
+      baselineEntryIds,
     );
   }
 
@@ -122,9 +137,10 @@ export function syncEntriesFromServer(
       ? remote.slice(remoteUserIndex + 1)
       : remote.filter((entry) => !prefixIds.has(entry.id));
 
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     [...prefix, ...mergeTailByServerOrder(localTail, remoteTail)],
     anchorUserId,
+    baselineEntryIds,
   );
 }
 
@@ -172,6 +188,7 @@ function currentTurnStartIndex(
 export function normalizeTurnAnchorOrder(
   entries: SessionEntry[],
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!anchorUserId) return entries;
   const userIndex = entries.findIndex(
@@ -185,12 +202,16 @@ export function normalizeTurnAnchorOrder(
   const previousUserIndex = lastUserEntryIndex(before);
   if (previousUserIndex < 0) return entries;
 
+  const baseline = baselineEntryIds ? new Set(baselineEntryIds) : null;
   const misplaced = before
     .slice(previousUserIndex + 1)
-    .filter(
-      (entry) =>
-        entry.role !== "user" && entry.timestamp >= user.timestamp,
-    );
+    .filter((entry) => {
+      if (entry.role === "user") return false;
+      if (baseline) {
+        return !baseline.has(entry.id);
+      }
+      return entry.timestamp >= user.timestamp;
+    });
   if (misplaced.length === 0) return entries;
 
   const keptBefore = before.slice(0, previousUserIndex + 1);
@@ -207,6 +228,7 @@ export function appendTextDelta(
   partId: string,
   delta: string,
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!partId || !delta) return entries;
   const turnStart = currentTurnStartIndex(entries, anchorUserId);
@@ -220,9 +242,9 @@ export function appendTextDelta(
       ...next[index],
       content: next[index].content + delta,
     };
-    return normalizeTurnAnchorOrder(next, anchorUserId);
+    return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     [
       ...entries,
       {
@@ -233,6 +255,7 @@ export function appendTextDelta(
       },
     ],
     anchorUserId,
+    baselineEntryIds,
   );
 }
 
@@ -241,9 +264,10 @@ export function setTextSnapshot(
   partId: string,
   text: string,
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!partId || !text.trim()) return entries;
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     upsertEntry(entries, {
       id: partId,
       role: "assistant",
@@ -251,6 +275,7 @@ export function setTextSnapshot(
       timestamp: Date.now(),
     }),
     anchorUserId,
+    baselineEntryIds,
   );
 }
 
@@ -259,6 +284,7 @@ export function appendReasoningDelta(
   partId: string,
   delta: string,
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!partId || !delta) return entries;
   const index = entryIndex(entries, partId);
@@ -268,9 +294,9 @@ export function appendReasoningDelta(
       ...next[index],
       content: mergeReasoningBlock(next[index].content, delta),
     };
-    return normalizeTurnAnchorOrder(next, anchorUserId);
+    return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     [
       ...entries,
       {
@@ -281,6 +307,7 @@ export function appendReasoningDelta(
       },
     ],
     anchorUserId,
+    baselineEntryIds,
   );
 }
 
@@ -289,6 +316,7 @@ export function setReasoningSnapshot(
   partId: string,
   text: string,
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!partId || !text.trim()) return entries;
   const index = entryIndex(entries, partId);
@@ -296,9 +324,9 @@ export function setReasoningSnapshot(
   if (index >= 0) {
     const next = [...entries];
     next[index] = { ...next[index], content };
-    return normalizeTurnAnchorOrder(next, anchorUserId);
+    return normalizeWithAnchor(next, anchorUserId, baselineEntryIds);
   }
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     [
       ...entries,
       {
@@ -309,6 +337,7 @@ export function setReasoningSnapshot(
       },
     ],
     anchorUserId,
+    baselineEntryIds,
   );
 }
 
@@ -318,9 +347,10 @@ export function upsertToolEntry(
   toolName: string,
   content: string,
   anchorUserId?: string | null,
+  baselineEntryIds?: readonly string[] | null,
 ): SessionEntry[] {
   if (!callId) return entries;
-  return normalizeTurnAnchorOrder(
+  return normalizeWithAnchor(
     upsertEntry(entries, {
       id: callId,
       role: "tool",
@@ -329,6 +359,7 @@ export function upsertToolEntry(
       timestamp: Date.now(),
     }),
     anchorUserId,
+    baselineEntryIds,
   );
 }
 

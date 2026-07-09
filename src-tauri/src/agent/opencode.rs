@@ -951,6 +951,9 @@ pub async fn load_session_history(
 
                 match part_type {
                     "text" => {
+                        if part.get("role").and_then(|v| v.as_str()) == Some("user") {
+                            continue;
+                        }
                         if let Some(text) = part_text(part) {
                             if !text.is_empty() {
                                 batch.push(HistoryMessage {

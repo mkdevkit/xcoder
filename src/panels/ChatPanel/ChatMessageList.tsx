@@ -21,6 +21,7 @@ export function ChatMessageList() {
     connectedIntent,
     runtime,
     thread,
+    activeTurn,
   } = useActiveProviderChat();
   const approve = useChatStore((state) => state.approve);
   const { t } = useTranslation();
@@ -53,7 +54,9 @@ export function ChatMessageList() {
         </div>
       )}
       {chatTurns.map((turn) => {
-        const streamActive = generating && turn.isLast;
+        const isAnchorTurn =
+          generating && turn.user?.id === activeTurn?.anchorId;
+        const streamActive = isAnchorTurn || (generating && turn.isLast && !activeTurn?.anchorId);
         const hasTools = turn.inlineParts.some((part) => part.type === "tools");
         const hasAssistantBody = turnHasAssistantBody(turn.inlineParts);
 
