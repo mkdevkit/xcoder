@@ -24,7 +24,7 @@ export function normalizePlanningMessageOrder(
 }
 
 export function mapHistoryToChatMessages(history: HistoryMessage[]): ChatMessage[] {
-  const messages = history.map((item) => ({
+  const messages = stabilizeTurnErrorOrder(history).map((item) => ({
     id: item.id,
     role: item.role as ChatMessage["role"],
     content: item.content,
@@ -234,52 +234,174 @@ function mergeCurrentTurnFromRemote(
   return normalizePlanningMessageOrder([...prefix, ...mergedTurnTail]);
 }
 
+function lastHistoryUserIndex(messages: HistoryMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") return i;
+  }
+  return -1;
+}
+
+export function findTurnEndIndex(
+  messages: HistoryMessage[],
+  userIndex: number,
+): number {
+  for (let i = userIndex + 1; i < messages.length; i += 1) {
+    if (messages[i]?.role === "user") return i;
+  }
+  return messages.length;
+}
+
+function findAnchorUserIndex(
+  messages: HistoryMessage[],
+  anchorUserId?: string | null,
+): number {
+  if (anchorUserId) {
+    const anchored = messages.findIndex(
+      (entry) => entry.role === "user" && entry.id === anchorUserId,
+    );
+    if (anchored >= 0) return anchored;
+  }
+  return lastHistoryUserIndex(messages);
+}
+
+function isAbortOrCancelContent(content: string): boolean {
+  const trimmed = content.trim();
+  const lower = trimmed.toLowerCase();
+  return (
+    trimmed.includes("错误：") ||
+    trimmed.includes("已取消") ||
+    lower.includes("aborted") ||
+    lower.includes("cancelled") ||
+    lower.includes("canceled")
+  );
+}
+
+function turnTailHasAbortNotice(
+  messages: HistoryMessage[],
+  userIndex: number,
+): boolean {
+  const turnEnd = findTurnEndIndex(messages, userIndex);
+  for (let i = userIndex + 1; i < turnEnd; i += 1) {
+    const entry = messages[i];
+    if (entry?.role === "assistant" && isAbortOrCancelContent(entry.content)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function ensureTurnErrorNotice(
+  messages: HistoryMessage[],
+  notice: string,
+  options?: {
+    anchorUserId?: string | null;
+    assistantMessageId?: string | null;
+    formatAsError?: boolean;
+  },
+): HistoryMessage[] {
+  const trimmedNotice = notice.trim();
+  if (!trimmedNotice) return messages;
+
+  const userIndex = findAnchorUserIndex(messages, options?.anchorUserId);
+  if (userIndex < 0) return messages;
+  if (turnTailHasAbortNotice(messages, userIndex)) return messages;
+
+  const content =
+    options?.formatAsError && !trimmedNotice.startsWith("错误：")
+      ? `错误：${trimmedNotice}`
+      : trimmedNotice;
+
+  const anchorUser = messages[userIndex];
+  const turnId = options?.assistantMessageId ?? undefined;
+  const insertIndex = findTurnEndIndex(messages, userIndex);
+  const entry: HistoryMessage = {
+    id: turnId
+      ? `${turnId}-error-local`
+      : `turn-error-${anchorUser.id}-${Date.now()}`,
+    role: "assistant",
+    content,
+    timestamp: Date.now(),
+    turn_id: turnId,
+  };
+
+  return [
+    ...messages.slice(0, insertIndex),
+    entry,
+    ...messages.slice(insertIndex),
+  ];
+}
+
+function findUserTurnForAssistantMessageId(
+  messages: HistoryMessage[],
+  assistantMessageId: string,
+): number {
+  for (let i = 0; i < messages.length; i += 1) {
+    const entry = messages[i];
+    if (
+      entry.turn_id === assistantMessageId ||
+      entry.id === assistantMessageId ||
+      entry.id === `${assistantMessageId}-error` ||
+      entry.id.startsWith(`${assistantMessageId}-`)
+    ) {
+      for (let j = i; j >= 0; j -= 1) {
+        if (messages[j]?.role === "user") return j;
+      }
+      return -1;
+    }
+  }
+  return -1;
+}
+
+/** Move assistant error entries back into the turn they belong to. */
+export function stabilizeTurnErrorOrder(
+  messages: HistoryMessage[],
+): HistoryMessage[] {
+  const result = [...messages];
+  const relocations: Array<{ id: string; insertIndex: number }> = [];
+
+  for (let i = 0; i < result.length; i += 1) {
+    const entry = result[i];
+    if (entry.role !== "assistant" || !entry.turn_id) continue;
+    const isErrorEntry =
+      entry.id.endsWith("-error") ||
+      entry.id.endsWith("-error-local") ||
+      entry.content.trim().startsWith("错误：");
+    if (!isErrorEntry) continue;
+
+    const userIndex = findUserTurnForAssistantMessageId(result, entry.turn_id);
+    if (userIndex < 0) continue;
+
+    const turnEnd = findTurnEndIndex(result, userIndex);
+    if (i < turnEnd) continue;
+    relocations.push({ id: entry.id, insertIndex: turnEnd });
+  }
+
+  if (relocations.length === 0) return messages;
+
+  for (const { id, insertIndex } of relocations.sort(
+    (left, right) => right.insertIndex - left.insertIndex,
+  )) {
+    const currentIndex = result.findIndex((entry) => entry.id === id);
+    if (currentIndex < 0) continue;
+    const [moved] = result.splice(currentIndex, 1);
+    const adjustedInsert =
+      insertIndex > currentIndex ? insertIndex - 1 : insertIndex;
+    result.splice(adjustedInsert, 0, moved);
+  }
+
+  return result;
+}
+
 export function markCurrentTurnCancelled(
   messages: HistoryMessage[],
   notice: string,
+  options?: {
+    anchorUserId?: string | null;
+    assistantMessageId?: string | null;
+    formatAsError?: boolean;
+  },
 ): HistoryMessage[] {
-  const userIndex = lastUserIndex(messages);
-  if (userIndex < 0) return messages;
-
-  const trimmedNotice = notice.trim();
-  let targetIndex = -1;
-  for (let i = messages.length - 1; i > userIndex; i -= 1) {
-    if (messages[i].role === "assistant") {
-      targetIndex = i;
-      break;
-    }
-  }
-
-  if (targetIndex < 0) {
-    return [
-      ...messages,
-      {
-        id: `cancelled-${Date.now()}`,
-        role: "assistant",
-        content: trimmedNotice,
-        timestamp: Date.now(),
-      },
-    ];
-  }
-
-  const target = messages[targetIndex];
-  const content = target.content.trim();
-  if (
-    content === trimmedNotice ||
-    content.endsWith(trimmedNotice) ||
-    content.includes("已取消") ||
-    content.toLowerCase().includes("cancelled") ||
-    content.toLowerCase().includes("aborted")
-  ) {
-    return messages;
-  }
-
-  const nextContent = content ? `${content}\n\n${trimmedNotice}` : trimmedNotice;
-  return [
-    ...messages.slice(0, targetIndex),
-    { ...target, content: nextContent },
-    ...messages.slice(targetIndex + 1),
-  ];
+  return ensureTurnErrorNotice(messages, notice, options);
 }
 
 export function mergeServerMessagesWithLocal(

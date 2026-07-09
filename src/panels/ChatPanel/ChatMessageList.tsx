@@ -6,10 +6,12 @@ import { StreamingIndicator } from "../../components/StreamingIndicator";
 import { useChatStore, useActiveProviderChat } from "../../stores/chat";
 import { useTranslation } from "../../i18n";
 import { getProviderLabel } from "../../utils/agentProvider";
+import type { TranslationKey } from "../../i18n/types";
 import {
   buildChatTurns,
   turnHasAssistantBody,
 } from "../../utils/chatTurns";
+import { currentChatTurnHasRunningTools } from "../../utils/chatProjection";
 
 export function ChatMessageList() {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -28,6 +30,13 @@ export function ChatMessageList() {
   const providerLabel = getProviderLabel(providerId);
 
   const chatTurns = useMemo(() => buildChatTurns(messages), [messages]);
+  const runningTools = useMemo(
+    () => generating && currentChatTurnHasRunningTools(messages),
+    [generating, messages],
+  );
+  const statusLabelKey: TranslationKey = runningTools
+    ? "chat.runningTools"
+    : "chat.generating";
 
   const scrollKey = useMemo(() => {
     const last = messages[messages.length - 1];
@@ -76,14 +85,14 @@ export function ChatMessageList() {
                   turnId={group.messageId}
                   parts={group.parts}
                   streamActive={groupStreamActive}
-                  toolsActive={groupStreamActive && hasTools}
+                  toolsActive={generating && turn.isLast && isLastGroup && hasTools}
                 />
               );
             })}
           </div>
         );
       })}
-      {generating && <StreamingIndicator />}
+      {generating && <StreamingIndicator labelKey={statusLabelKey} />}
       {pendingApproval && (
         <ApprovalGate
           description={pendingApproval.description}

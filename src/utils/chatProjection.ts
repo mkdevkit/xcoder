@@ -1,5 +1,6 @@
 import type { ChatMessage, HistoryMessage } from "../types/agent";
-import { normalizePlanningMessageOrder } from "./chatHistory";
+import { normalizePlanningMessageOrder, stabilizeTurnErrorOrder } from "./chatHistory";
+import { isToolRunning } from "./toolMessage";
 
 export function mapEntryToChatMessage(entry: HistoryMessage): ChatMessage {
   return {
@@ -21,7 +22,9 @@ export function projectEntriesToChatMessages(
   const normalized = entries
     .map((entry) => normalizeStoredEntry(entry))
     .filter((entry): entry is HistoryMessage => entry !== null);
-  return normalizePlanningMessageOrder(normalized.map(mapEntryToChatMessage));
+  return normalizePlanningMessageOrder(
+    stabilizeTurnErrorOrder(normalized).map(mapEntryToChatMessage),
+  );
 }
 
 function normalizeStoredEntry(entry: HistoryMessage): HistoryMessage | null {
@@ -58,6 +61,78 @@ export function lastUserEntryIndex(entries: HistoryMessage[]): number {
     }
   }
   return -1;
+}
+
+export function currentTurnHasRunningTools(
+  entries: HistoryMessage[],
+): boolean {
+  const lastUserIndex = lastUserEntryIndex(entries);
+  for (let index = entries.length - 1; index > lastUserIndex; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role === "tool" && isToolRunning(entry.content)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function currentChatTurnHasRunningTools(
+  messages: ChatMessage[],
+): boolean {
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "tool" && isToolRunning(message.content)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** True when a follow-up full sync did not add or grow turn entries. */
+export function isTurnHistoryStable(
+  before: HistoryMessage[],
+  after: HistoryMessage[],
+): boolean {
+  if (after.length > before.length) return false;
+  const beforeById = new Map(before.map((entry) => [entry.id, entry]));
+  for (const entry of after) {
+    const previous = beforeById.get(entry.id);
+    if (!previous) return false;
+    if (
+      entry.role === "assistant" &&
+      entry.content.length > previous.content.length
+    ) {
+      return false;
+    }
+    if (entry.role === "tool" && entry.content !== previous.content) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Local turn tail still has entries the latest authoritative sync dropped. */
+export function hasUnsyncedLocalTurnTail(
+  localBefore: HistoryMessage[],
+  syncedAfter: HistoryMessage[],
+): boolean {
+  const userIndex = lastUserEntryIndex(localBefore);
+  const syncedIds = new Set(syncedAfter.map((entry) => entry.id));
+  for (let index = userIndex + 1; index < localBefore.length; index += 1) {
+    const entry = localBefore[index];
+    if (!entry || syncedIds.has(entry.id)) continue;
+    if (entry.role === "tool" || entry.content.trim()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function finalizeTurnEntries(entries: HistoryMessage[]): HistoryMessage[] {

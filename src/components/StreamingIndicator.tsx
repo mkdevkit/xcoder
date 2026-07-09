@@ -1,12 +1,19 @@
 import { useTranslation } from "../i18n";
+import type { TranslationKey } from "../i18n/types";
 
-export function StreamingIndicator() {
+interface StreamingIndicatorProps {
+  labelKey?: TranslationKey;
+}
+
+export function StreamingIndicator({
+  labelKey = "chat.generating",
+}: StreamingIndicatorProps) {
   const { t } = useTranslation();
 
   return (
     <div className="chat-streaming-indicator" role="status" aria-live="polite">
       <span className="chat-streaming-spinner" aria-hidden />
-      <span className="chat-streaming-text">{t("chat.generating")}</span>
+      <span className="chat-streaming-text">{t(labelKey)}</span>
       <style>{`
         .chat-streaming-indicator {
           display: flex;

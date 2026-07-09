@@ -16,8 +16,11 @@ import type {
 } from "../types/agent";
 import { mapRuntimeEvent } from "../types/agent";
 import {
+  currentTurnHasRunningTools,
   historyHasDisplayableEntries,
   finalizeTurnEntries,
+  isTurnHistoryStable,
+  hasUnsyncedLocalTurnTail,
   projectEntriesToChatMessages,
   sessionTitleFromEntries,
   turnHasDisplayableEntries,
@@ -375,16 +378,83 @@ function clearTurnIdleSignal(providerId: string) {
   turnIdleSignals.delete(providerId);
 }
 
-function shouldForceCompleteDespiteBusy(
+async function deferTurnCompleteWhileToolsRunning(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
   providerId: string,
-  messages: HistoryMessage[],
-  pending: boolean,
-): boolean {
-  if (pending || !turnHasDisplayableEntries(messages)) {
+  options?: { refresh?: boolean },
+): Promise<boolean> {
+  const slice = getProviderSlice(get, providerId);
+  if (!currentTurnHasRunningTools(slice.messages)) {
     return false;
   }
-  const idleAt = turnIdleSignals.get(providerId);
-  return idleAt !== undefined && Date.now() - idleAt < 15_000;
+  if (options?.refresh) {
+    await syncMessagesFromServerOnce(get, set, providerId, true, false);
+    const refreshed = getProviderSlice(get, providerId);
+    if (!currentTurnHasRunningTools(refreshed.messages)) {
+      return false;
+    }
+  }
+  ensureStreamingHistorySync(get, set, providerId);
+  return true;
+}
+
+async function prepareOpencodeTurnForComplete(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+): Promise<boolean> {
+  const state = await fetchTurnCompleteState(get, providerId);
+  if (state.pending || state.busy || !state.turn_complete) {
+    return false;
+  }
+
+  if (
+    await deferTurnCompleteWhileToolsRunning(get, set, providerId, {
+      refresh: true,
+    })
+  ) {
+    return false;
+  }
+
+  let previous = getProviderSlice(get, providerId).messages;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const localBefore = getProviderSlice(get, providerId).messages;
+    await syncMessagesFromServerOnce(get, set, providerId, true, true);
+    const latestState = await fetchTurnCompleteState(get, providerId);
+    if (latestState.pending || latestState.busy || !latestState.turn_complete) {
+      return false;
+    }
+    const current = getProviderSlice(get, providerId).messages;
+    if (currentTurnHasRunningTools(current)) {
+      return false;
+    }
+    if (hasUnsyncedLocalTurnTail(localBefore, current)) {
+      return false;
+    }
+    if (attempt > 0 && isTurnHistoryStable(previous, current)) {
+      return true;
+    }
+    previous = current;
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    }
+  }
+
+  return !currentTurnHasRunningTools(getProviderSlice(get, providerId).messages);
+}
+
+function clearOpencodeSseActivity(providerId: string) {
+  lastOpencodeStreamSseAt.delete(providerId);
+  lastOpencodeAnswerTextSseAt.delete(providerId);
 }
 
 type TurnEndReason = "idle" | "completed" | "poll";
@@ -415,41 +485,13 @@ async function tryFinalizeTurnIfReady(
 
   if (state.busy || !state.turn_complete) {
     resetTurnCompleteStreak(providerId);
-    const current = getProviderSlice(get, providerId);
-    if (
-      shouldForceCompleteDespiteBusy(
-        providerId,
-        current.messages,
-        Boolean(state.pending),
-      )
-    ) {
-      stopStreamingHistorySync(providerId);
-      await syncMessagesFromServerOnce(get, set, providerId, true, true);
-      await completeTurnForProvider(get, set, providerId, { force: true });
-      clearTurnIdleSignal(providerId);
-    } else {
-      ensureStreamingHistorySync(get, set, providerId);
-    }
+    ensureStreamingHistorySync(get, set, providerId);
     return;
   }
 
-  const streak = (turnCompleteStreak.get(providerId) ?? 0) + 1;
-  turnCompleteStreak.set(providerId, streak);
-  const idleAt = turnIdleSignals.get(providerId);
-  const idleSignalFresh =
-    idleAt !== undefined && Date.now() - idleAt < TURN_IDLE_SIGNAL_TRUST_MS;
-  const requiredStreak = idleSignalFresh
-    ? 1
-    : TURN_COMPLETE_IDLE_STREAK_REQUIRED;
-  if (streak >= requiredStreak) {
-    resetTurnCompleteStreak(providerId);
-    stopStreamingHistorySync(providerId);
-    await syncMessagesFromServerOnce(get, set, providerId, true, true);
-    await completeTurnForProvider(get, set, providerId, { force: true });
-    clearTurnIdleSignal(providerId);
-  } else {
-    ensureStreamingHistorySync(get, set, providerId);
-  }
+  resetTurnCompleteStreak(providerId);
+  await completeTurnForProvider(get, set, providerId, { force: true });
+  clearTurnIdleSignal(providerId);
 }
 
 async function endTurnFromRuntimeEvent(
@@ -504,7 +546,6 @@ async function endTurnFromRuntimeEvent(
     return;
   }
 
-  stopStreamingHistorySync(providerId);
   cancelScheduledCompleteTurn(providerId);
 
   if (reason === "completed") {
@@ -519,17 +560,6 @@ async function endTurnFromRuntimeEvent(
     return;
   }
   if (state.turn_complete && !state.busy) {
-    await completeTurnForProvider(get, set, providerId, { force: true });
-    clearTurnIdleSignal(providerId);
-    return;
-  }
-  if (
-    shouldForceCompleteDespiteBusy(
-      providerId,
-      current.messages,
-      Boolean(state.pending),
-    )
-  ) {
     await completeTurnForProvider(get, set, providerId, { force: true });
     clearTurnIdleSignal(providerId);
     return;
@@ -625,8 +655,6 @@ const OPENCODE_SSE_POLL_MS = 120;
 const DEFAULT_STREAMING_POLL_MS = 1000;
 const OPENCODE_SSE_FALLBACK_MS = 1800;
 const TURN_COMPLETE_EMPTY_MAX_STREAK = 4;
-const TURN_COMPLETE_IDLE_STREAK_REQUIRED = 2;
-const TURN_IDLE_SIGNAL_TRUST_MS = 8_000;
 const OPENCODE_FORCE_FULL_POLL_MS = 8_000;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 48;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 160;
@@ -637,7 +665,7 @@ function streamingPollIntervalMs(providerId: string) {
 
 function opencodeStreamingPollDelayMs(providerId: string) {
   const sseFresh =
-    Date.now() - (lastOpencodeTextSseAt.get(providerId) ?? 0) <
+    Date.now() - (lastOpencodeStreamSseAt.get(providerId) ?? 0) <
     OPENCODE_SSE_FALLBACK_MS;
   return sseFresh ? OPENCODE_SSE_POLL_MS : streamingPollIntervalMs(providerId);
 }
@@ -669,7 +697,8 @@ const historySyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const historySyncActive = new Set<string>();
 const historySyncInFlight = new Set<string>();
 const finishingTurnProviders = new Set<string>();
-const lastOpencodeTextSseAt = new Map<string, number>();
+const lastOpencodeStreamSseAt = new Map<string, number>();
+const lastOpencodeAnswerTextSseAt = new Map<string, number>();
 const turnCompleteStreak = new Map<string, number>();
 const turnCompleteEmptyStreak = new Map<string, number>();
 const streamingStartedAt = new Map<string, number>();
@@ -752,18 +781,6 @@ async function verifyAndCompleteTurn(
     }
 
     if (state.busy || !state.turn_complete) {
-      const current = getProviderSlice(get, providerId);
-      if (
-        shouldForceCompleteDespiteBusy(
-          providerId,
-          current.messages,
-          Boolean(state.pending),
-        )
-      ) {
-        resetTurnCompleteStreak(providerId);
-        await tryFinishOpencodeTurn(get, set, providerId, { force: true });
-        return;
-      }
       resetTurnCompleteStreak(providerId);
       keepTurnStreaming(get, set, providerId);
       ensureStreamingHistorySync(get, set, providerId);
@@ -814,10 +831,17 @@ function lastAssistantMessage(messages: HistoryMessage[]) {
   return undefined;
 }
 
-function markOpencodeSseActivity(providerId: string) {
+function markOpencodeStreamSseActivity(providerId: string) {
   if (providerId === "opencode") {
-    lastOpencodeTextSseAt.set(providerId, Date.now());
+    lastOpencodeStreamSseAt.set(providerId, Date.now());
   }
+}
+
+function markOpencodeAnswerTextSseActivity(providerId: string) {
+  if (providerId !== "opencode") return;
+  const now = Date.now();
+  lastOpencodeStreamSseAt.set(providerId, now);
+  lastOpencodeAnswerTextSseAt.set(providerId, now);
 }
 
 function isPollOnlyMessageProvider(providerId: string) {
@@ -1039,7 +1063,7 @@ async function syncMessagesFromServerOnce(
   const opencodeSseRecent =
     useOpencodeStreaming &&
     isGenerating(slice) &&
-    Date.now() - (lastOpencodeTextSseAt.get(providerId) ?? 0) <
+    Date.now() - (lastOpencodeStreamSseAt.get(providerId) ?? 0) <
       OPENCODE_SSE_FALLBACK_MS;
   const forceOpencodeFullPoll =
     useOpencodeStreaming &&
@@ -1176,14 +1200,18 @@ async function syncMessagesFromServerOnce(
         patchProvider(set, providerId, { pendingApproval: null });
       }
 
-      if (polledTurnComplete && !getProviderSlice(get, providerId).pendingApproval) {
+      if (
+        polledTurnComplete &&
+        !getProviderSlice(get, providerId).pendingApproval
+      ) {
         await tryFinalizeTurnIfReady(get, set, providerId);
         return;
       }
 
+      const postSyncSlice = getProviderSlice(get, providerId);
       if (
         turnIdleSignals.has(providerId) &&
-        !getProviderSlice(get, providerId).pendingApproval
+        !postSyncSlice.pendingApproval
       ) {
         await tryFinalizeTurnIfReady(get, set, providerId);
         return;
@@ -1285,7 +1313,7 @@ function stopStreamingHistorySync(providerId: string) {
     historySyncTimers.delete(providerId);
   }
   historySyncInFlight.delete(providerId);
-  lastOpencodeTextSseAt.delete(providerId);
+  clearOpencodeSseActivity(providerId);
   streamingStartedAt.delete(providerId);
   resetTurnCompleteStreak(providerId);
 }
@@ -1332,18 +1360,18 @@ async function completeTurnForProvider(
 
     const before = getProviderSlice(get, resolvedId);
     if (before.thread && isGenerating(before)) {
-      await syncMessagesFromServer(get, set, resolvedId, true, true);
+      let ready = true;
+      if (resolvedId === "opencode") {
+        ready = await prepareOpencodeTurnForComplete(get, set, resolvedId);
+      } else {
+        await syncMessagesFromServer(get, set, resolvedId, true, true);
+      }
+      if (!ready) {
+        ensureStreamingHistorySync(get, set, resolvedId);
+        return;
+      }
     }
     let current = getProviderSlice(get, resolvedId);
-    if (
-      before.thread &&
-      isGenerating(before) &&
-      !turnHasDisplayableEntries(current.messages)
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 450));
-      await syncMessagesFromServer(get, set, resolvedId, true, true);
-      current = getProviderSlice(get, resolvedId);
-    }
     stopStreamingHistorySync(resolvedId);
     cancelScheduledCompleteTurn(resolvedId);
     streamingStartedAt.delete(resolvedId);
@@ -1392,7 +1420,11 @@ async function finalizeCancelledTurn(
       | ((state: ChatState) => Partial<ChatState>),
   ) => void,
   providerId: string,
-  options?: { skipImmediateNotice?: boolean },
+  options?: {
+    skipImmediateNotice?: boolean;
+    notice?: string;
+    formatAsError?: boolean;
+  },
 ) {
   if (finishingTurnProviders.has(providerId)) return;
   finishingTurnProviders.add(providerId);
@@ -1401,14 +1433,23 @@ async function finalizeCancelledTurn(
     cancelScheduledCompleteTurn(providerId);
     streamingStartedAt.delete(providerId);
 
-    const notice = t("chat.turnCancelled");
     let slice = getProviderSlice(get, providerId);
+    const anchorUserId =
+      slice.activeTurn?.localUserMessageId ?? slice.activeTurn?.anchorId;
+    const assistantMessageId = slice.activeTurn?.assistantMessageId;
+    const notice = options?.notice ?? t("chat.turnCancelled");
+    const noticeOptions = {
+      anchorUserId,
+      assistantMessageId,
+      formatAsError: options?.formatAsError ?? false,
+    };
+
     if (!options?.skipImmediateNotice) {
       patchActiveTurn(set, providerId, slice.activeTurn
         ? withTurnPhase(slice.activeTurn, "cancelling")
         : null, {
         error: null,
-        messages: markCurrentTurnCancelled(slice.messages, notice),
+        messages: markCurrentTurnCancelled(slice.messages, notice, noticeOptions),
         pendingApproval: null,
       });
     } else {
@@ -1426,7 +1467,7 @@ async function finalizeCancelledTurn(
       const afterSync = getProviderSlice(get, providerId);
       patchActiveTurn(set, providerId, null, {
         messages: finalizeTurnEntries(
-          markCurrentTurnCancelled(afterSync.messages, notice),
+          markCurrentTurnCancelled(afterSync.messages, notice, noticeOptions),
         ),
         error: null,
         pendingApproval: null,
@@ -2244,7 +2285,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     await ensureEventSubscription(providerId, created.id);
-    lastOpencodeTextSseAt.delete(providerId);
+    clearOpencodeSseActivity(providerId);
     streamingStartedAt.delete(providerId);
     patchProvider(set, providerId, {
       thread: {
@@ -2360,7 +2401,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const { providerId } = get();
     cancelScheduledCompleteTurn(providerId);
-    lastOpencodeTextSseAt.delete(providerId);
+    clearOpencodeSseActivity(providerId);
     const userMsg: HistoryMessage = {
       id: createOpencodeMessageId(),
       role: "user",
@@ -2448,7 +2489,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       {
         pendingApproval: null,
         error: null,
-        messages: markCurrentTurnCancelled(slice.messages, notice),
+        messages: markCurrentTurnCancelled(slice.messages, notice, {
+          anchorUserId:
+            slice.activeTurn?.localUserMessageId ?? slice.activeTurn?.anchorId,
+          assistantMessageId: slice.activeTurn?.assistantMessageId,
+        }),
       },
     );
 
@@ -2605,7 +2650,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (mapped.type === "text_delta") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
-            markOpencodeSseActivity(resolvedId);
+            markOpencodeAnswerTextSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
@@ -2621,7 +2666,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ensureStreamingHistorySync(get, set, resolvedId);
           } else if (mapped.type === "text_snapshot") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
-            markOpencodeSseActivity(resolvedId);
+            markOpencodeAnswerTextSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
@@ -2636,7 +2681,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
           } else if (mapped.type === "reasoning_delta") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
-            markOpencodeSseActivity(resolvedId);
+            markOpencodeStreamSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
@@ -2651,7 +2696,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
           } else if (mapped.type === "reasoning_snapshot") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
-            markOpencodeSseActivity(resolvedId);
+            markOpencodeStreamSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => ({
@@ -2671,7 +2716,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
             if (!mapped.partId) return;
 
-            markOpencodeSseActivity(resolvedId);
+            markOpencodeStreamSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
             applyToProvider(resolvedId, (slice) => {
@@ -2779,7 +2824,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!isGenerating(activeSlice)) return;
             if (resolvedId === "opencode") {
-              lastOpencodeTextSseAt.delete(resolvedId);
+              clearOpencodeSseActivity(resolvedId);
               markTurnIdleSignal(resolvedId);
               ensureStreamingHistorySync(get, set, resolvedId);
               void tryFinalizeTurnIfReady(get, set, resolvedId);
@@ -2797,13 +2842,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (mapped.type === "turn_aborted") {
             cancelScheduledCompleteTurn(resolvedId);
-            void finalizeCancelledTurn(get, set, resolvedId);
+            void finalizeCancelledTurn(get, set, resolvedId, {
+              notice: "Aborted",
+              formatAsError: true,
+            });
           }
 
           if (mapped.type === "turn_error") {
             if (isUserCancellation(mapped.message)) {
               cancelScheduledCompleteTurn(resolvedId);
-              void finalizeCancelledTurn(get, set, resolvedId);
+              void finalizeCancelledTurn(get, set, resolvedId, {
+                notice: mapped.message,
+                formatAsError: true,
+              });
               return;
             }
             const errorSlice = getProviderSlice(get, resolvedId);
@@ -2849,7 +2900,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           void ensureEventSubscription(resolvedId, slice.thread.id);
         }
         if (slice.streaming) {
-          lastOpencodeTextSseAt.delete(resolvedId);
+          clearOpencodeSseActivity(resolvedId);
           ensureStreamingHistorySync(get, set, resolvedId);
         }
         return;

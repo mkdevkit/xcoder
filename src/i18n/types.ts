@@ -205,6 +205,7 @@ export type TranslationKey =
   | "preferences.projectUnlinked"
   | "preferences.projectConnectHint"
   | "chat.generating"
+  | "chat.runningTools"
   | "chat.toolActivity"
   | "chat.connectInProjectPrefs"
   | "chat.serviceNotRunning"
