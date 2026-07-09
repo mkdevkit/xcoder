@@ -2327,7 +2327,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { providerId } = get();
     cancelScheduledCompleteTurn(providerId);
     lastOpencodeTextSseAt.delete(providerId);
-    const slice = getProviderSlice(get, providerId);
     const userMsg: HistoryMessage = {
       id: createOpencodeMessageId(),
       role: "user",
@@ -2351,7 +2350,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       providerId,
       createActiveTurn(userMsg.id, "message_id", userMsg.id),
       {
-        messages: [...slice.messages, userMsg],
+        messages: [...current.messages, userMsg],
         error: null,
       },
     );
@@ -2573,6 +2572,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 slice.messages,
                 mapped.partId!,
                 mapped.content,
+                slice.activeTurn?.anchorId,
               ),
             }));
             ensureStreamingHistorySync(get, set, resolvedId);
@@ -2585,6 +2585,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 slice.messages,
                 mapped.partId!,
                 mapped.content,
+                slice.activeTurn?.anchorId,
               ),
             }));
           } else if (mapped.type === "reasoning_delta") {
@@ -2596,6 +2597,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 slice.messages,
                 mapped.partId!,
                 mapped.content,
+                slice.activeTurn?.anchorId,
               ),
             }));
           } else if (mapped.type === "reasoning_snapshot") {
@@ -2607,6 +2609,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 slice.messages,
                 mapped.partId!,
                 mapped.content,
+                slice.activeTurn?.anchorId,
               ),
             }));
           } else if (mapped.type === "tool_call") {
@@ -2629,6 +2632,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   mapped.partId!,
                   mapped.name,
                   toolContent,
+                  slice.activeTurn?.anchorId,
                 ),
               };
             });
