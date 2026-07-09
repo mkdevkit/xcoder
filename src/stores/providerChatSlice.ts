@@ -1,5 +1,5 @@
 import type {
-  ChatMessage,
+  HistoryMessage,
   OpencodeModelOption,
   RuntimeStatus,
   ThreadInfo,
@@ -20,7 +20,7 @@ export interface ProviderChatSlice {
   opencodeModelCatalog: OpencodeModelOption[];
   opencodeConnectedProviders: string[];
   opencodeVendor: string;
-  messages: ChatMessage[];
+  messages: HistoryMessage[];
   streaming: boolean;
   activeTurn: ActiveTurn | null;
   runtimeBusy: boolean;
@@ -57,6 +57,15 @@ export function ensureProviderSlice(
   states: Record<string, ProviderChatSlice>,
   providerId: string,
 ): Record<string, ProviderChatSlice> {
-  if (states[providerId]) return states;
+  const existing = states[providerId];
+  if (existing) {
+    if (!Array.isArray(existing.messages)) {
+      return {
+        ...states,
+        [providerId]: { ...existing, messages: [] },
+      };
+    }
+    return states;
+  }
   return { ...states, [providerId]: createProviderChatSlice(providerId) };
 }

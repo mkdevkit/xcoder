@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { PanelResizeHandle } from "../../components/PanelResizeHandle";
 import {
@@ -19,7 +19,6 @@ import {
   modelsForOpencodeVendor,
 } from "../../utils/opencodeModels";
 import { localizeSessionTitle } from "../../utils/localChatHistory";
-import { isTauri } from "../../utils/tauri";
 import { ChatMessageList } from "./ChatMessageList";
 
 const CHAT_INPUT_HEIGHT_KEY = "xcoder:chat-input-height";
@@ -101,7 +100,6 @@ export function ChatPanel() {
     }),
   );
   const {
-    loadConfig,
     selectThread,
     createNewThread,
     deleteThread,
@@ -110,7 +108,6 @@ export function ChatPanel() {
     setOpencodeVendor,
     sendMessage,
     cancelGeneration,
-    setupEventListener,
   } = useChatStore();
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
@@ -163,19 +160,6 @@ export function ChatPanel() {
       : !thread
         ? t("chat.selectOrCreateSession")
         : t("chat.inputPlaceholder");
-
-  useEffect(() => {
-    if (!isTauri()) return;
-
-    loadConfig().catch(console.error);
-    let cleanup: (() => void) | undefined;
-    setupEventListener()
-      .then((fn) => {
-        cleanup = fn;
-      })
-      .catch(console.error);
-    return () => cleanup?.();
-  }, [loadConfig, setupEventListener]);
 
   const handleSend = async () => {
     const message = composerRef.current?.getMessage() ?? "";

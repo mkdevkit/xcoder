@@ -1,5 +1,4 @@
-import type { ChatMessage } from "../types/agent";
-import type { HistoryMessage } from "../types/agent";
+import type { ChatMessage, HistoryMessage } from "../types/agent";
 import type { ActiveTurn } from "./turnState";
 
 export function normalizePlanningMessageOrder(
@@ -236,9 +235,9 @@ function mergeCurrentTurnFromRemote(
 }
 
 export function markCurrentTurnCancelled(
-  messages: ChatMessage[],
+  messages: HistoryMessage[],
   notice: string,
-): ChatMessage[] {
+): HistoryMessage[] {
   const userIndex = lastUserIndex(messages);
   if (userIndex < 0) return messages;
 

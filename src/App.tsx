@@ -1,6 +1,7 @@
 import { isTauri } from "./utils/tauri";
 import { applyAppTheme } from "./utils/appTheme";
 import { ContextMenuProvider } from "./components/ContextMenuProvider";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { WorkbenchLayout } from "./layouts/WorkbenchLayout";
 import { useTranslation } from "./i18n";
 import "./styles/global.css";
@@ -48,9 +49,11 @@ function App() {
   }
 
   return (
-    <ContextMenuProvider>
-      <WorkbenchLayout />
-    </ContextMenuProvider>
+    <AppErrorBoundary>
+      <ContextMenuProvider>
+        <WorkbenchLayout />
+      </ContextMenuProvider>
+    </AppErrorBoundary>
   );
 }
 

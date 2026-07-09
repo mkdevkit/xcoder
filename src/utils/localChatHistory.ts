@@ -1,7 +1,7 @@
 import { APP_LOCALES } from "../i18n/types";
 import { translate } from "../i18n/locales";
 import { useSettingsStore } from "../stores/settings";
-import type { ChatMessage, ThreadSummary } from "../types/agent";
+import type { HistoryMessage, ThreadSummary } from "../types/agent";
 import { isTauri, tauriInvoke } from "./tauri";
 
 export interface LocalSessionMeta {
@@ -18,19 +18,19 @@ export interface LocalChatSession {
   title: string;
   mode?: string;
   model?: string;
-  messages: ChatMessage[];
+  messages: HistoryMessage[];
   updated_at: string;
 }
 
 import { isMeaningfulToolArgs, parseToolContent } from "./toolMessage";
 
-function toHistoryMessages(messages: ChatMessage[]) {
+function toHistoryMessages(messages: HistoryMessage[]) {
   return messages
     .filter((msg) => {
       if (msg.role === "tool") {
         return isMeaningfulToolArgs(
           parseToolContent(msg.content),
-          msg.toolName,
+          msg.tool_name,
         );
       }
       return msg.content.trim().length > 0;
@@ -39,7 +39,8 @@ function toHistoryMessages(messages: ChatMessage[]) {
       id: msg.id,
       role: msg.role,
       content: msg.content,
-      tool_name: msg.toolName,
+      tool_name: msg.tool_name,
+      turn_id: msg.turn_id,
       timestamp: msg.timestamp,
     }));
 }
@@ -114,7 +115,8 @@ export async function loadLocalChatSession(
         role: msg.role,
         content: msg.content,
         timestamp: msg.timestamp,
-        toolName: (msg as { tool_name?: string }).tool_name,
+        tool_name: (msg as { tool_name?: string }).tool_name,
+        turn_id: (msg as { turn_id?: string }).turn_id,
       })),
     };
   } catch {
@@ -129,7 +131,7 @@ export async function persistLocalChatSession(options: {
   title?: string;
   mode?: string;
   model?: string;
-  messages: ChatMessage[];
+  messages: HistoryMessage[];
   setActive?: boolean;
 }) {
   if (!isTauri()) return;
@@ -237,7 +239,7 @@ export function mergeThreadLists(
     });
 }
 
-export function sessionTitleFromMessages(messages: ChatMessage[], fallback: string) {
+export function sessionTitleFromMessages(messages: HistoryMessage[], fallback: string) {
   const firstUser = messages.find(
     (msg) => msg.role === "user" && msg.content.trim().length > 0,
   );

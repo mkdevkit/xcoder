@@ -13,9 +13,11 @@ import {
 } from "../stores/settings";
 import { useTerminalStore } from "../stores/terminal";
 import { useWorkspaceStore } from "../stores/workspace";
-import { useChatStore, useActiveProviderChat } from "../stores/chat";
+import { useChatStore } from "../stores/chat";
+import { createProviderChatSlice } from "../stores/providerChatSlice";
 import { useTranslation } from "../i18n";
 import { projectDisplayName } from "../utils/recentProjects";
+import { isTauri } from "../utils/tauri";
 
 export function WorkbenchLayout() {
   const {
@@ -31,13 +33,30 @@ export function WorkbenchLayout() {
   const { openFolder, openPreferencesTab, openRecentProject, closeProject, recentProjects, rootPath, activeFile, setupWorkspaceListener } =
     useWorkspaceStore();
   const { createTerminal } = useTerminalStore();
-  const { connectedIntent } = useActiveProviderChat();
+  const connectedIntent = useChatStore(
+    (state) =>
+      (state.providerStates[state.providerId] ??
+        createProviderChatSlice(state.providerId)).connectedIntent,
+  );
   const showChatPanel = Boolean(rootPath && connectedIntent);
   const { t } = useTranslation();
   useWorkbenchContextMenu();
 
   useEffect(() => {
     useWorkspaceStore.getState().refreshRecentProjects();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const { loadConfig, setupEventListener } = useChatStore.getState();
+    loadConfig().catch(console.error);
+    let cleanup: (() => void) | undefined;
+    setupEventListener()
+      .then((fn) => {
+        cleanup = fn;
+      })
+      .catch(console.error);
+    return () => cleanup?.();
   }, []);
 
   useEffect(() => {

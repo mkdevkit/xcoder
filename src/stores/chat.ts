@@ -1,4 +1,5 @@
-﻿import { create } from "zustand";
+﻿import { useMemo } from "react";
+import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../utils/tauri";
@@ -6,7 +7,6 @@ import { safeConfirm } from "../utils/tauriDialog";
 import { getAgentCommands } from "../utils/agentProvider";
 import type {
   AppConfig,
-  ChatMessage,
   HistoryMessage,
   ProviderConfig,
   RuntimeStatus,
@@ -16,13 +16,22 @@ import type {
 } from "../types/agent";
 import { mapRuntimeEvent } from "../types/agent";
 import {
-  historyHasDisplayableContent,
-  mapHistoryToChatMessages,
-  mergeServerMessagesWithLocal,
-  markCurrentTurnCancelled,
-  normalizePlanningMessageOrder,
-  turnHasDisplayableContent,
-} from "../utils/chatHistory";
+  historyHasDisplayableEntries,
+  finalizeTurnEntries,
+  projectEntriesToChatMessages,
+  sessionTitleFromEntries,
+  turnHasDisplayableEntries,
+} from "../utils/chatProjection";
+import {
+  appendReasoningDelta,
+  appendTextDelta,
+  lastUserEntry,
+  setReasoningSnapshot,
+  setTextSnapshot,
+  syncEntriesFromServer,
+  upsertToolEntry,
+} from "../utils/opencodeSessionStore";
+import { markCurrentTurnCancelled } from "../utils/chatHistory";
 import {
   acceptsAgentStreamUpdates,
   createActiveTurn,
@@ -49,7 +58,6 @@ import {
   mergeThreadLists,
   persistLocalChatSession,
   listLocalChatSessions,
-  sessionTitleFromMessages,
   isGenericSessionTitle,
   writeLocalActiveSessionId,
 } from "../utils/localChatHistory";
@@ -141,61 +149,6 @@ interface ChatState {
   getActiveSlice: () => ProviderChatSlice;
 }
 
-function uid() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function lastUserMessageText(messages: ChatMessage[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "user") {
-      return messages[i].content;
-    }
-  }
-  return undefined;
-}
-
-function mergeAssistantText(
-  current: string,
-  incoming: string,
-  lastUserText?: string,
-): string {
-  if (!incoming) return current;
-  const trimmedIncoming = incoming.trim();
-  if (lastUserText && trimmedIncoming === lastUserText.trim()) {
-    return current;
-  }
-  if (!current) return incoming;
-  if (incoming === current) return current;
-  if (incoming.startsWith(current)) return incoming;
-  if (current.startsWith(incoming)) return current;
-  if (current.endsWith(incoming)) return current;
-  if (incoming.length > 20 && current.includes(incoming)) return current;
-  return current + incoming;
-}
-
-function mergeReasoningText(current: string, incoming: string): string {
-  const chunk = incoming.trim();
-  if (!chunk) return current;
-  if (!current) return `> ${chunk}`;
-  if (current.includes(chunk) && chunk.length > 16) return current;
-
-  const lines = current.split("\n");
-  const lastLine = lines[lines.length - 1] ?? "";
-  if (lastLine.startsWith("> ")) {
-    const existingReasoning = lastLine.slice(2);
-    if (chunk.startsWith(existingReasoning)) {
-      lines[lines.length - 1] = `> ${chunk}`;
-      return lines.join("\n");
-    }
-    if (existingReasoning.endsWith(chunk)) return current;
-    lines[lines.length - 1] = `${lastLine}${incoming}`;
-    return lines.join("\n");
-  }
-
-  const prefix = current ? "\n\n" : "";
-  return `${current}${prefix}> ${chunk}`;
-}
-
 function isUserCancellation(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   return (
@@ -206,115 +159,6 @@ function isUserCancellation(message: string): boolean {
     normalized.includes("已取消") ||
     normalized.includes("用户取消")
   );
-}
-
-function shouldSkipAssistantSnapshot(
-  text: string,
-  lastUserText?: string,
-): boolean {
-  if (!text.trim()) return true;
-  if (lastUserText && text.trim() === lastUserText.trim()) return true;
-  return false;
-}
-
-function findLastToolIndexInTurn(messages: ChatMessage[]): number {
-  const userIndex = lastUserIndexInMessages(messages);
-  for (let i = messages.length - 1; i > userIndex; i -= 1) {
-    if (messages[i].role === "tool") return i;
-  }
-  return -1;
-}
-
-function lastUserIndexInMessages(messages: ChatMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "user") return i;
-  }
-  return -1;
-}
-
-function findAssistantTextTargetIndex(messages: ChatMessage[]): number {
-  const lastUserIndex = lastUserIndexInMessages(messages);
-  if (lastUserIndex < 0) return -1;
-
-  for (let i = messages.length - 1; i > lastUserIndex; i -= 1) {
-    if (messages[i].role === "assistant" && !messages[i].content.trim()) {
-      return i;
-    }
-  }
-
-  const lastTool = findLastToolIndexInTurn(messages);
-  if (lastTool >= 0) {
-    for (let i = lastTool + 1; i < messages.length; i += 1) {
-      if (messages[i].role === "assistant") return i;
-    }
-    return -1;
-  }
-
-  for (let i = messages.length - 1; i > lastUserIndex; i -= 1) {
-    if (messages[i].role === "assistant") return i;
-  }
-  return -1;
-}
-
-function findTrailingEmptyAssistantIndex(messages: ChatMessage[]): number {
-  const lastUserIndex = lastUserIndexInMessages(messages);
-  if (lastUserIndex < 0) return -1;
-
-  for (let i = messages.length - 1; i > lastUserIndex; i -= 1) {
-    if (messages[i].role === "assistant" && !messages[i].content.trim()) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function findToolInsertIndex(
-  messages: ChatMessage[],
-  toolName: string,
-): number {
-  if (toolName === "task") {
-    const userIndex = lastUserIndexInMessages(messages);
-    for (let i = messages.length - 1; i > userIndex; i -= 1) {
-      if (messages[i].role === "assistant") return i;
-    }
-    return messages.length;
-  }
-
-  const trailingEmpty = findTrailingEmptyAssistantIndex(messages);
-  if (trailingEmpty >= 0) {
-    return trailingEmpty;
-  }
-
-  let lastAssistant = -1;
-  for (let i = messages.length - 1; i > lastUserIndexInMessages(messages); i -= 1) {
-    if (messages[i].role === "assistant") {
-      lastAssistant = i;
-      break;
-    }
-  }
-  if (lastAssistant < 0) return messages.length;
-  if (!messages[lastAssistant].content.trim()) {
-    return lastAssistant;
-  }
-
-  // Tool runs after any text already emitted in this turn.
-  return lastAssistant + 1;
-}
-
-function ensureAssistantAfterTools(messages: ChatMessage[]) {
-  const lastTool = findLastToolIndexInTurn(messages);
-  if (lastTool < 0) return;
-
-  for (let i = lastTool + 1; i < messages.length; i += 1) {
-    if (messages[i].role === "assistant") return;
-  }
-
-  messages.push({
-    id: uid(),
-    role: "assistant",
-    content: "",
-    timestamp: Date.now(),
-  });
 }
 
 function parseAgentEnvelope(raw: Record<string, unknown>) {
@@ -439,19 +283,14 @@ function patchActiveTurn(
 }
 
 function lastLocalUserMessage(
-  messages: ChatMessage[],
-): ChatMessage | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "user") {
-      return messages[i];
-    }
-  }
-  return undefined;
+  messages: HistoryMessage[],
+): HistoryMessage | undefined {
+  return lastUserEntry(messages);
 }
 
 function buildResumedActiveTurn(
   providerId: string,
-  messages: ChatMessage[],
+  messages: HistoryMessage[],
   options: {
     pending: { id: string; description: string } | null;
     activeTurnId?: string | null;
@@ -469,6 +308,12 @@ function buildResumedActiveTurn(
   return null;
 }
 
+function shouldIgnoreStreamingReactivation(providerId: string): boolean {
+  return (
+    finishingTurnProviders.has(providerId) || turnIdleSignals.has(providerId)
+  );
+}
+
 function keepTurnStreaming(
   get: () => ChatState,
   set: (
@@ -478,6 +323,7 @@ function keepTurnStreaming(
   ) => void,
   providerId: string,
 ) {
+  if (shouldIgnoreStreamingReactivation(providerId)) return;
   const slice = getProviderSlice(get, providerId);
   if (slice.activeTurn) {
     patchActiveTurn(
@@ -490,46 +336,6 @@ function keepTurnStreaming(
   patchProvider(set, providerId, { streaming: true });
 }
 
-async function finishTurnIfServerComplete(
-  get: () => ChatState,
-  set: (
-    partial:
-      | Partial<ChatState>
-      | ((state: ChatState) => Partial<ChatState>),
-  ) => void,
-  providerId: string,
-) {
-  const slice = getProviderSlice(get, providerId);
-  if (!isGenerating(slice) || !slice.thread) return false;
-
-  const state = await fetchTurnCompleteState(get, providerId);
-  if (state.pending) {
-    return false;
-  }
-  if (!state.turn_complete || state.busy) {
-    const latest = getProviderSlice(get, providerId);
-    if (
-      shouldForceCompleteDespiteBusy(
-        providerId,
-        latest.messages,
-        false,
-      )
-    ) {
-      await tryFinishOpencodeTurn(get, set, providerId, { force: true });
-      return true;
-    }
-    return false;
-  }
-
-  const latest = getProviderSlice(get, providerId);
-  if (!turnHasDisplayableContent(latest.messages)) {
-    return false;
-  }
-
-  await tryFinishOpencodeTurn(get, set, providerId, { force: true });
-  return true;
-}
-
 function markTurnIdleSignal(providerId: string) {
   turnIdleSignals.set(providerId, Date.now());
 }
@@ -540,21 +346,79 @@ function clearTurnIdleSignal(providerId: string) {
 
 function shouldForceCompleteDespiteBusy(
   providerId: string,
-  messages: ChatMessage[],
+  messages: HistoryMessage[],
   pending: boolean,
 ): boolean {
-  if (pending || !turnHasDisplayableContent(messages)) {
+  if (pending || !turnHasDisplayableEntries(messages)) {
     return false;
   }
   const idleAt = turnIdleSignals.get(providerId);
-  if (idleAt && Date.now() - idleAt < 15_000) {
-    return true;
+  return idleAt !== undefined && Date.now() - idleAt < 15_000;
+}
+
+type TurnEndReason = "idle" | "completed" | "poll";
+
+async function tryFinalizeTurnIfReady(
+  get: () => ChatState,
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  providerId: string,
+) {
+  const slice = getProviderSlice(get, providerId);
+  if (!isGenerating(slice) || !slice.thread) return;
+
+  if (!turnHasDisplayableEntries(slice.messages)) {
+    ensureStreamingHistorySync(get, set, providerId);
+    return;
   }
-  const startedAt = streamingStartedAt.get(providerId) ?? 0;
-  if (startedAt > 0 && Date.now() - startedAt >= 12_000) {
-    return true;
+
+  const state = await fetchTurnCompleteState(get, providerId);
+  if (state.pending) {
+    resetTurnCompleteStreak(providerId);
+    ensureStreamingHistorySync(get, set, providerId);
+    return;
   }
-  return false;
+
+  if (state.busy || !state.turn_complete) {
+    resetTurnCompleteStreak(providerId);
+    const current = getProviderSlice(get, providerId);
+    if (
+      shouldForceCompleteDespiteBusy(
+        providerId,
+        current.messages,
+        Boolean(state.pending),
+      )
+    ) {
+      stopStreamingHistorySync(providerId);
+      await syncMessagesFromServerOnce(get, set, providerId, true, true);
+      await completeTurnForProvider(get, set, providerId, { force: true });
+      clearTurnIdleSignal(providerId);
+    } else {
+      ensureStreamingHistorySync(get, set, providerId);
+    }
+    return;
+  }
+
+  const streak = (turnCompleteStreak.get(providerId) ?? 0) + 1;
+  turnCompleteStreak.set(providerId, streak);
+  const idleAt = turnIdleSignals.get(providerId);
+  const idleSignalFresh =
+    idleAt !== undefined && Date.now() - idleAt < TURN_IDLE_SIGNAL_TRUST_MS;
+  const requiredStreak = idleSignalFresh
+    ? 1
+    : TURN_COMPLETE_IDLE_STREAK_REQUIRED;
+  if (streak >= requiredStreak) {
+    resetTurnCompleteStreak(providerId);
+    stopStreamingHistorySync(providerId);
+    await syncMessagesFromServerOnce(get, set, providerId, true, true);
+    await completeTurnForProvider(get, set, providerId, { force: true });
+    clearTurnIdleSignal(providerId);
+  } else {
+    ensureStreamingHistorySync(get, set, providerId);
+  }
 }
 
 async function endTurnFromRuntimeEvent(
@@ -565,14 +429,15 @@ async function endTurnFromRuntimeEvent(
       | ((state: ChatState) => Partial<ChatState>),
   ) => void,
   providerId: string,
-  options?: { forceFullHistory?: boolean },
+  options?: { forceFullHistory?: boolean; reason?: TurnEndReason },
 ) {
   const slice = getProviderSlice(get, providerId);
   if (!isGenerating(slice) || !slice.thread) return;
 
-  markTurnIdleSignal(providerId);
-  stopStreamingHistorySync(providerId);
-  cancelScheduledCompleteTurn(providerId);
+  const reason = options?.reason ?? "idle";
+  if (reason === "idle") {
+    markTurnIdleSignal(providerId);
+  }
 
   const forceFullHistory = options?.forceFullHistory ?? true;
   await syncMessagesFromServerOnce(
@@ -584,7 +449,7 @@ async function endTurnFromRuntimeEvent(
   );
 
   let current = getProviderSlice(get, providerId);
-  if (!turnHasDisplayableContent(current.messages)) {
+  if (!turnHasDisplayableEntries(current.messages)) {
     await new Promise((resolve) => setTimeout(resolve, 350));
     await syncMessagesFromServerOnce(
       get,
@@ -596,17 +461,50 @@ async function endTurnFromRuntimeEvent(
     current = getProviderSlice(get, providerId);
   }
 
-  if (turnHasDisplayableContent(current.messages)) {
+  if (!turnHasDisplayableEntries(current.messages)) {
+    if (reason === "completed") {
+      await tryFinishOpencodeTurn(get, set, providerId, { force: true });
+    } else {
+      ensureStreamingHistorySync(get, set, providerId);
+    }
+    if (reason === "idle") {
+      clearTurnIdleSignal(providerId);
+    }
+    return;
+  }
+
+  stopStreamingHistorySync(providerId);
+  cancelScheduledCompleteTurn(providerId);
+
+  if (reason === "completed") {
     await completeTurnForProvider(get, set, providerId, { force: true });
     clearTurnIdleSignal(providerId);
     return;
   }
 
-  const finished = await finishTurnIfServerComplete(get, set, providerId);
-  if (!finished) {
-    await verifyAndCompleteTurn(get, set, providerId);
+  const state = await fetchTurnCompleteState(get, providerId);
+  if (state.pending) {
+    ensureStreamingHistorySync(get, set, providerId);
+    return;
   }
-  clearTurnIdleSignal(providerId);
+  if (state.turn_complete && !state.busy) {
+    await completeTurnForProvider(get, set, providerId, { force: true });
+    clearTurnIdleSignal(providerId);
+    return;
+  }
+  if (
+    shouldForceCompleteDespiteBusy(
+      providerId,
+      current.messages,
+      Boolean(state.pending),
+    )
+  ) {
+    await completeTurnForProvider(get, set, providerId, { force: true });
+    clearTurnIdleSignal(providerId);
+    return;
+  }
+
+  ensureStreamingHistorySync(get, set, providerId);
 }
 
 function getProviderSlice(
@@ -682,7 +580,7 @@ async function saveProviderChatLocally(
     workspace: resolvedWorkspace,
     providerId,
     sessionId: slice.thread.id,
-    title: sessionTitleFromMessages(slice.messages, slice.thread.id),
+    title: sessionTitleFromEntries(slice.messages, slice.thread.id),
     mode: slice.mode,
     model: slice.model,
     messages: slice.messages,
@@ -696,6 +594,8 @@ const OPENCODE_SSE_POLL_MS = 120;
 const DEFAULT_STREAMING_POLL_MS = 1000;
 const OPENCODE_SSE_FALLBACK_MS = 1800;
 const TURN_COMPLETE_EMPTY_MAX_STREAK = 4;
+const TURN_COMPLETE_IDLE_STREAK_REQUIRED = 2;
+const TURN_IDLE_SIGNAL_TRUST_MS = 8_000;
 const OPENCODE_FORCE_FULL_POLL_MS = 8_000;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 48;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 160;
@@ -718,7 +618,7 @@ function nextStreamingPollDelayMs(providerId: string) {
 }
 
 function opencodeStreamingMessageLimit(
-  messages: ChatMessage[],
+  messages: HistoryMessage[],
   busy?: boolean,
 ) {
   const estimatedEntries = Math.max(
@@ -755,9 +655,9 @@ function markStreamingStarted(providerId: string) {
 
 function shouldForceOpencodeFullPoll(
   providerId: string,
-  messages: ChatMessage[],
+  messages: HistoryMessage[],
 ): boolean {
-  if (turnHasDisplayableContent(messages)) return false;
+  if (turnHasDisplayableEntries(messages)) return false;
   const startedAt = streamingStartedAt.get(providerId);
   if (!startedAt) return true;
   return Date.now() - startedAt >= OPENCODE_FORCE_FULL_POLL_MS;
@@ -840,7 +740,7 @@ async function verifyAndCompleteTurn(
     }
 
     const slice = getProviderSlice(get, providerId);
-    if (!turnHasDisplayableContent(slice.messages)) {
+    if (!turnHasDisplayableEntries(slice.messages)) {
       await syncMessagesFromServerOnce(
         get,
         set,
@@ -849,7 +749,7 @@ async function verifyAndCompleteTurn(
         providerId === "opencode",
       );
       const refreshed = getProviderSlice(get, providerId);
-      if (!turnHasDisplayableContent(refreshed.messages)) {
+      if (!turnHasDisplayableEntries(refreshed.messages)) {
         const emptyStreak = (turnCompleteEmptyStreak.get(providerId) ?? 0) + 1;
         turnCompleteEmptyStreak.set(providerId, emptyStreak);
         if (emptyStreak < TURN_COMPLETE_EMPTY_MAX_STREAK) {
@@ -874,7 +774,7 @@ async function verifyAndCompleteTurn(
   }
 }
 
-function lastAssistantMessage(messages: ChatMessage[]) {
+function lastAssistantMessage(messages: HistoryMessage[]) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role === "assistant") {
       return messages[index];
@@ -893,19 +793,6 @@ function isPollOnlyMessageProvider(providerId: string) {
   return providerId === "opencode";
 }
 
-function finalizeTurnMessages(messages: ChatMessage[]): ChatMessage[] {
-  const result = [...messages];
-  while (result.length > 0) {
-    const last = result[result.length - 1];
-    if (last.role === "assistant" && !last.content.trim()) {
-      result.pop();
-    } else {
-      break;
-    }
-  }
-  return normalizePlanningMessageOrder(result);
-}
-
 async function ensureEventSubscription(providerId: string, _threadId: string) {
   if (!isTauri()) return;
   try {
@@ -922,16 +809,15 @@ async function loadThreadHistoryMessages(
   providerId: string,
   workspace: string,
   threadId: string,
-): Promise<ChatMessage[] | null> {
+): Promise<HistoryMessage[] | null> {
   const commands = getAgentCommands(providerId);
   try {
-    const history = await tauriInvoke<HistoryMessage[]>(
+    return await tauriInvoke<HistoryMessage[]>(
       commands.loadThreadHistory,
       providerId === "opencode"
         ? opencodeSessionArgs(get, providerId, threadId, workspace)
         : { threadId },
     );
-    return mapHistoryToChatMessages(history);
   } catch {
     const local = await loadLocalChatSession(workspace, providerId, threadId);
     if (!local) return null;
@@ -986,7 +872,7 @@ async function resumeInFlightTurn(
   providerId: string,
   workspace: string,
   threadId: string,
-  options?: { messages?: ChatMessage[] },
+  options?: { messages?: HistoryMessage[] },
 ) {
   const slice = getProviderSlice(get, providerId);
   const messages =
@@ -1133,7 +1019,7 @@ async function syncMessagesFromServerOnce(
     !forceOpencodeFullPoll &&
     useOpencodeStreaming &&
     opencodeSseRecent &&
-    turnHasDisplayableContent(slice.messages);
+    turnHasDisplayableEntries(slice.messages);
   const syncStartedAt = import.meta.env.DEV ? performance.now() : 0;
   try {
     let history: HistoryMessage[] | undefined;
@@ -1190,12 +1076,21 @@ async function syncMessagesFromServerOnce(
     if (!latest.thread || latest.thread.id !== threadId) return;
 
     if (history) {
-      const merged = mergeServerMessagesWithLocal(latest.messages, history, {
-        pollOnly:
-          isGenerating(latest) && isPollOnlyMessageProvider(providerId),
-        limitedRemote: useOpencodeStreaming && !forceFullHistory,
-        activeTurn: latest.activeTurn,
+      const useAnchor =
+        isGenerating(latest) &&
+        isPollOnlyMessageProvider(providerId) &&
+        !forceFullHistory;
+      let merged = syncEntriesFromServer(latest.messages, history, {
+        anchorUserId: useAnchor ? latest.activeTurn?.anchorId ?? null : null,
+        full: !useAnchor || forceFullHistory,
       });
+      if (
+        assistantEmpty &&
+        historyHasDisplayableEntries(history) &&
+        !turnHasDisplayableEntries(merged)
+      ) {
+        merged = syncEntriesFromServer(latest.messages, history, { full: true });
+      }
       const changed =
         merged.length !== latest.messages.length ||
         merged.some((msg, index) => {
@@ -1205,8 +1100,8 @@ async function syncMessagesFromServerOnce(
             prev.id !== msg.id ||
             prev.content !== msg.content ||
             prev.role !== msg.role ||
-            prev.toolName !== msg.toolName ||
-            prev.turnId !== msg.turnId
+            prev.tool_name !== msg.tool_name ||
+            prev.turn_id !== msg.turn_id
           );
         });
       if (changed) {
@@ -1214,25 +1109,12 @@ async function syncMessagesFromServerOnce(
           messages: merged,
         });
       } else if (
-        history.length > 0 &&
-        assistantEmpty &&
-        historyHasDisplayableContent(history)
-      ) {
-        const remerged = mergeServerMessagesWithLocal(latest.messages, history, {
-          pollOnly: false,
-          limitedRemote: false,
-          activeTurn: latest.activeTurn,
-        });
-        patchProvider(set, providerId, {
-          messages: remerged,
-        });
-      } else if (
         import.meta.env.DEV &&
         providerId === "opencode" &&
         history.length > 0 &&
         assistantEmpty
       ) {
-        console.warn("[chat sync] opencode poll returned data but merge unchanged", {
+        console.warn("[chat sync] opencode poll returned data but sync unchanged", {
           localCount: latest.messages.length,
           remoteCount: history.length,
           remotePreview: history
@@ -1261,33 +1143,29 @@ async function syncMessagesFromServerOnce(
       }
 
       if (polledTurnComplete && !getProviderSlice(get, providerId).pendingApproval) {
-        await syncMessagesFromServerOnce(
-          get,
-          set,
-          providerId,
-          true,
-          providerId === "opencode",
-        );
-        const finished = await finishTurnIfServerComplete(get, set, providerId);
-        if (!finished) {
-          await endTurnFromRuntimeEvent(get, set, providerId, {
-            forceFullHistory: providerId === "opencode",
-          });
-        }
+        await tryFinalizeTurnIfReady(get, set, providerId);
         return;
       }
 
-      const stalledSlice = getProviderSlice(get, providerId);
+      if (
+        turnIdleSignals.has(providerId) &&
+        !getProviderSlice(get, providerId).pendingApproval
+      ) {
+        await tryFinalizeTurnIfReady(get, set, providerId);
+        return;
+      }
+
+      const latestSlice = getProviderSlice(get, providerId);
       const stalledForMs =
         (streamingStartedAt.get(providerId) ?? 0) > 0
           ? Date.now() - (streamingStartedAt.get(providerId) ?? Date.now())
           : 0;
       if (
         providerId === "opencode" &&
-        stalledSlice.streaming &&
+        latestSlice.streaming &&
         stalledForMs >= 30_000 &&
         history &&
-        historyHasDisplayableContent(history)
+        historyHasDisplayableEntries(history)
       ) {
         await verifyAndCompleteTurn(get, set, providerId);
         return;
@@ -1389,7 +1267,10 @@ async function tryFinishOpencodeTurn(
   options?: { force?: boolean },
 ) {
   cancelScheduledCompleteTurn(providerId);
-  if (await runPendingApprovalCheck(get, set, providerId)) {
+  if (
+    !options?.force &&
+    (await runPendingApprovalCheck(get, set, providerId))
+  ) {
     ensureStreamingHistorySync(get, set, providerId);
     return;
   }
@@ -1423,7 +1304,7 @@ async function completeTurnForProvider(
     if (
       before.thread &&
       isGenerating(before) &&
-      !turnHasDisplayableContent(current.messages)
+      !turnHasDisplayableEntries(current.messages)
     ) {
       await new Promise((resolve) => setTimeout(resolve, 450));
       await syncMessagesFromServer(get, set, resolvedId, true, true);
@@ -1433,7 +1314,7 @@ async function completeTurnForProvider(
     cancelScheduledCompleteTurn(resolvedId);
     streamingStartedAt.delete(resolvedId);
     patchActiveTurn(set, resolvedId, null, {
-      messages: finalizeTurnMessages(current.messages),
+      messages: finalizeTurnEntries(current.messages),
       error: null,
       pendingApproval: null,
     });
@@ -1442,7 +1323,7 @@ async function completeTurnForProvider(
     const updated = getProviderSlice(get, resolvedId);
     const workspace = updated.thread?.workspace ?? updated.chatWorkspace;
     if (workspace && updated.thread) {
-      const title = sessionTitleFromMessages(
+      const title = sessionTitleFromEntries(
         updated.messages,
         updated.thread.id,
       );
@@ -1510,7 +1391,7 @@ async function finalizeCancelledTurn(
       await syncMessagesFromServer(get, set, providerId, true, true);
       const afterSync = getProviderSlice(get, providerId);
       patchActiveTurn(set, providerId, null, {
-        messages: normalizePlanningMessageOrder(
+        messages: finalizeTurnEntries(
           markCurrentTurnCancelled(afterSync.messages, notice),
         ),
         error: null,
@@ -2288,7 +2169,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       const current = getProviderSlice(get, providerId);
-      const title = sessionTitleFromMessages(current.messages, threadId);
+      const title = sessionTitleFromEntries(current.messages, threadId);
       await rememberActiveSession(providerId, workspace, threadId);
       await persistLocalChatSession({
         workspace,
@@ -2447,13 +2328,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     cancelScheduledCompleteTurn(providerId);
     lastOpencodeTextSseAt.delete(providerId);
     const slice = getProviderSlice(get, providerId);
-    const userMsg: ChatMessage = {
+    const userMsg: HistoryMessage = {
       id: createOpencodeMessageId(),
       role: "user",
       content: trimmed,
       timestamp: Date.now(),
     };
-    const assistantId = uid();
 
     resetTurnCompleteStreak(providerId);
     markStreamingStarted(providerId);
@@ -2471,16 +2351,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       providerId,
       createActiveTurn(userMsg.id, "message_id", userMsg.id),
       {
-        messages: [
-          ...slice.messages,
-          userMsg,
-          {
-            id: assistantId,
-            role: "assistant",
-            content: "",
-            timestamp: Date.now(),
-          },
-        ],
+        messages: [...slice.messages, userMsg],
         error: null,
       },
     );
@@ -2694,183 +2565,72 @@ export const useChatStore = create<ChatState>((set, get) => ({
           };
 
           if (mapped.type === "text_delta") {
-            if (!isActiveStreamingTurn()) return;
+            if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              const lastUserText = lastUserMessageText(messages);
-              const targetIndex = findAssistantTextTargetIndex(messages);
-              if (targetIndex >= 0) {
-                messages[targetIndex] = {
-                  ...messages[targetIndex],
-                  content: mergeAssistantText(
-                    messages[targetIndex].content,
-                    mapped.content,
-                    lastUserText,
-                  ),
-                };
-                return { messages };
-              }
-
-              const content = mergeAssistantText("", mapped.content, lastUserText);
-              if (content) {
-                messages.push({
-                  id: uid(),
-                  role: "assistant",
-                  content,
-                  timestamp: Date.now(),
-                });
-              }
-              return { messages };
-            });
+            applyToProvider(resolvedId, (slice) => ({
+              messages: appendTextDelta(
+                slice.messages,
+                mapped.partId!,
+                mapped.content,
+              ),
+            }));
             ensureStreamingHistorySync(get, set, resolvedId);
           } else if (mapped.type === "text_snapshot") {
-            if (!isActiveStreamingTurn()) return;
+            if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              const lastUserText = lastUserMessageText(messages);
-              if (shouldSkipAssistantSnapshot(mapped.content, lastUserText)) {
-                return { messages };
-              }
-              const targetIndex = findAssistantTextTargetIndex(messages);
-              if (targetIndex >= 0) {
-                const current = messages[targetIndex].content;
-                if (
-                  current === mapped.content ||
-                  current.trim() === mapped.content.trim()
-                ) {
-                  return { messages };
-                }
-                messages[targetIndex] = {
-                  ...messages[targetIndex],
-                  content:
-                    mapped.content.startsWith(current) || !current.trim()
-                      ? mapped.content
-                      : mergeAssistantText(
-                          current,
-                          mapped.content,
-                          lastUserText,
-                        ),
-                };
-                return { messages };
-              }
-
-              messages.push({
-                id: uid(),
-                role: "assistant",
-                content: mapped.content,
-                timestamp: Date.now(),
-              });
-              return { messages };
-            });
+            applyToProvider(resolvedId, (slice) => ({
+              messages: setTextSnapshot(
+                slice.messages,
+                mapped.partId!,
+                mapped.content,
+              ),
+            }));
           } else if (mapped.type === "reasoning_delta") {
-            if (!isActiveStreamingTurn()) return;
+            if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              const targetIndex = findAssistantTextTargetIndex(messages);
-              if (targetIndex >= 0) {
-                messages[targetIndex] = {
-                  ...messages[targetIndex],
-                  content: mergeReasoningText(
-                    messages[targetIndex].content,
-                    mapped.content,
-                  ),
-                };
-                return { messages };
-              }
-
-              messages.push({
-                id: uid(),
-                role: "assistant",
-                content: mergeReasoningText("", mapped.content),
-                timestamp: Date.now(),
-              });
-              return { messages };
-            });
+            applyToProvider(resolvedId, (slice) => ({
+              messages: appendReasoningDelta(
+                slice.messages,
+                mapped.partId!,
+                mapped.content,
+              ),
+            }));
           } else if (mapped.type === "reasoning_snapshot") {
-            if (!isActiveStreamingTurn()) return;
+            if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
-            applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
-              const targetIndex = findAssistantTextTargetIndex(messages);
-              const block = mapped.content.trim();
-              if (!block) {
-                return { messages };
-              }
-              if (targetIndex >= 0) {
-                messages[targetIndex] = {
-                  ...messages[targetIndex],
-                  content: mergeReasoningText(
-                    messages[targetIndex].content,
-                    block,
-                  ),
-                };
-                return { messages };
-              }
-
-              messages.push({
-                id: uid(),
-                role: "assistant",
-                content: mergeReasoningText("", block),
-                timestamp: Date.now(),
-              });
-              return { messages };
-            });
+            applyToProvider(resolvedId, (slice) => ({
+              messages: setReasoningSnapshot(
+                slice.messages,
+                mapped.partId!,
+                mapped.content,
+              ),
+            }));
           } else if (mapped.type === "tool_call") {
             if (!isActiveStreamingTurn()) return;
             if (!isMeaningfulToolArgs(mapped.args, mapped.name)) {
               return;
             }
+            if (!mapped.partId) return;
 
             markOpencodeSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             applyToProvider(resolvedId, (slice) => {
-              const messages = [...slice.messages];
               const toolContent =
                 typeof mapped.args === "string"
                   ? mapped.args
                   : JSON.stringify(mapped.args, null, 2);
-              const toolId = mapped.partId || uid();
-              const existingIndex = mapped.partId
-                ? messages.findIndex(
-                    (msg) => msg.role === "tool" && msg.id === mapped.partId,
-                  )
-                : -1;
-
-              if (existingIndex >= 0) {
-                messages[existingIndex] = {
-                  ...messages[existingIndex],
-                  content: toolContent,
-                  toolName: mapped.name,
-                };
-                return { messages };
-              }
-
-              const insertAt = findToolInsertIndex(messages, mapped.name);
-              const insertedBeforeEmptyAssistant =
-                insertAt < messages.length &&
-                messages[insertAt]?.role === "assistant" &&
-                !messages[insertAt].content.trim();
-
-              messages.splice(insertAt, 0, {
-                id: toolId,
-                role: "tool",
-                content: toolContent,
-                toolName: mapped.name,
-                timestamp: Date.now(),
-              });
-
-              if (!insertedBeforeEmptyAssistant) {
-                ensureAssistantAfterTools(messages);
-              }
-
-              return { messages };
+              return {
+                messages: upsertToolEntry(
+                  slice.messages,
+                  mapped.partId!,
+                  mapped.name,
+                  toolContent,
+                ),
+              };
             });
           } else if (mapped.type === "file_change") {
             const workspace = useWorkspaceStore.getState();
@@ -2947,6 +2707,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (mapped.type === "session_busy") {
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!isGenerating(activeSlice)) return;
+            if (shouldIgnoreStreamingReactivation(resolvedId)) return;
             cancelScheduledCompleteTurn(resolvedId);
             keepTurnStreaming(get, set, resolvedId);
             ensureStreamingHistorySync(get, set, resolvedId);
@@ -2957,17 +2718,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!isGenerating(activeSlice)) return;
             if (resolvedId === "opencode") {
               lastOpencodeTextSseAt.delete(resolvedId);
+              markTurnIdleSignal(resolvedId);
+              ensureStreamingHistorySync(get, set, resolvedId);
+              void tryFinalizeTurnIfReady(get, set, resolvedId);
             }
-            void endTurnFromRuntimeEvent(get, set, resolvedId, {
-              forceFullHistory: true,
-            });
           }
 
           if (mapped.type === "turn_completed") {
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!isGenerating(activeSlice)) return;
             void endTurnFromRuntimeEvent(get, set, resolvedId, {
-              forceFullHistory: resolvedId === "opencode",
+              forceFullHistory: true,
+              reason: "completed",
             });
           }
 
@@ -3080,6 +2842,11 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
             { sessionId, workspace },
           ),
         ]);
+        const synced = syncEntriesFromServer(slice.messages, poll.messages, {
+          anchorUserId: slice.activeTurn?.anchorId ?? null,
+          full: !slice.streaming,
+        });
+        const projected = projectEntriesToChatMessages(synced);
         return {
           streaming: slice.streaming,
           pendingApproval: slice.pendingApproval,
@@ -3088,16 +2855,8 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
           pending: poll.pending ?? pending,
           messageCount: slice.messages.length,
           polledMessages: poll.messages.length,
-          mergedCount: mergeServerMessagesWithLocal(
-            slice.messages,
-            poll.messages,
-            { pollOnly: true, limitedRemote: slice.streaming },
-          ).length,
-          mergedAssistantPreview: mergeServerMessagesWithLocal(
-            slice.messages,
-            poll.messages,
-            { pollOnly: true, limitedRemote: slice.streaming },
-          )
+          syncedCount: synced.length,
+          mergedAssistantPreview: projected
             .filter((item) => item.role === "assistant")
             .slice(-1)[0]?.content?.slice(0, 120),
         };
@@ -3113,7 +2872,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
 }
 
 export function useActiveProviderChat() {
-  return useChatStore(
+  const view = useChatStore(
     useShallow((state) => {
       const slice =
         state.providerStates[state.providerId] ??
@@ -3122,9 +2881,38 @@ export function useActiveProviderChat() {
         config: state.config,
         providerId: state.providerId,
         initialized: state.initialized,
-        ...slice,
-        generating: isGenerating(slice),
+        entries: slice.messages,
+        runtime: slice.runtime,
+        connectedIntent: slice.connectedIntent,
+        thread: slice.thread,
+        chatWorkspace: slice.chatWorkspace,
+        threads: slice.threads,
+        threadsLoading: slice.threadsLoading,
+        mode: slice.mode,
+        model: slice.model,
+        dynamicModes: slice.dynamicModes,
+        opencodeModelCatalog: slice.opencodeModelCatalog,
+        opencodeConnectedProviders: slice.opencodeConnectedProviders,
+        opencodeVendor: slice.opencodeVendor,
+        streaming: slice.streaming,
+        activeTurn: slice.activeTurn,
+        runtimeBusy: slice.runtimeBusy,
+        runtimeAction: slice.runtimeAction,
+        pendingApproval: slice.pendingApproval,
+        error: slice.error,
       };
     }),
   );
+
+  const messages = useMemo(
+    () => projectEntriesToChatMessages(view.entries ?? []),
+    [view.entries],
+  );
+
+  const generating = isGenerating({
+    streaming: view.streaming,
+    activeTurn: view.activeTurn,
+  });
+
+  return { ...view, messages, generating };
 }

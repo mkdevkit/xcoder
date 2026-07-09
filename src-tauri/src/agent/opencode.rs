@@ -1069,6 +1069,14 @@ fn assistant_entry_is_active(entry: &Value) -> bool {
         return false;
     }
 
+    if info
+        .get("time")
+        .and_then(|t| t.get("completed"))
+        .is_some()
+    {
+        return false;
+    }
+
     let parts = entry
         .get("parts")
         .and_then(|v| v.as_array())
@@ -1079,47 +1087,23 @@ fn assistant_entry_is_active(entry: &Value) -> bool {
         return true;
     }
 
-    if info
-        .get("time")
-        .and_then(|t| t.get("completed"))
-        .is_some()
-    {
-        return false;
-    }
-
-    let has_tool_part = parts.iter().any(|part| {
-        matches!(
-            part.get("type").and_then(|v| v.as_str()),
-            Some("tool") | Some("tool-call")
-        )
-    });
-    if has_tool_part {
-        return false;
-    }
-
-    let has_text = parts.iter().any(|part| {
-        part.get("type").and_then(|v| v.as_str()) == Some("text")
-            && part
+    let has_content_part = parts.iter().any(|part| {
+        let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match part_type {
+            "text" | "reasoning" => part
                 .get("text")
                 .and_then(|v| v.as_str())
-                .is_some_and(|text| !text.is_empty())
+                .is_some_and(|text| !text.is_empty()),
+            "tool" | "tool-call" => true,
+            "step-finish" | "finish" => true,
+            _ => false,
+        }
     });
-    if has_text {
+    if has_content_part {
         return false;
     }
 
-    let has_reasoning = parts.iter().any(|part| {
-        part.get("type").and_then(|v| v.as_str()) == Some("reasoning")
-            && part
-                .get("text")
-                .and_then(|v| v.as_str())
-                .is_some_and(|text| !text.is_empty())
-    });
-    if has_reasoning {
-        return false;
-    }
-
-    true
+    !parts.is_empty()
 }
 
 fn messages_indicate_busy(entries: &[Value]) -> bool {
@@ -1130,7 +1114,7 @@ fn messages_indicate_busy(entries: &[Value]) -> bool {
             return assistant_entry_is_active(entry);
         }
         if role == Some("user") {
-            // Session may report idle before the assistant entry is created.
+            // Waiting for assistant response after the latest user turn.
             return true;
         }
     }
@@ -1434,7 +1418,9 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
 
     let event_session_id = properties
         .get("sessionID")
+        .or_else(|| properties.get("sessionId"))
         .or_else(|| raw.get("sessionID"))
+        .or_else(|| raw.get("sessionId"))
         .and_then(|v| v.as_str());
     if let Some(sid) = event_session_id {
         if !session_id.is_empty() && sid != session_id {
@@ -1495,12 +1481,16 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 } else {
                     "agent_message"
                 };
+                let mut payload = serde_json::json!({
+                    "delta": delta,
+                    "kind": kind,
+                });
+                if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                    payload["partId"] = serde_json::json!(part_id);
+                }
                 return Some(serde_json::json!({
                     "event": "item.delta",
-                    "payload": {
-                        "delta": delta,
-                        "kind": kind,
-                    }
+                    "payload": payload,
                 }));
             }
 
@@ -1540,12 +1530,16 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
                 }
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
+                        let mut payload = serde_json::json!({
+                            "text": text,
+                            "kind": "agent_message",
+                        });
+                        if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                            payload["partId"] = serde_json::json!(part_id);
+                        }
                         return Some(serde_json::json!({
                             "event": "item.text",
-                            "payload": {
-                                "text": text,
-                                "kind": "agent_message",
-                            }
+                            "payload": payload,
                         }));
                     }
                 }
@@ -1554,12 +1548,16 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             if part_type == "reasoning" {
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
+                        let mut payload = serde_json::json!({
+                            "text": text,
+                            "kind": "reasoning",
+                        });
+                        if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                            payload["partId"] = serde_json::json!(part_id);
+                        }
                         return Some(serde_json::json!({
                             "event": "item.text",
-                            "payload": {
-                                "text": text,
-                                "kind": "reasoning",
-                            }
+                            "payload": payload,
                         }));
                     }
                 }
@@ -1607,9 +1605,6 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             if info.get("role").and_then(|v| v.as_str()) != Some("assistant") {
                 return None;
             }
-            if info.get("time").and_then(|t| t.get("completed")).is_none() {
-                return None;
-            }
             if let Some(error) = info.get("error") {
                 let message = error
                     .get("data")
@@ -1621,38 +1616,156 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             }
             None
         }
+        "session.next.text.delta" => {
+            let delta = properties
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            let mut payload = serde_json::json!({
+                "delta": delta,
+                "kind": "agent_message",
+            });
+            if let Some(part_id) = properties
+                .get("textID")
+                .or_else(|| properties.get("textId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                payload["partId"] = serde_json::json!(part_id);
+            }
+            Some(serde_json::json!({
+                "event": "item.delta",
+                "payload": payload,
+            }))
+        }
+        "session.next.reasoning.delta" => {
+            let delta = properties
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            let mut payload = serde_json::json!({
+                "delta": delta,
+                "kind": "reasoning",
+            });
+            if let Some(part_id) = properties
+                .get("reasoningID")
+                .or_else(|| properties.get("reasoningId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                payload["partId"] = serde_json::json!(part_id);
+            }
+            Some(serde_json::json!({
+                "event": "item.delta",
+                "payload": payload,
+            }))
+        }
+        "session.next.text.ended" => {
+            let text = properties
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            let mut payload = serde_json::json!({
+                "text": text,
+                "kind": "agent_message",
+            });
+            if let Some(part_id) = properties
+                .get("textID")
+                .or_else(|| properties.get("textId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                payload["partId"] = serde_json::json!(part_id);
+            }
+            Some(serde_json::json!({
+                "event": "item.text",
+                "payload": payload,
+            }))
+        }
+        "session.next.reasoning.ended" => {
+            let text = properties
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            let mut payload = serde_json::json!({
+                "text": text,
+                "kind": "reasoning",
+            });
+            if let Some(part_id) = properties
+                .get("reasoningID")
+                .or_else(|| properties.get("reasoningId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                payload["partId"] = serde_json::json!(part_id);
+            }
+            Some(serde_json::json!({
+                "event": "item.text",
+                "payload": payload,
+            }))
+        }
+        "session.next.tool.called" => {
+            let call_id = properties
+                .get("callID")
+                .or_else(|| properties.get("callId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            let name = properties
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+            let input = properties
+                .get("input")
+                .cloned()
+                .unwrap_or(Value::Null);
+            Some(serde_json::json!({
+                "event": "item.updated",
+                "payload": {
+                    "kind": "tool_call",
+                    "id": call_id,
+                    "name": name,
+                    "args": input,
+                }
+            }))
+        }
+        "session.next.step.failed" => {
+            let message = properties
+                .get("error")
+                .and_then(|error| {
+                    error
+                        .get("data")
+                        .and_then(|data| data.get("message"))
+                        .or_else(|| error.get("message"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| properties.get("message").and_then(|v| v.as_str()))
+                .unwrap_or("OpenCode agent step failed");
+            Some(turn_abort_or_error_event(message))
+        }
         "session.turn.completed" => Some(serde_json::json!({
             "event": "turn.completed",
             "payload": {}
         })),
         "session.status" | "session.idle" => {
-            let is_idle = if event_type == "session.idle" {
-                true
+            let status_type = if event_type == "session.idle" {
+                Some("idle")
             } else {
                 properties
                     .get("status")
                     .and_then(|status| status.get("type").and_then(|v| v.as_str()))
-                    == Some("idle")
             };
-            if is_idle {
-                return Some(serde_json::json!({
+
+            match status_type {
+                Some("idle") => Some(serde_json::json!({
                     "event": "session.idle",
                     "payload": {}
-                }));
-            }
-
-            let is_busy = properties
-                .get("status")
-                .and_then(|status| status.get("type").and_then(|v| v.as_str()))
-                == Some("busy");
-            if is_busy {
-                return Some(serde_json::json!({
+                })),
+                Some("busy") | Some("retry") => Some(serde_json::json!({
                     "event": "session.busy",
                     "payload": {}
-                }));
+                })),
+                _ => None,
             }
-
-            None
         }
         _ => None,
     }

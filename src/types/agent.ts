@@ -1,10 +1,10 @@
 import { t } from "../i18n";
 
 export type AgentEvent =
-  | { type: "text_delta"; content: string }
-  | { type: "text_snapshot"; content: string }
-  | { type: "reasoning_delta"; content: string }
-  | { type: "reasoning_snapshot"; content: string }
+  | { type: "text_delta"; content: string; partId?: string }
+  | { type: "text_snapshot"; content: string; partId?: string }
+  | { type: "reasoning_delta"; content: string; partId?: string }
+  | { type: "reasoning_snapshot"; content: string; partId?: string }
   | { type: "tool_call"; name: string; args: unknown; partId?: string }
   | { type: "tool_result"; output: string }
   | { type: "approval_required"; id: string; description: string }
@@ -109,19 +109,37 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
   if (event === "item.delta") {
     const delta = String(payload.delta ?? "");
     const kind = String(payload.kind ?? "agent_message");
+    const partId = String(payload.partId ?? payload.part_id ?? "");
     if (kind === "reasoning") {
-      return { type: "reasoning_delta", content: delta };
+      return {
+        type: "reasoning_delta",
+        content: delta,
+        ...(partId ? { partId } : {}),
+      };
     }
-    return { type: "text_delta", content: delta };
+    return {
+      type: "text_delta",
+      content: delta,
+      ...(partId ? { partId } : {}),
+    };
   }
 
   if (event === "item.text") {
     const text = String(payload.text ?? "");
     const kind = String(payload.kind ?? "agent_message");
+    const partId = String(payload.partId ?? payload.part_id ?? "");
     if (kind === "reasoning") {
-      return { type: "reasoning_snapshot", content: text };
+      return {
+        type: "reasoning_snapshot",
+        content: text,
+        ...(partId ? { partId } : {}),
+      };
     }
-    return { type: "text_snapshot", content: text };
+    return {
+      type: "text_snapshot",
+      content: text,
+      ...(partId ? { partId } : {}),
+    };
   }
 
   if (event === "approval.required") {
