@@ -6,12 +6,12 @@ import type { ProjectRulesView } from "../../types/projectRules";
 
 interface ProjectRulesSectionProps {
   workspace: string;
-  providerId: "codewhale" | "opencode";
+  providerId: "opencode";
   disabled?: boolean;
   embedded?: boolean;
 }
 
-function emptyRules(providerId: "codewhale" | "opencode"): ProjectRulesView {
+function emptyRules(providerId: "opencode"): ProjectRulesView {
   return {
     provider: providerId,
     agentsPath: "",
@@ -98,10 +98,7 @@ export function ProjectRulesSection({
     }
   };
 
-  const hintKey =
-    providerId === "opencode"
-      ? "preferences.projectRulesOpencodeHint"
-      : "preferences.projectRulesCodewhaleHint";
+  const hintKey = "preferences.projectRulesOpencodeHint";
 
   if (loading) {
     return <p className="preferences-hint">{t("preferences.loading")}</p>;

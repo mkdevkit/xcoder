@@ -4,7 +4,6 @@ export interface ProjectConfig {
   provider: string;
   defaultModel: string;
   opencodePermissions: OpencodePermissionsView;
-  codewhaleApprovalMode: string;
 }
 
 export interface ProjectConfigInfo {

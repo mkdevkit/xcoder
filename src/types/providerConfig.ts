@@ -1,23 +1,4 @@
-export interface CodewhaleProviderEntry {
-  id: string;
-  apiKey: string;
-}
-
 import type { McpServerEntry } from "./mcp";
-
-export interface CodewhaleConfigView {
-  path: string;
-  installed: boolean;
-  apiKey: string;
-  provider: string;
-  authMode: string;
-  providers: CodewhaleProviderEntry[];
-  defaultMode: string;
-  approvalMode: string;
-  reasoningEffort: string;
-  mcpPath: string;
-  mcpServers: McpServerEntry[];
-}
 
 export const OPENCODE_MODALITY_OPTIONS = [
   "text",

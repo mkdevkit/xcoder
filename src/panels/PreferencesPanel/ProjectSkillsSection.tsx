@@ -32,7 +32,6 @@ export function ProjectSkillsSection({
   );
 
   const isOpencode = providerId === "opencode";
-  const isCodewhale = providerId === "codewhale";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -137,11 +136,7 @@ export function ProjectSkillsSection({
           ? t("preferences.projectSkillsOpencodeHint", {
               directory: catalog?.directoryUrl ?? "https://skills.sh",
             })
-          : isCodewhale
-            ? t("preferences.projectSkillsCodewhaleHint", {
-                directory: catalog?.directoryUrl ?? "https://skills.sh",
-              })
-            : t("preferences.projectSkillsHint")}
+          : t("preferences.projectSkillsHint")}
       </p>
 
       <div className="preferences-field">

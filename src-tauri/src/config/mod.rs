@@ -42,7 +42,7 @@ pub struct AppSection {
 }
 
 fn default_provider() -> String {
-    "codewhale".to_string()
+    "opencode".to_string()
 }
 
 fn default_theme() -> String {
@@ -50,7 +50,7 @@ fn default_theme() -> String {
 }
 
 fn default_text_model() -> String {
-    "deepseek-v4-pro".to_string()
+    String::new()
 }
 
 impl Default for AppSection {
@@ -75,30 +75,11 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             app: AppSection {
-                default_provider: "codewhale".to_string(),
+                default_provider: "opencode".to_string(),
                 theme: "dark".to_string(),
                 default_model: default_text_model(),
             },
             providers: vec![
-                ProviderConfig {
-                    id: "codewhale".to_string(),
-                    provider_type: "http".to_string(),
-                    command: "codewhale".to_string(),
-                    args: vec![
-                        "serve".to_string(),
-                        "--http".to_string(),
-                        "--port".to_string(),
-                        "7878".to_string(),
-                        "--insecure".to_string(),
-                    ],
-                    config_path: Some("~/.codewhale/config.toml".to_string()),
-                    health_cmd: vec![
-                        "codewhale".to_string(),
-                        "doctor".to_string(),
-                        "--json".to_string(),
-                    ],
-                    ui_options: None,
-                },
                 ProviderConfig {
                     id: "opencode".to_string(),
                     provider_type: "http".to_string(),
@@ -120,7 +101,6 @@ impl Default for AppConfig {
 }
 
 pub mod mcp_config;
-pub mod project_codewhale_config;
 pub mod project_opencode_config;
 pub mod project_rules;
 pub mod provider_config;
@@ -154,13 +134,7 @@ pub fn load_app_config() -> Result<AppConfig, String> {
     ensure_default_config_file(&path)?;
 
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut config: AppConfig = toml::from_str(&content).map_err(|e| e.to_string())?;
-
-    if config.app.default_model.is_empty() {
-        if let Some(model) = provider_config::read_codewhale_default_text_model() {
-            config.app.default_model = model;
-        }
-    }
+    let config: AppConfig = toml::from_str(&content).map_err(|e| e.to_string())?;
 
     Ok(config)
 }

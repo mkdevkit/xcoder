@@ -6,7 +6,7 @@ import { ProviderMcpSection } from "./ProviderMcpSection";
 
 interface ProjectMcpSectionProps {
   workspace: string;
-  providerId: "codewhale" | "opencode";
+  providerId: "opencode";
   disabled?: boolean;
   embedded?: boolean;
 }

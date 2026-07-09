@@ -1,12 +1,4 @@
-use crate::agent::codewhale::{
-    approve_tool, base_url, create_thread, delete_thread, get_pending_approval,
-    get_thread_latest_seq, is_healthy as codewhale_is_healthy, list_models, list_thread_summaries,
-    load_thread_history, normalize_event as codewhale_normalize_event, patch_thread_mode,
-    run_doctor, send_turn, spawn_runtime, wait_for_health, cancel_turn, poll_turn_state as codewhale_poll_turn_state,
-    CodewhaleState, RuntimeStatus,
-    ThreadInfo,
-};
-use crate::agent::history::{HistoryMessage, PendingApproval, ThreadSummary};
+﻿use crate::agent::history::{HistoryMessage, PendingApproval, RuntimeStatus, ThreadInfo, ThreadSummary};
 use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
     delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
@@ -16,9 +8,7 @@ use crate::agent::opencode::{
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
 };
-use crate::commands::project_config::{
-    sync_project_codewhale_from_config, sync_project_opencode_from_config,
-};
+use crate::commands::project_config::sync_project_opencode_from_config;
 use crate::utils::runtime_lifecycle::{kill_child_tree, kill_tcp_listener};
 use futures_util::StreamExt;
 use std::sync::Mutex;
@@ -57,526 +47,6 @@ fn opencode_workspace(
     }
     let guard = state.lock().map_err(|e| e.to_string())?;
     Ok(guard.workspace.clone())
-}
-
-#[tauri::command]
-pub fn codewhale_doctor() -> Result<serde_json::Value, String> {
-    run_doctor()
-}
-
-#[tauri::command]
-pub fn codewhale_list_models() -> Result<Vec<crate::agent::codewhale::CodewhaleModelOption>, String> {
-    list_models()
-}
-
-#[tauri::command]
-pub async fn codewhale_start_runtime(
-    workspace: String,
-    spawn_if_missing: Option<bool>,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<RuntimeStatus, String> {
-    let workspace = workspace.trim();
-    if !workspace.is_empty() {
-        sync_project_codewhale_from_config(workspace)?;
-    }
-    let spawn_if_missing = spawn_if_missing.unwrap_or(true);
-    let url = base_url();
-    let client = reqwest::Client::new();
-
-    let cached = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        (guard.base_url.clone(), guard.child.is_some())
-    };
-
-    if cached.0.is_some() && codewhale_is_healthy(&client, &url).await {
-        return Ok(RuntimeStatus {
-            running: true,
-            base_url: cached.0,
-            owned: cached.1,
-        });
-    }
-
-    if codewhale_is_healthy(&client, &url).await {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
-        guard.base_url = Some(url.clone());
-        return Ok(RuntimeStatus {
-            running: true,
-            base_url: Some(url),
-            owned: false,
-        });
-    }
-
-    if !spawn_if_missing {
-        return Ok(RuntimeStatus {
-            running: false,
-            base_url: None,
-            owned: false,
-        });
-    }
-
-    {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(mut child) = guard.child.take() {
-            kill_child_tree(&mut child);
-        }
-        guard.base_url = None;
-    }
-
-    let child = spawn_runtime()?;
-    wait_for_health(&client, &url).await?;
-
-    {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.child = Some(child);
-        guard.base_url = Some(url.clone());
-    }
-
-    Ok(RuntimeStatus {
-        running: true,
-        base_url: Some(url),
-        owned: true,
-    })
-}
-
-#[tauri::command]
-pub async fn codewhale_restart_runtime(
-    workspace: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<RuntimeStatus, String> {
-    let workspace = workspace.trim();
-    if !workspace.is_empty() {
-        sync_project_codewhale_from_config(workspace)?;
-    }
-    let url = base_url();
-    let client = reqwest::Client::new();
-
-    {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(mut child) = guard.child.take() {
-            kill_child_tree(&mut child);
-        }
-        guard.base_url = None;
-    }
-
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    if codewhale_is_healthy(&client, &url).await {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.base_url = Some(url.clone());
-        return Ok(RuntimeStatus {
-            running: true,
-            base_url: Some(url),
-            owned: false,
-        });
-    }
-
-    let child = spawn_runtime()?;
-    wait_for_health(&client, &url).await?;
-
-    {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.child = Some(child);
-        guard.base_url = Some(url.clone());
-    }
-
-    Ok(RuntimeStatus {
-        running: true,
-        base_url: Some(url),
-        owned: true,
-    })
-}
-
-#[tauri::command]
-pub async fn codewhale_stop_runtime(state: State<'_, Mutex<CodewhaleState>>) -> Result<(), String> {
-    let target_url = {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        guard.listening.store(false, std::sync::atomic::Ordering::SeqCst);
-        let target_url = guard
-            .base_url
-            .clone()
-            .unwrap_or_else(base_url);
-        if let Some(mut child) = guard.child.take() {
-            kill_child_tree(&mut child);
-        }
-        guard.base_url = None;
-        target_url
-    };
-
-    let client = reqwest::Client::new();
-    if codewhale_is_healthy(&client, &target_url).await {
-        kill_tcp_listener(&target_url)?;
-        for _ in 0..15 {
-            if !codewhale_is_healthy(&client, &target_url).await {
-                return Ok(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-        return Err("CodeWhale 进程仍在运行，无法停止".to_string());
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn codewhale_runtime_status(
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<RuntimeStatus, String> {
-    let cached = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        (guard.base_url.clone(), guard.child.is_some())
-    };
-    let Some(url) = cached.0 else {
-        return Ok(RuntimeStatus {
-            running: false,
-            base_url: None,
-            owned: false,
-        });
-    };
-
-    let client = reqwest::Client::new();
-    if !codewhale_is_healthy(&client, &url).await {
-        return Ok(RuntimeStatus {
-            running: false,
-            base_url: None,
-            owned: false,
-        });
-    }
-
-    Ok(RuntimeStatus {
-        running: true,
-        base_url: Some(url),
-        owned: cached.1,
-    })
-}
-
-#[tauri::command]
-pub async fn codewhale_create_thread(
-    workspace: String,
-    mode: String,
-    model: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<ThreadInfo, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    create_thread(&client, &url, &workspace, &mode, &model).await
-}
-
-#[tauri::command]
-pub async fn codewhale_send_turn(
-    thread_id: String,
-    message: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<serde_json::Value, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    send_turn(&client, &url, &thread_id, &message).await
-}
-
-#[tauri::command]
-pub async fn codewhale_cancel_turn(
-    thread_id: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    cancel_turn(&client, &url, &thread_id).await
-}
-
-#[tauri::command]
-pub async fn codewhale_set_thread_mode(
-    thread_id: String,
-    mode: String,
-    model: Option<String>,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    patch_thread_mode(
-        &client,
-        &url,
-        &thread_id,
-        &mode,
-        model.as_deref(),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn codewhale_approve(
-    approval_id: String,
-    allow: bool,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    approve_tool(&client, &url, &approval_id, allow).await
-}
-
-#[tauri::command]
-pub async fn codewhale_subscribe_events(
-    thread_id: String,
-    app: AppHandle,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<(), String> {
-    let (url, listening, subscribed_thread_id, sse_task_active, sse_reconnect) = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        let url = guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?;
-        *guard
-            .subscribed_thread_id
-            .lock()
-            .map_err(|e| e.to_string())? = Some(thread_id);
-        guard.listening.store(true, std::sync::atomic::Ordering::SeqCst);
-        guard
-            .sse_reconnect
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        (
-            url,
-            guard.listening.clone(),
-            guard.subscribed_thread_id.clone(),
-            guard.sse_task_active.clone(),
-            guard.sse_reconnect.clone(),
-        )
-    };
-
-    if sse_task_active.load(std::sync::atomic::Ordering::SeqCst) {
-        return Ok(());
-    }
-
-    sse_task_active.store(true, std::sync::atomic::Ordering::SeqCst);
-
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-
-        while listening.load(std::sync::atomic::Ordering::SeqCst) {
-            let thread_id = subscribed_thread_id
-                .lock()
-                .ok()
-                .and_then(|guard| guard.clone())
-                .unwrap_or_default();
-
-            if thread_id.is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                continue;
-            }
-
-            let since_seq = get_thread_latest_seq(&client, &url, &thread_id)
-                .await
-                .unwrap_or(0);
-            let events_url =
-                format!("{url}/v1/threads/{thread_id}/events?since_seq={since_seq}");
-
-            let response = match client.get(&events_url).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    let _ = app.emit(
-                        "agent-error",
-                        serde_json::json!({
-                            "providerId": "codewhale",
-                            "message": format!("SSE connect failed: {error}"),
-                        }),
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-                    continue;
-                }
-            };
-
-            let mut stream = response.bytes_stream();
-            let mut buffer = String::new();
-
-            loop {
-                if !listening.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-                if sse_reconnect.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(400),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(Some(Ok(chunk))) => {
-                        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let block = buffer[..pos].to_string();
-                            buffer = buffer[pos + 2..].to_string();
-
-                            for line in block.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    if data.trim() == "[DONE]" {
-                                        continue;
-                                    }
-                                    if let Ok(event) =
-                                        serde_json::from_str::<serde_json::Value>(data)
-                                    {
-                                        if let Some(normalized) =
-                                            codewhale_normalize_event(&event, &thread_id)
-                                        {
-                                            let payload = serde_json::json!({
-                                                "providerId": "codewhale",
-                                                "event": normalized,
-                                            });
-                                            let _ = app.emit("agent-event", payload);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(Some(Err(error))) => {
-                        let _ = app.emit(
-                            "agent-error",
-                            serde_json::json!({
-                                "providerId": "codewhale",
-                                "message": format!("SSE stream error: {error}"),
-                            }),
-                        );
-                        break;
-                    }
-                    Ok(None) => break,
-                    Err(_) => continue,
-                }
-            }
-
-            if listening.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            }
-        }
-
-        sse_task_active.store(false, std::sync::atomic::Ordering::SeqCst);
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn codewhale_get_pending_approval(
-    thread_id: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<Option<PendingApproval>, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    get_pending_approval(&client, &url, &thread_id).await
-}
-
-#[tauri::command]
-pub async fn codewhale_list_threads(
-    workspace: String,
-    limit: Option<u32>,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<Vec<ThreadSummary>, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    list_thread_summaries(&client, &url, &workspace, limit.unwrap_or(50)).await
-}
-
-#[tauri::command]
-pub async fn codewhale_load_thread_history(
-    thread_id: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<Vec<HistoryMessage>, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    load_thread_history(&client, &url, &thread_id).await
-}
-
-#[tauri::command]
-pub async fn codewhale_poll_turn(
-    thread_id: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<crate::agent::codewhale::CodewhaleTurnPoll, String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    codewhale_poll_turn_state(&client, &url, &thread_id).await
-}
-
-#[tauri::command]
-pub async fn codewhale_delete_thread(
-    thread_id: String,
-    state: State<'_, Mutex<CodewhaleState>>,
-) -> Result<(), String> {
-    let url = {
-        let guard = state.lock().map_err(|e| e.to_string())?;
-        guard
-            .base_url
-            .clone()
-            .ok_or_else(|| "CodeWhale runtime is not running".to_string())?
-    };
-
-    let client = reqwest::Client::new();
-    delete_thread(&client, &url, &thread_id).await
 }
 
 #[tauri::command]
@@ -851,6 +321,7 @@ pub async fn opencode_send_turn(
     mode: String,
     model: Option<String>,
     workspace: Option<String>,
+    message_id: Option<String>,
     state: State<'_, Mutex<OpencodeState>>,
 ) -> Result<(), String> {
     let url = opencode_resolve_service_url(&state).await?;
@@ -864,6 +335,7 @@ pub async fn opencode_send_turn(
         model.as_deref(),
         &message,
         workspace.as_deref(),
+        message_id.as_deref(),
     )
     .await
 }
@@ -1003,8 +475,13 @@ pub async fn opencode_subscribe_events(
                     break;
                 }
 
-                match stream.next().await {
-                    Some(Ok(chunk)) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(400),
+                    stream.next(),
+                )
+                .await
+                {
+                    Ok(Some(Ok(chunk))) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                         while let Some(pos) = buffer.find("\n\n") {
@@ -1041,7 +518,7 @@ pub async fn opencode_subscribe_events(
                             }
                         }
                     }
-                    Some(Err(error)) => {
+                    Ok(Some(Err(error))) => {
                         let _ = app.emit(
                             "agent-error",
                             serde_json::json!({
@@ -1051,7 +528,8 @@ pub async fn opencode_subscribe_events(
                         );
                         break;
                     }
-                    None => break,
+                    Ok(None) => break,
+                    Err(_) => continue,
                 }
             }
 

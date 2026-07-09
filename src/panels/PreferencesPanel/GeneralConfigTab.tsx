@@ -6,8 +6,6 @@ import { applyAppTheme } from "../../utils/appTheme";
 import type { AppConfig, RuntimeStatus } from "../../types/agent";
 import { ConfigPathRow } from "./ConfigPathRow";
 import {
-  CODEWHALE_DEFAULT_ARGS,
-  CODEWHALE_RUNTIME_DEFAULTS,
   OPENCODE_DEFAULT_ARGS,
   OPENCODE_RUNTIME_DEFAULTS,
   readRuntimeEndpoint,
@@ -27,7 +25,7 @@ function ensureProvider(config: AppConfig, id: string): AppConfig {
         id,
         type: "http",
         command: id,
-        args: id === "codewhale" ? [...CODEWHALE_DEFAULT_ARGS] : [...OPENCODE_DEFAULT_ARGS],
+        args: [...OPENCODE_DEFAULT_ARGS],
         health_cmd: [],
       },
     ],
@@ -42,20 +40,14 @@ export function GeneralConfigTab() {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<"idle" | "ok" | "err">("idle");
   const [statusMessage, setStatusMessage] = useState("");
-  const [codewhaleRuntime, setCodewhaleRuntime] = useState<RuntimeStatus | null>(null);
   const [opencodeRuntime, setOpencodeRuntime] = useState<RuntimeStatus | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState<string | null>(null);
 
   const refreshRuntimeStatus = useCallback(async () => {
     try {
-      const [cw, oc] = await Promise.all([
-        tauriInvoke<RuntimeStatus>("codewhale_runtime_status"),
-        tauriInvoke<RuntimeStatus>("opencode_runtime_status"),
-      ]);
-      setCodewhaleRuntime(cw);
+      const oc = await tauriInvoke<RuntimeStatus>("opencode_runtime_status");
       setOpencodeRuntime(oc);
     } catch {
-      setCodewhaleRuntime(null);
       setOpencodeRuntime(null);
     }
   }, []);
@@ -68,9 +60,7 @@ export function GeneralConfigTab() {
         tauriInvoke<AppConfig>("load_config"),
         tauriInvoke<{ dir: string; file: string }>("get_config_paths"),
       ]);
-      setConfig(
-        ensureProvider(ensureProvider(appConfig, "codewhale"), "opencode"),
-      );
+      setConfig(ensureProvider(appConfig, "opencode"));
       setConfigPath(paths.file);
       await refreshRuntimeStatus();
     } catch (error) {
@@ -93,7 +83,6 @@ export function GeneralConfigTab() {
   }, [refreshRuntimeStatus]);
 
   const updateProvider = (
-    providerId: "codewhale" | "opencode",
     patch: Partial<AppConfig["providers"][number]>,
   ) => {
     setConfig((prev) => {
@@ -101,7 +90,7 @@ export function GeneralConfigTab() {
       return {
         ...prev,
         providers: prev.providers.map((item) =>
-          item.id === providerId ? { ...item, ...patch } : item,
+          item.id === "opencode" ? { ...item, ...patch } : item,
         ),
       };
     });
@@ -125,12 +114,9 @@ export function GeneralConfigTab() {
     }
   };
 
-  const runRuntimeAction = async (
-    providerId: "codewhale" | "opencode",
-    action: "start" | "restart" | "stop",
-  ) => {
-    const commands = getAgentCommands(providerId);
-    setRuntimeBusy(`${providerId}:${action}`);
+  const runRuntimeAction = async (action: "start" | "restart" | "stop") => {
+    const commands = getAgentCommands("opencode");
+    setRuntimeBusy(`opencode:${action}`);
     setStatus("idle");
     try {
       if (action === "start") {
@@ -142,13 +128,13 @@ export function GeneralConfigTab() {
         await tauriInvoke(commands.restartRuntime, { workspace: "" });
       } else {
         await tauriInvoke(commands.stopRuntime);
-        await useChatStore.getState().refreshProviderRuntime(providerId);
+        await useChatStore.getState().refreshProviderRuntime("opencode");
       }
       await refreshRuntimeStatus();
       if (action === "start" || action === "restart") {
         await useChatStore
           .getState()
-          .autoConnectAfterRuntimeService(providerId)
+          .autoConnectAfterRuntimeService("opencode")
           .catch(console.error);
       }
     } catch (error) {
@@ -163,121 +149,15 @@ export function GeneralConfigTab() {
     return <p className="preferences-hint">{t("preferences.loading")}</p>;
   }
 
-  const codewhale = config.providers.find((item) => item.id === "codewhale");
   const opencode = config.providers.find((item) => item.id === "opencode");
-  const cwEndpoint = readRuntimeEndpoint(
-    codewhale?.args ?? CODEWHALE_DEFAULT_ARGS,
-    CODEWHALE_RUNTIME_DEFAULTS,
-  );
   const ocEndpoint = readRuntimeEndpoint(
     opencode?.args ?? OPENCODE_DEFAULT_ARGS,
     OPENCODE_RUNTIME_DEFAULTS,
   );
 
-  const renderRuntimeCard = (
-    providerId: "codewhale" | "opencode",
-    title: string,
-    provider: AppConfig["providers"][number] | undefined,
-    endpoint: { host: string; port: string },
-    hostFlag: "--host" | "--hostname",
-    runtime: RuntimeStatus | null,
-    defaultArgs: string[],
-  ) => {
-    if (!provider) return null;
-    const busyPrefix = `${providerId}:`;
-    const isRunning = runtime?.running ?? false;
-    const actionBusy = runtimeBusy !== null;
-    return (
-      <div className="preferences-card">
-        <div className="preferences-card-header">
-          <span className="preferences-card-title">{title}</span>
-          <span className="preferences-runtime-status">
-            {runtime?.running
-              ? t("preferences.runtimeRunning")
-              : t("preferences.runtimeStopped")}
-            {runtime?.base_url ? ` · ${runtime.base_url}` : ""}
-          </span>
-        </div>
-
-        <div className="preferences-field">
-          <label>{t("preferences.runtimeCommand")}</label>
-          <input
-            className="preferences-input preferences-input-readonly"
-            value={provider.command}
-            readOnly
-          />
-        </div>
-        <div className="preferences-field-row">
-          <div className="preferences-field">
-            <label>{t("preferences.runtimeHost")}</label>
-            <input
-              className="preferences-input"
-              value={endpoint.host}
-              onChange={(e) =>
-                updateProvider(providerId, {
-                  args: writeRuntimeEndpoint(
-                    provider.args.length > 0 ? provider.args : [...defaultArgs],
-                    { ...endpoint, host: e.target.value },
-                    hostFlag,
-                  ),
-                })
-              }
-            />
-          </div>
-          <div className="preferences-field">
-            <label>{t("preferences.runtimePort")}</label>
-            <input
-              className="preferences-input"
-              value={endpoint.port}
-              onChange={(e) =>
-                updateProvider(providerId, {
-                  args: writeRuntimeEndpoint(
-                    provider.args.length > 0 ? provider.args : [...defaultArgs],
-                    { ...endpoint, port: e.target.value },
-                    hostFlag,
-                  ),
-                })
-              }
-            />
-          </div>
-        </div>
-
-        <div className="preferences-runtime-actions">
-          <button
-            type="button"
-            className="preferences-btn"
-            disabled={actionBusy || isRunning}
-            onClick={() => runRuntimeAction(providerId, "start").catch(console.error)}
-          >
-            {runtimeBusy === `${busyPrefix}start`
-              ? t("preferences.runtimeStarting")
-              : t("preferences.runtimeStart")}
-          </button>
-          <button
-            type="button"
-            className="preferences-btn"
-            disabled={actionBusy || !isRunning}
-            onClick={() => runRuntimeAction(providerId, "restart").catch(console.error)}
-          >
-            {runtimeBusy === `${busyPrefix}restart`
-              ? t("preferences.runtimeRestarting")
-              : t("preferences.runtimeRestart")}
-          </button>
-          <button
-            type="button"
-            className="preferences-btn"
-            disabled={actionBusy || !isRunning}
-            onClick={() => runRuntimeAction(providerId, "stop").catch(console.error)}
-          >
-            {runtimeBusy === `${busyPrefix}stop`
-              ? t("preferences.runtimeStopping")
-              : t("preferences.runtimeStop")}
-          </button>
-        </div>
-        <p className="preferences-hint">{t("preferences.runtimeServiceHint")}</p>
-      </div>
-    );
-  };
+  const busyPrefix = "opencode:";
+  const isRunning = opencodeRuntime?.running ?? false;
+  const actionBusy = runtimeBusy !== null;
 
   return (
     <div>
@@ -292,7 +172,10 @@ export function GeneralConfigTab() {
             onChange={(e) =>
               setConfig((prev) =>
                 prev
-                  ? { ...prev, app: { ...prev.app, theme: e.target.value } }
+                  ? {
+                      ...prev,
+                      app: { ...prev.app, theme: e.target.value },
+                    }
                   : prev,
               )
             }
@@ -300,31 +183,6 @@ export function GeneralConfigTab() {
             <option value="dark">{t("preferences.themeDark")}</option>
             <option value="light">{t("preferences.themeLight")}</option>
           </select>
-        </div>
-
-        <div className="preferences-field">
-          <label>{t("preferences.defaultProvider")}</label>
-          <select
-            className="preferences-select"
-            value={config.app.default_provider}
-            onChange={(e) =>
-              setConfig((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      app: { ...prev.app, default_provider: e.target.value },
-                    }
-                  : prev,
-              )
-            }
-          >
-            {config.providers.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.id}
-              </option>
-            ))}
-          </select>
-          <p className="preferences-hint">{t("preferences.defaultProviderHint")}</p>
         </div>
 
         <div className="preferences-field">
@@ -350,23 +208,84 @@ export function GeneralConfigTab() {
       <section className="preferences-section">
         <div className="preferences-label">{t("preferences.runtimeServices")}</div>
         <p className="preferences-hint">{t("preferences.runtimePortHint")}</p>
-        {renderRuntimeCard(
-          "codewhale",
-          "CodeWhale",
-          codewhale,
-          cwEndpoint,
-          "--host",
-          codewhaleRuntime,
-          CODEWHALE_DEFAULT_ARGS,
-        )}
-        {renderRuntimeCard(
-          "opencode",
-          "OpenCode",
-          opencode,
-          ocEndpoint,
-          "--hostname",
-          opencodeRuntime,
-          OPENCODE_DEFAULT_ARGS,
+        {opencode && (
+          <div className="preferences-card">
+            <div className="preferences-card-header">
+              <span className="preferences-card-title">OpenCode</span>
+              <span className="preferences-runtime-status">
+                {opencodeRuntime?.running
+                  ? t("preferences.runtimeRunning")
+                  : t("preferences.runtimeStopped")}
+                {opencodeRuntime?.base_url ? ` · ${opencodeRuntime.base_url}` : ""}
+              </span>
+            </div>
+            <div className="preferences-runtime-grid">
+              <div className="preferences-field">
+                <label>{t("preferences.runtimeHost")}</label>
+                <input
+                  className="preferences-input"
+                  value={ocEndpoint.host}
+                  onChange={(e) =>
+                    updateProvider({
+                      args: writeRuntimeEndpoint(
+                        opencode.args ?? OPENCODE_DEFAULT_ARGS,
+                        { ...ocEndpoint, host: e.target.value },
+                        "--hostname",
+                      ),
+                    })
+                  }
+                />
+              </div>
+              <div className="preferences-field">
+                <label>{t("preferences.runtimePort")}</label>
+                <input
+                  className="preferences-input"
+                  value={ocEndpoint.port}
+                  onChange={(e) =>
+                    updateProvider({
+                      args: writeRuntimeEndpoint(
+                        opencode.args ?? OPENCODE_DEFAULT_ARGS,
+                        { ...ocEndpoint, port: e.target.value },
+                        "--hostname",
+                      ),
+                    })
+                  }
+                />
+              </div>
+            </div>
+            <div className="preferences-runtime-actions">
+              <button
+                type="button"
+                className="preferences-btn primary"
+                disabled={actionBusy || isRunning}
+                onClick={() => runRuntimeAction("start").catch(console.error)}
+              >
+                {runtimeBusy === `${busyPrefix}start`
+                  ? t("preferences.runtimeStarting")
+                  : t("preferences.runtimeStart")}
+              </button>
+              <button
+                type="button"
+                className="preferences-btn"
+                disabled={actionBusy || !isRunning}
+                onClick={() => runRuntimeAction("restart").catch(console.error)}
+              >
+                {runtimeBusy === `${busyPrefix}restart`
+                  ? t("preferences.runtimeRestarting")
+                  : t("preferences.runtimeRestart")}
+              </button>
+              <button
+                type="button"
+                className="preferences-btn"
+                disabled={actionBusy || !isRunning}
+                onClick={() => runRuntimeAction("stop").catch(console.error)}
+              >
+                {runtimeBusy === `${busyPrefix}stop`
+                  ? t("preferences.runtimeStopping")
+                  : t("preferences.runtimeStop")}
+              </button>
+            </div>
+          </div>
         )}
       </section>
 

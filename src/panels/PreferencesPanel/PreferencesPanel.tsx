@@ -2,14 +2,13 @@ import { useState } from "react";
 import { useTranslation, localeLabel } from "../../i18n";
 import { useSettingsStore } from "../../stores/settings";
 import { APP_LOCALES, type AppLocale } from "../../i18n/types";
-import { CodewhaleConfigTab } from "./CodewhaleConfigTab";
 import { OpenCodeConfigTab } from "./OpenCodeConfigTab";
 import { GeneralConfigTab } from "./GeneralConfigTab";
 import { ProjectConfigTab } from "./ProjectConfigTab";
 import { preferencesStyles } from "./preferencesStyles";
 import { useWorkspaceStore } from "../../stores/workspace";
 
-type PreferencesTab = "general" | "project" | "codewhale" | "opencode";
+type PreferencesTab = "general" | "project" | "opencode";
 
 export function PreferencesPanel() {
   const { t } = useTranslation();
@@ -41,14 +40,6 @@ export function PreferencesPanel() {
             {t("preferences.tabProject")}
           </button>
         )}
-        <button
-          type="button"
-          role="tab"
-          className={`preferences-tab ${activeTab === "codewhale" ? "active" : ""}`}
-          onClick={() => setActiveTab("codewhale")}
-        >
-          {t("preferences.tabCodewhale")}
-        </button>
         <button
           type="button"
           role="tab"
@@ -87,12 +78,6 @@ export function PreferencesPanel() {
       {activeTab === "project" && rootPath && (
         <div role="tabpanel">
           <ProjectConfigTab key={rootPath} />
-        </div>
-      )}
-
-      {activeTab === "codewhale" && (
-        <div role="tabpanel">
-          <CodewhaleConfigTab />
         </div>
       )}
 

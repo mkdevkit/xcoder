@@ -1,12 +1,11 @@
 import type {
   ChatMessage,
-  CodewhaleModelOption,
   OpencodeModelOption,
   RuntimeStatus,
   ThreadInfo,
   ThreadSummary,
 } from "../types/agent";
-import { CODEWHALE_MODES } from "../utils/codewhaleModels";
+import type { ActiveTurn } from "../utils/turnState";
 
 export interface ProviderChatSlice {
   runtime: RuntimeStatus;
@@ -21,16 +20,16 @@ export interface ProviderChatSlice {
   opencodeModelCatalog: OpencodeModelOption[];
   opencodeConnectedProviders: string[];
   opencodeVendor: string;
-  codewhaleModelCatalog: CodewhaleModelOption[];
   messages: ChatMessage[];
   streaming: boolean;
+  activeTurn: ActiveTurn | null;
   runtimeBusy: boolean;
   runtimeAction: "connect" | "disconnect" | "restart" | null;
   pendingApproval: { id: string; description: string } | null;
   error: string | null;
 }
 
-export function createProviderChatSlice(providerId: string): ProviderChatSlice {
+export function createProviderChatSlice(_providerId: string): ProviderChatSlice {
   return {
     runtime: { running: false, owned: false },
     connectedIntent: false,
@@ -38,20 +37,15 @@ export function createProviderChatSlice(providerId: string): ProviderChatSlice {
     chatWorkspace: null,
     threads: [],
     threadsLoading: false,
-    mode:
-      providerId === "codewhale"
-        ? "agent"
-        : providerId === "opencode"
-          ? "build"
-          : "agent",
+    mode: "build",
     model: "",
-    dynamicModes: providerId === "codewhale" ? [...CODEWHALE_MODES] : [],
+    dynamicModes: [],
     opencodeModelCatalog: [],
     opencodeConnectedProviders: [],
     opencodeVendor: "",
-    codewhaleModelCatalog: [],
     messages: [],
     streaming: false,
+    activeTurn: null,
     runtimeBusy: false,
     runtimeAction: null,
     pendingApproval: null,

@@ -23,7 +23,7 @@ pub fn resolve_executable(name: &str) -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "未找到 {name}。请安装: npm install -g {name}，或在配置文件中指定 codewhale.cmd 的完整路径。"
+        "未找到 {name}。请安装: npm install -g {name}，或在配置文件中指定可执行文件的完整路径。"
     ))
 }
 
@@ -41,7 +41,7 @@ pub fn build_command(program: &Path, args: &[&str]) -> Command {
 
     augment_path(&mut cmd);
 
-    // npm global shims (codewhale.cmd / opencode.cmd) run via cmd.exe; without this
+    // npm global shims (opencode.cmd) run via cmd.exe; without this
     // flag Windows allocates a visible console when xcoder is built as a GUI app.
     #[cfg(windows)]
     {

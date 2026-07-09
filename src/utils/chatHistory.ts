@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../types/agent";
 import type { HistoryMessage } from "../types/agent";
+import type { ActiveTurn } from "./turnState";
 
 export function normalizePlanningMessageOrder(
   messages: ChatMessage[],
@@ -30,6 +31,7 @@ export function mapHistoryToChatMessages(history: HistoryMessage[]): ChatMessage
     content: item.content,
     timestamp: item.timestamp || Date.now(),
     toolName: item.tool_name,
+    turnId: item.turn_id,
   }));
   return normalizePlanningMessageOrder(messages);
 }
@@ -41,6 +43,25 @@ function lastUserMessage(messages: ChatMessage[]) {
     }
   }
   return undefined;
+}
+
+function lastUserIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function latestAssistantTextInTurn(messages: ChatMessage[]): string {
+  const userIndex = lastUserIndex(messages);
+  for (let i = messages.length - 1; i > userIndex; i -= 1) {
+    if (messages[i].role === "assistant") {
+      return messages[i].content;
+    }
+  }
+  return "";
 }
 
 function remoteHasUserText(messages: ChatMessage[], text: string) {
@@ -59,117 +80,249 @@ function remoteHasDisplayableContent(messages: ChatMessage[]) {
   );
 }
 
-function latestAssistantText(messages: ChatMessage[]) {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "assistant") {
-      return messages[i].content;
-    }
-  }
-  return "";
+function prefixMessageIds(prefix: ChatMessage[]): Set<string> {
+  return new Set(prefix.map((msg) => msg.id));
 }
 
-function mergeRemoteTailOntoLocal(
-  local: ChatMessage[],
+function remoteTailForCurrentTurn(
+  prefix: ChatMessage[],
   remote: ChatMessage[],
+  localUser: ChatMessage,
+  activeTurn?: ActiveTurn | null,
 ): ChatMessage[] {
-  const localUser = lastUserMessage(local);
-  if (!localUser) return local;
-
-  let localUserIndex = -1;
-  for (let index = local.length - 1; index >= 0; index -= 1) {
-    if (local[index].role === "user") {
-      localUserIndex = index;
-      break;
+  if (activeTurn?.anchorKind === "message_id") {
+    const remoteUserIndex = remote.findIndex(
+      (msg) => msg.role === "user" && msg.id === activeTurn.anchorId,
+    );
+    if (remoteUserIndex >= 0) {
+      return remote.slice(remoteUserIndex + 1);
     }
   }
-  if (localUserIndex < 0) return local;
+
+  if (activeTurn?.anchorKind === "turn_id") {
+    const remoteUserIndex = remote.findIndex(
+      (msg) => msg.role === "user" && msg.turnId === activeTurn.anchorId,
+    );
+    if (remoteUserIndex >= 0) {
+      return remote
+        .slice(remoteUserIndex + 1)
+        .filter(
+          (msg) => !msg.turnId || msg.turnId === activeTurn.anchorId,
+        );
+    }
+  }
 
   const remoteUserIndex = remote.findIndex(
     (msg) =>
       msg.role === "user" &&
       msg.content.trim() === localUser.content.trim(),
   );
-  const remoteTail =
-    remoteUserIndex >= 0 ? remote.slice(remoteUserIndex + 1) : remote;
-  if (remoteTail.length === 0) return local;
+  if (remoteUserIndex >= 0) {
+    return remote.slice(remoteUserIndex + 1);
+  }
 
-  const prefix = local.slice(0, localUserIndex + 1);
-  return normalizePlanningMessageOrder([...prefix, ...remoteTail]);
+  const knownIds = prefixMessageIds(prefix);
+  const novel = remote.filter((msg) => !knownIds.has(msg.id));
+  if (novel.length > 0) {
+    return novel;
+  }
+
+  return [];
+}
+
+function mergeTurnTail(
+  localTurnTail: ChatMessage[],
+  remoteTurnTail: ChatMessage[],
+): ChatMessage[] {
+  if (remoteTurnTail.length === 0) {
+    return localTurnTail;
+  }
+
+  if (localTurnTail.length === 0) {
+    return remoteTurnTail;
+  }
+
+  const anchorIndex = localTurnTail.findIndex(
+    (msg) => msg.id === remoteTurnTail[0]?.id,
+  );
+  if (anchorIndex >= 0) {
+    const mergedTail = mergeTurnTail(
+      localTurnTail.slice(anchorIndex),
+      remoteTurnTail,
+    );
+    return [...localTurnTail.slice(0, anchorIndex), ...mergedTail];
+  }
+
+  return appendStreamingPlaceholder(remoteTurnTail, localTurnTail);
+}
+
+function reconcileCurrentUser(
+  localUser: ChatMessage,
+  remote: ChatMessage[],
+  activeTurn?: ActiveTurn | null,
+): ChatMessage {
+  if (activeTurn?.anchorKind === "message_id") {
+    const remoteUser = remote.find(
+      (msg) => msg.role === "user" && msg.id === activeTurn.anchorId,
+    );
+    if (remoteUser) {
+      return {
+        ...localUser,
+        id: remoteUser.id,
+        turnId: remoteUser.turnId,
+      };
+    }
+  }
+
+  if (activeTurn?.anchorKind === "turn_id") {
+    const remoteUser = remote.find(
+      (msg) => msg.role === "user" && msg.turnId === activeTurn.anchorId,
+    );
+    if (remoteUser) {
+      return {
+        ...localUser,
+        id: remoteUser.id,
+        turnId: activeTurn.anchorId,
+      };
+    }
+  }
+
+  const remoteUser = remote.find(
+    (msg) =>
+      msg.role === "user" &&
+      msg.content.trim() === localUser.content.trim(),
+  );
+  if (remoteUser) {
+    return {
+      ...localUser,
+      id: remoteUser.id,
+      turnId: remoteUser.turnId ?? localUser.turnId,
+    };
+  }
+
+  return localUser;
+}
+
+function mergeCurrentTurnFromRemote(
+  local: ChatMessage[],
+  remote: ChatMessage[],
+  activeTurn?: ActiveTurn | null,
+): ChatMessage[] {
+  const localUserIndex = lastUserIndex(local);
+  if (localUserIndex < 0) {
+    return remote.length > 0 ? remote : local;
+  }
+
+  const localUser = local[localUserIndex];
+  const reconciledUser = reconcileCurrentUser(localUser, remote, activeTurn);
+  const prefix = [
+    ...local.slice(0, localUserIndex),
+    reconciledUser,
+  ];
+  const localTurnTail = local.slice(localUserIndex + 1);
+  const remoteTurnTail = remoteTailForCurrentTurn(
+    prefix,
+    remote,
+    reconciledUser,
+    activeTurn,
+  );
+
+  if (remoteTurnTail.length === 0) {
+    return local;
+  }
+
+  const mergedTurnTail = mergeTurnTail(localTurnTail, remoteTurnTail);
+  return normalizePlanningMessageOrder([...prefix, ...mergedTurnTail]);
+}
+
+export function markCurrentTurnCancelled(
+  messages: ChatMessage[],
+  notice: string,
+): ChatMessage[] {
+  const userIndex = lastUserIndex(messages);
+  if (userIndex < 0) return messages;
+
+  const trimmedNotice = notice.trim();
+  let targetIndex = -1;
+  for (let i = messages.length - 1; i > userIndex; i -= 1) {
+    if (messages[i].role === "assistant") {
+      targetIndex = i;
+      break;
+    }
+  }
+
+  if (targetIndex < 0) {
+    return [
+      ...messages,
+      {
+        id: `cancelled-${Date.now()}`,
+        role: "assistant",
+        content: trimmedNotice,
+        timestamp: Date.now(),
+      },
+    ];
+  }
+
+  const target = messages[targetIndex];
+  const content = target.content.trim();
+  if (
+    content === trimmedNotice ||
+    content.endsWith(trimmedNotice) ||
+    content.includes("已取消") ||
+    content.toLowerCase().includes("cancelled") ||
+    content.toLowerCase().includes("aborted")
+  ) {
+    return messages;
+  }
+
+  const nextContent = content ? `${content}\n\n${trimmedNotice}` : trimmedNotice;
+  return [
+    ...messages.slice(0, targetIndex),
+    { ...target, content: nextContent },
+    ...messages.slice(targetIndex + 1),
+  ];
 }
 
 export function mergeServerMessagesWithLocal(
   local: ChatMessage[],
   history: HistoryMessage[],
-  options?: { pollOnly?: boolean; limitedRemote?: boolean },
+  options?: {
+    pollOnly?: boolean;
+    limitedRemote?: boolean;
+    activeTurn?: ActiveTurn | null;
+  },
 ): ChatMessage[] {
   const remote = mapHistoryToChatMessages(history);
+  if (remote.length === 0) {
+    return local;
+  }
 
-  if (options?.pollOnly && options?.limitedRemote && remote.length > 0) {
-    const anchorIndex = local.findIndex((msg) => msg.id === remote[0]?.id);
-    if (anchorIndex > 0) {
-      const mergedTail = mergeServerMessagesWithLocal(
-        local.slice(anchorIndex),
-        history,
-        { pollOnly: true },
-      );
-      return [...local.slice(0, anchorIndex), ...mergedTail];
-    }
-    if (anchorIndex === 0) {
-      return mergeServerMessagesWithLocal(local, history, { pollOnly: true });
-    }
-
-    const localUser = lastUserMessage(local);
-    const remoteUserIndex = localUser
-      ? remote.findIndex(
-          (msg) =>
-            msg.role === "user" &&
-            msg.content.trim() === localUser.content.trim(),
-        )
-      : -1;
-    if (remoteUserIndex >= 0) {
-      let localUserIndex = -1;
-      for (let index = local.length - 1; index >= 0; index -= 1) {
-        if (local[index].role === "user") {
-          localUserIndex = index;
-          break;
-        }
-      }
-      if (localUserIndex >= 0) {
-        const anchor = Math.max(0, localUserIndex - remoteUserIndex);
-        const mergedTail = mergeServerMessagesWithLocal(
-          local.slice(anchor),
-          history,
-          { pollOnly: true },
-        );
-        return [...local.slice(0, anchor), ...mergedTail];
-      }
-    }
-
-    if (localUser) {
-      const mergedTail = mergeRemoteTailOntoLocal(local, remote);
-      if (mergedTail !== local) {
-        return mergedTail;
-      }
-    }
+  if (options?.pollOnly) {
+    return mergeCurrentTurnFromRemote(local, remote, options.activeTurn);
   }
 
   const localUser = lastUserMessage(local);
-
-  if (options?.pollOnly) {
-    if (localUser && !remoteHasUserText(remote, localUser.content)) {
-      if (remoteHasDisplayableContent(remote)) {
-        return mergeRemoteTailOntoLocal(local, remote);
-      }
-      return local;
-    }
-    return appendStreamingPlaceholder(remote, local);
-  }
-
   if (localUser) {
+    const anchorMatched =
+      options?.activeTurn?.anchorKind === "message_id"
+        ? remote.some(
+            (msg) =>
+              msg.role === "user" && msg.id === options.activeTurn?.anchorId,
+          )
+        : options?.activeTurn?.anchorKind === "turn_id"
+          ? remote.some(
+              (msg) =>
+                msg.role === "user" &&
+                msg.turnId === options.activeTurn?.anchorId,
+            )
+          : false;
     const localText = localUser.content.trim();
-    if (localText && !remoteHasUserText(remote, localText)) {
-      if (remoteHasDisplayableContent(remote)) {
-        return mergeRemoteTailOntoLocal(local, remote);
+    if (
+      anchorMatched ||
+      (localText && !remoteHasUserText(remote, localText))
+    ) {
+      if (anchorMatched || remoteHasDisplayableContent(remote)) {
+        return mergeCurrentTurnFromRemote(local, remote, options?.activeTurn);
       }
       return local;
     }
@@ -177,14 +330,15 @@ export function mergeServerMessagesWithLocal(
 
   let merged = appendStreamingPlaceholder(remote, local);
 
-  const localAssistant = latestAssistantText(local);
-  const remoteAssistant = latestAssistantText(merged);
+  const localAssistant = latestAssistantTextInTurn(local);
+  const remoteAssistant = latestAssistantTextInTurn(merged);
   if (
     localAssistant.length > remoteAssistant.length &&
     (remoteAssistant.length === 0 ||
       localAssistant.startsWith(remoteAssistant))
   ) {
-    for (let i = merged.length - 1; i >= 0; i -= 1) {
+    const userIndex = lastUserIndex(merged);
+    for (let i = merged.length - 1; i > userIndex; i -= 1) {
       if (merged[i].role === "assistant") {
         merged = [
           ...merged.slice(0, i),
@@ -214,6 +368,10 @@ export function turnHasDisplayableContent(messages: ChatMessage[]): boolean {
     if (message.role === "assistant" && message.content.trim()) return true;
   }
   return false;
+}
+
+export function historyHasDisplayableContent(history: HistoryMessage[]): boolean {
+  return turnHasDisplayableContent(mapHistoryToChatMessages(history));
 }
 
 function appendStreamingPlaceholder(

@@ -19,7 +19,7 @@ interface McpStatusResult {
 }
 
 interface ProviderMcpSectionProps {
-  providerId: "codewhale" | "opencode";
+  providerId: "opencode";
   configPath: string;
   servers: McpServerEntry[];
   onChange: (servers: McpServerEntry[]) => void;
@@ -110,16 +110,10 @@ export function ProviderMcpSection({
     setStatusLoading(true);
     setStatusError("");
     try {
-      const result =
-        providerId === "opencode"
-          ? await tauriInvoke<McpStatusResult>("query_opencode_mcp_status", {
-              workspace: workspace ?? "",
-              scope,
-            })
-          : await tauriInvoke<McpStatusResult>("query_codewhale_mcp_status", {
-              workspace: workspace ?? "",
-              scope,
-            });
+      const result = await tauriInvoke<McpStatusResult>("query_opencode_mcp_status", {
+        workspace: workspace ?? "",
+        scope,
+      });
       if (result.servers) {
         onChange(mergeMcpServersFromDisk(servers, result.servers));
       }
@@ -134,12 +128,8 @@ export function ProviderMcpSection({
 
   const hintKey =
     scope === "project"
-      ? providerId === "opencode"
-        ? "preferences.projectOpencodeMcpHint"
-        : "preferences.projectCodewhaleMcpHint"
-      : providerId === "opencode"
-        ? "preferences.opencodeMcpHint"
-        : "preferences.codewhaleMcpHint";
+      ? "preferences.projectOpencodeMcpHint"
+      : "preferences.opencodeMcpHint";
 
   const content = (
     <>

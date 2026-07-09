@@ -1,8 +1,8 @@
-# xcoder
+﻿# xcoder
 
 ![preview](./public/xcoder.png)
 
-An AI coding workbench built with Tauri, integrating [CodeWhale](https://www.codewhale.ai/) and [OpenCode](https://opencode.ai/).
+An AI coding workbench built with Tauri, integrating [OpenCode](https://opencode.ai/).
 
 **中文文档:** [README.zh.md](./README.zh.md)
 
@@ -10,8 +10,8 @@ An AI coding workbench built with Tauri, integrating [CodeWhale](https://www.cod
 
 - **Three-column layout**: Explorer · Monaco editor · AI chat, with draggable panel widths
 - **Project browsing & editing**: Open local folders, multi-tab editing, save, auto-reload on external changes
-- **Dual AI backends**: CodeWhale / OpenCode with streaming chat, tool calls, and approval gate
-- **Sessions & history**: Per-project local chat history (`.codewhale/history`, `.opencode/history`)
+- **OpenCode backend**: streaming chat, tool calls, and approval gate
+- **Sessions & history**: Per-project local chat history (`.opencode/history`, `.opencode/history`)
 - **Cursor-like workflow**: Drag files into chat, `@` path references, Markdown rendering, context menus
 - **Integrated terminal**: Multi-tab PTY with project root as default cwd
 - **Multilingual UI**: Chinese, English, Japanese, French, German, Russian, Spanish, Portuguese, Italian — switch instantly in Preferences
@@ -20,7 +20,7 @@ An AI coding workbench built with Tauri, integrating [CodeWhale](https://www.cod
 
 ## Quick start
 
-1. Install [prerequisites](#prerequisites) and at least one AI backend (CodeWhale or OpenCode).
+1. Install [prerequisites](#prerequisites) and the OpenCode CLI.
 2. Configure API keys and `config.toml` as described in [Configuration](#configuration).
 3. Launch the app:
    ```bash
@@ -63,14 +63,14 @@ An AI coding workbench built with Tauri, integrating [CodeWhale](https://www.cod
 | | **Configuration** → Open Config Folder | Open xcoder's config directory in the system file manager |
 | | **Configuration** → Open config.toml | Edit xcoder's `config.toml` |
 | | **Configuration** → Open opencode.json | Edit OpenCode global config |
-| | **Configuration** → Open codewhale.json | Opens `~/.codewhale/config.toml` (TOML, not JSON) |
+| | **Configuration** → Open opencode.json | Opens `~/.opencode/config.toml` (TOML, not JSON) |
 | **Terminal** | New Terminal | Start a PTY in the project directory (if open) |
 
 ### Explorer
 
 - After **Open Project**, the file tree appears; click folders to expand/collapse, files to open in the editor.
 - These **dot directories** are hidden by default: `.git`, `node_modules`, `target`, `dist`, `.specstory`, `.cursor`.  
-  Other dot dirs such as `.codewhale` and `.opencode` **are shown** (including local chat history).
+  Other dot dirs such as `.opencode` and `.opencode` **are shown** (including local chat history).
 - **Select** a file or folder, then use shortcuts or the context menu (focus the explorer first by clicking it).
 
 | Action | How |
@@ -103,7 +103,7 @@ Editor tab **right-click**:
 #### Recommended workflow
 
 1. **Open a project** (required before connecting with **OpenCode**).
-2. Click **Connect** — xcoder starts `codewhale serve` or `opencode serve` in the background (release builds hide the CMD window).
+2. Click **Connect** — xcoder starts `opencode serve` or `opencode serve` in the background (release builds hide the CMD window).
 3. Sessions are **not** auto-selected or created; pick a **historical session** or click **+** for a **new session**.
 4. **Send** messages; **Enter** to send, **Shift+Enter** for a newline.
 5. **Disconnect** stops the runtime and **clears** the current session and messages.
@@ -113,9 +113,9 @@ Editor tab **right-click**:
 | Control | Description |
 |---------|-------------|
 | Provider dropdown | Switch when multiple providers are configured in `config.toml` |
-| Mode | Fetched at runtime — CodeWhale: `plan` / `agent` / `yolo`; OpenCode: from `/agent` |
+| Mode | Fetched at runtime — opencode: `plan` / `agent` / `yolo`; OpenCode: from `/agent` |
 | Model provider | OpenCode only — lists configured providers (e.g. `deepseek`, `zhipu-coding`) |
-| Model | Fetched at runtime — CodeWhale: `codewhale model list`; OpenCode: models for the selected provider |
+| Model | Fetched at runtime — opencode: `opencode model list`; OpenCode: models for the selected provider |
 | Connect / Disconnect | Start or stop the AI runtime |
 | Session dropdown | Switch sessions (merged local + remote list) |
 | × | Delete current session (with confirmation) |
@@ -135,7 +135,7 @@ Inserts **`@relative/path`** at the cursor, e.g. `@src/App.tsx`. Paths outside t
 
 #### Tool approval
 
-When the AI requests file writes, commands, etc., an **approval card** appears in the chat — click **Allow** or **Deny**. Policy can also be tuned in CodeWhale / OpenCode native config (`approval_mode`, etc.).
+When the AI requests file writes, commands, etc., an **approval card** appears in the chat — click **Allow** or **Deny**. Policy can also be tuned in OpenCode native config (`approval_mode`, etc.).
 
 #### Message display
 
@@ -186,7 +186,7 @@ Right-click on empty/workbench area:
 
 ### Local chat history
 
-- Paths: `<project>/.codewhale/history/` or `<project>/.opencode/history/`.
+- Paths: `<project>/.opencode/history/` or `<project>/.opencode/history/`.
 - **Auto-saved** on send, turn complete, or error.
 - Session list **merges** local and runtime records, preferring meaningful local titles.
 - Deleting a session removes local files and runtime records (when connected).
@@ -201,11 +201,6 @@ Right-click on empty/workbench area:
 4. **AI backend (install at least one)**
 
 ```bash
-# CodeWhale
-npm install -g codewhale
-codewhale auth set --provider deepseek --api-key <your-key>
-codewhale doctor
-
 # OpenCode
 npm install -g opencode
 opencode --version
@@ -220,7 +215,7 @@ xcoder uses a **two-layer configuration model**: its own `config.toml` controls 
 | Config file | Purpose | Typical path |
 |-------------|---------|--------------|
 | `config.toml` | xcoder app: default provider, launch command, health check | Windows: `%APPDATA%\xcoder\config.toml`<br>Linux/macOS: `~/.config/xcoder/config.toml` |
-| `config.toml` (CodeWhale) | CodeWhale native: API key, default model, approval mode | `~/.codewhale/config.toml` |
+| `config.toml` (opencode) | opencode native: API key, default model, approval mode | `~/.opencode/config.toml` |
 | `opencode.json` | OpenCode native: providers, models, permissions | `~/.config/opencode/opencode.json` |
 
 On first launch, xcoder creates `config.toml` automatically. You can also open configs from the app menu:
@@ -228,7 +223,7 @@ On first launch, xcoder creates `config.toml` automatically. You can also open c
 - **File → Configuration → Open Config Folder**
 - **File → Configuration → Open config.toml** → xcoder's `config.toml`
 - **File → Configuration → Open opencode.json**
-- **File → Configuration → Open codewhale.json** → actually opens CodeWhale's `~/.codewhale/config.toml` (TOML, not JSON)
+- **File → Configuration → Open opencode.json** → actually opens opencode's `~/.opencode/config.toml` (TOML, not JSON)
 
 Change the UI language under **File → Preferences** (Chinese, English, Japanese, French, German, Russian, Spanish, Portuguese, Italian).
 
@@ -238,17 +233,8 @@ Example with DeepSeek and both providers:
 
 ```toml
 [app]
-default_provider = "codewhale"   # codewhale | opencode
+default_provider = "opencode"
 theme = "dark"
-
-# ── CodeWhale ──────────────────────────────────────────
-[[providers]]
-id = "codewhale"
-type = "http"
-command = "codewhale"
-args = ["serve", "--http", "--port", "7878", "--insecure"]
-config_path = "~/.codewhale/config.toml"
-health_cmd = ["codewhale", "doctor", "--json"]
 
 # ── OpenCode ───────────────────────────────────────────
 [[providers]]
@@ -271,62 +257,16 @@ After connecting, **modes** and **models** in the chat panel are fetched at runt
 
 | Provider | Mode source | Model source | Default model |
 |----------|-------------|--------------|---------------|
-| **CodeWhale** | Fixed `plan` / `agent` / `yolo` | `codewhale model list` | `doctor --json` → `default_text_model` |
+| **opencode** | Fixed `plan` / `agent` / `yolo` | `opencode model list` | `doctor --json` → `default_text_model` |
 | **OpenCode** | `GET /agent` | Provider API + `~/.config/opencode/opencode.json` | First connected provider/model, or `opencode.json` `model` |
 
 If you add or change providers in `opencode.json`, click **Disconnect** then **Connect** so xcoder restarts the OpenCode runtime and refreshes the model list.
 
-If `codewhale` / `opencode` is not on PATH, use an absolute path in `command`, for example:
+If `opencode` / `opencode` is not on PATH, use an absolute path in `command`, for example:
 
 ```toml
-command = "C:\\Users\\you\\AppData\\Roaming\\npm\\codewhale.cmd"
+command = "C:\\Users\\you\\AppData\\Roaming\\npm\\opencode.cmd"
 ```
-
-### 2. CodeWhale config (`~/.codewhale/config.toml`)
-
-> The menu item is named "Open codewhale.json", but the file is **TOML**.
-
-**Option A: set API key via CLI (recommended)**
-
-```bash
-codewhale auth set --provider deepseek --api-key <your-deepseek-key>
-```
-
-**Option B: edit the config file directly**
-
-```toml
-api_key = "<your-deepseek-key>"
-provider = "deepseek"
-auth_mode = "api_key"
-default_text_model = "deepseek-v4-pro"
-
-[providers.deepseek]
-api_key = "<your-deepseek-key>"
-
-[ui]
-default_mode = "agent"        # plan | agent | yolo
-approval_mode = "suggest"     # suggest | auto | never
-reasoning_effort = "high"     # off | high | max
-
-[runtime_api]
-cors_origins = ["http://localhost:1420"]
-```
-
-Common DeepSeek model IDs:
-
-| Model ID | Notes |
-|----------|-------|
-| `deepseek-v4-pro` | Main model (recommended) |
-| `deepseek-v4-flash` | Faster, lower cost |
-
-Verify:
-
-```bash
-codewhale doctor
-codewhale doctor --json
-```
-
-`default_text_model` is also used as the initial model in xcoder's chat panel after you click **Connect** (the full list comes from `codewhale model list`).
 
 ### 3. OpenCode config (`opencode.json`)
 
@@ -375,11 +315,11 @@ opencode serve --hostname 127.0.0.1 --port 4096
 ```
 ~/.config/xcoder/config.toml          ← xcoder: provider, launch args, health check
         │                                 (modes/models fetched at runtime after connect)
-        ├─ config_path ──→ ~/.codewhale/config.toml     ← API key, default model, approval
+        ├─ config_path ──→ ~/.opencode/config.toml     ← API key, default model, approval
         │
         └─ config_path ──→ ~/.config/opencode/opencode.json  ← providers, models, permissions
 
-<project>/.codewhale/history/         ← CodeWhale local chat history (written by xcoder)
+<project>/.opencode/history/         ← opencode local chat history (written by xcoder)
 <project>/.opencode/history/          ← OpenCode local chat history (written by xcoder)
 ```
 
@@ -423,7 +363,7 @@ This pre-installs NSIS tools to `%LOCALAPPDATA%\tauri\NSIS`. You can also use th
 | Issue | Fix |
 |-------|-----|
 | Browser at `localhost:1420` does not work | Use the desktop window from `npm run tauri dev`; Tauri APIs are desktop-only |
-| "codewhale/opencode not found" on connect | Install the CLI globally, or set an absolute `.cmd` / `.exe` path in `config.toml` `command` |
+| "opencode not found" on connect | Install the CLI globally, or set an absolute `.cmd` / `.exe` path in `config.toml` `command` |
 | CMD window flashes on connect (older builds) | Fixed via `CREATE_NO_WINDOW` for child processes; rebuild with the latest code |
 | OpenCode connect fails | **Open a project** first; ensure `opencode.json` port matches `config.toml` `args` |
 | OpenCode provider/model missing in chat | Edit `opencode.json`, then **Disconnect → Connect** to restart the runtime; custom providers need valid `apiKey` / `opencode auth login` |

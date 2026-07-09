@@ -1,7 +1,4 @@
-use crate::config::provider_config::{
-    project_codewhale_config_path, project_opencode_config_path,
-};
-use crate::config::project_codewhale_config::update_project_codewhale_config;
+use crate::config::provider_config::project_opencode_config_path;
 use crate::config::project_opencode_config::update_project_opencode_config;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,65 +47,35 @@ fn parse_opencode_instructions(json: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn parse_codewhale_instructions(content: &str) -> Vec<String> {
-    #[derive(Debug, Default, Deserialize)]
-    struct RulesOnly {
-        #[serde(default)]
-        instructions: Vec<String>,
-    }
-    toml::from_str::<RulesOnly>(content)
-        .map(|parsed| parsed.instructions)
-        .unwrap_or_default()
-}
-
 pub fn load_project_rules(workspace: &str, provider: &str) -> Result<ProjectRulesView, String> {
     let workspace = workspace.trim();
     if workspace.is_empty() {
         return Err("Workspace is required".to_string());
     }
+    if provider != "opencode" {
+        return Err(format!("Unsupported provider for project rules: {provider}"));
+    }
 
     let agents_path = project_agents_path(workspace);
     let (agents_installed, agents_content) = read_agents_file(&agents_path)?;
 
-    match provider {
-        "opencode" => {
-            let instructions_path = project_opencode_config_path(workspace);
-            let instructions = if instructions_path.is_file() {
-                let content = fs::read_to_string(&instructions_path).map_err(|e| e.to_string())?;
-                let json: Value =
-                    serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-                parse_opencode_instructions(&json)
-            } else {
-                Vec::new()
-            };
-            Ok(ProjectRulesView {
-                provider: provider.to_string(),
-                agents_path: agents_path.to_string_lossy().to_string(),
-                agents_installed,
-                agents_content,
-                instructions_path: instructions_path.to_string_lossy().to_string(),
-                instructions,
-            })
-        }
-        "codewhale" => {
-            let instructions_path = project_codewhale_config_path(workspace);
-            let instructions = if instructions_path.is_file() {
-                let content = fs::read_to_string(&instructions_path).map_err(|e| e.to_string())?;
-                parse_codewhale_instructions(&content)
-            } else {
-                Vec::new()
-            };
-            Ok(ProjectRulesView {
-                provider: provider.to_string(),
-                agents_path: agents_path.to_string_lossy().to_string(),
-                agents_installed,
-                agents_content,
-                instructions_path: instructions_path.to_string_lossy().to_string(),
-                instructions,
-            })
-        }
-        other => Err(format!("Unsupported provider for project rules: {other}")),
-    }
+    let instructions_path = project_opencode_config_path(workspace);
+    let instructions = if instructions_path.is_file() {
+        let content = fs::read_to_string(&instructions_path).map_err(|e| e.to_string())?;
+        let json: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        parse_opencode_instructions(&json)
+    } else {
+        Vec::new()
+    };
+
+    Ok(ProjectRulesView {
+        provider: provider.to_string(),
+        agents_path: agents_path.to_string_lossy().to_string(),
+        agents_installed,
+        agents_content,
+        instructions_path: instructions_path.to_string_lossy().to_string(),
+        instructions,
+    })
 }
 
 fn normalize_instructions(instructions: &[String]) -> Vec<String> {
@@ -150,21 +117,6 @@ fn save_opencode_instructions(workspace: &str, instructions: &[String]) -> Resul
     })
 }
 
-fn save_codewhale_instructions(workspace: &str, instructions: &[String]) -> Result<(), String> {
-    update_project_codewhale_config(workspace, |table| {
-        if instructions.is_empty() {
-            table.remove("instructions");
-        } else {
-            let items: Vec<toml::Value> = instructions
-                .iter()
-                .map(|item| toml::Value::String(item.clone()))
-                .collect();
-            table.insert("instructions".to_string(), toml::Value::Array(items));
-        }
-        Ok(())
-    })
-}
-
 pub fn save_project_rules(
     workspace: &str,
     provider: &str,
@@ -175,15 +127,13 @@ pub fn save_project_rules(
     if workspace.is_empty() {
         return Err("Workspace is required".to_string());
     }
+    if provider != "opencode" {
+        return Err(format!("Unsupported provider for project rules: {provider}"));
+    }
 
     let instructions = normalize_instructions(instructions);
     save_agents_file(&project_agents_path(workspace), agents_content)?;
-
-    match provider {
-        "opencode" => save_opencode_instructions(workspace, &instructions)?,
-        "codewhale" => save_codewhale_instructions(workspace, &instructions)?,
-        other => return Err(format!("Unsupported provider for project rules: {other}")),
-    }
+    save_opencode_instructions(workspace, &instructions)?;
 
     load_project_rules(workspace, provider)
 }

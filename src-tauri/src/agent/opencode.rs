@@ -14,7 +14,7 @@ use std::process::{Child, Output, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-pub use crate::agent::codewhale::ThreadInfo;
+pub use crate::agent::history::ThreadInfo;
 
 #[derive(Default)]
 pub struct OpencodeState {
@@ -565,11 +565,16 @@ pub async fn send_prompt(
     model: Option<&str>,
     message: &str,
     workspace: Option<&str>,
+    message_id: Option<&str>,
 ) -> Result<(), String> {
     let mut body = serde_json::json!({
         "agent": agent,
         "parts": [{ "type": "text", "text": message }],
     });
+
+    if let Some(message_id) = message_id.filter(|id| !id.is_empty()) {
+        body["messageID"] = serde_json::json!(message_id);
+    }
 
     if let Some(model) = model.filter(|m| !m.is_empty()) {
         if let Some((provider_id, model_id)) = model.split_once('/') {
@@ -911,6 +916,7 @@ pub async fn load_session_history(
                     role: "user".to_string(),
                     content,
                     tool_name: None,
+                    turn_id: None,
                     timestamp,
                 });
             }
@@ -928,6 +934,7 @@ pub async fn load_session_history(
                     role: "assistant".to_string(),
                     content: format!("错误：{message}"),
                     tool_name: None,
+                    turn_id: None,
                     timestamp,
                 });
             }
@@ -951,6 +958,7 @@ pub async fn load_session_history(
                                     role: "assistant".to_string(),
                                     content: text,
                                     tool_name: None,
+                                    turn_id: None,
                                     timestamp: part_time,
                                 });
                             }
@@ -964,6 +972,7 @@ pub async fn load_session_history(
                                     role: "assistant".to_string(),
                                     content: format!("> {text}"),
                                     tool_name: None,
+                                    turn_id: None,
                                     timestamp: part_time,
                                 });
                             }
@@ -995,6 +1004,7 @@ pub async fn load_session_history(
                             role: "tool".to_string(),
                             content,
                             tool_name: Some(tool_name),
+                            turn_id: None,
                             timestamp: part_time,
                         });
                     }
@@ -1167,6 +1177,9 @@ async fn resolve_session_busy(
     workspace: Option<&str>,
     status: Option<String>,
 ) -> Result<bool, String> {
+    if matches!(status.as_deref(), Some("idle")) {
+        return Ok(false);
+    }
     if matches!(status.as_deref(), Some("busy") | Some("retry")) {
         return Ok(true);
     }

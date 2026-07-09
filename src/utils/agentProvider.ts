@@ -1,5 +1,4 @@
 export const PROVIDER_LABELS: Record<string, string> = {
-  codewhale: "CodeWhale",
   opencode: "OpenCode",
 };
 
@@ -34,45 +33,18 @@ export function getAgentCommands(providerId: string): AgentCommands {
     runtimeStatus: `${providerId}_runtime_status`,
     createThread: `${providerId}_create_thread`,
     sendTurn: `${providerId}_send_turn`,
-    cancelTurn:
-      providerId === "opencode" || providerId === "codewhale"
-        ? `${providerId}_cancel_turn`
-        : undefined,
+    cancelTurn: `${providerId}_cancel_turn`,
     setThreadMode: `${providerId}_set_thread_mode`,
     approve: `${providerId}_approve`,
     subscribeEvents: `${providerId}_subscribe_events`,
-    listThreads:
-      providerId === "opencode"
-        ? "opencode_list_sessions"
-        : "codewhale_list_threads",
-    loadThreadHistory:
-      providerId === "opencode"
-        ? "opencode_load_session_history"
-        : "codewhale_load_thread_history",
-    getPendingApproval:
-      providerId === "opencode"
-        ? "opencode_get_pending_approval"
-        : providerId === "codewhale"
-          ? "codewhale_get_pending_approval"
-          : undefined,
-    isSessionBusy:
-      providerId === "opencode" ? "opencode_is_session_busy" : undefined,
-    deleteThread:
-      providerId === "opencode"
-        ? "opencode_delete_session"
-        : "codewhale_delete_thread",
-    updateThreadTitle:
-      providerId === "opencode"
-        ? "opencode_update_session_title"
-        : undefined,
-    listAgents:
-      providerId === "opencode" ? "opencode_list_agents" : undefined,
-    listProviderModels:
-      providerId === "opencode"
-        ? "opencode_list_provider_models"
-        : providerId === "codewhale"
-          ? "codewhale_list_models"
-          : undefined,
+    listThreads: "opencode_list_sessions",
+    loadThreadHistory: "opencode_load_session_history",
+    getPendingApproval: "opencode_get_pending_approval",
+    isSessionBusy: "opencode_is_session_busy",
+    deleteThread: "opencode_delete_session",
+    updateThreadTitle: "opencode_update_session_title",
+    listAgents: "opencode_list_agents",
+    listProviderModels: "opencode_list_provider_models",
   };
 }
 

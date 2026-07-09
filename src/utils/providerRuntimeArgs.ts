@@ -55,25 +55,10 @@ export function writeRuntimeEndpoint(
   return next;
 }
 
-export const CODEWHALE_RUNTIME_DEFAULTS: RuntimeEndpoint = {
-  host: "127.0.0.1",
-  port: "7878",
-};
-
 export const OPENCODE_RUNTIME_DEFAULTS: RuntimeEndpoint = {
   host: "127.0.0.1",
   port: "4096",
 };
-
-export const CODEWHALE_DEFAULT_ARGS = [
-  "serve",
-  "--http",
-  "--host",
-  "127.0.0.1",
-  "--port",
-  "7878",
-  "--insecure",
-];
 
 export const OPENCODE_DEFAULT_ARGS = [
   "serve",

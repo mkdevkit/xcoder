@@ -1,6 +1,6 @@
-# xcoder 架构设计
+﻿# xcoder 架构设计
 
-基于 Tauri 的可交互 AI 编程工作台，类似 Cursor 客户端：左侧工程浏览、中间编辑器、右侧 AI 聊天，支持多种 AI 工具。首期以 **CodeWhale** 为主要集成目标。
+基于 Tauri 的可交互 AI 编程工作台，类似 Cursor 客户端：左侧工程浏览、中间编辑器、右侧 AI 聊天。首期以 **OpenCode** 为 AI 集成目标。
 
 ---
 
@@ -30,7 +30,7 @@ flowchart TB
     end
 
     subgraph Agents["AI 工具适配层"]
-        CW[CodeWhale]
+        CW[OpenCode]
         OC[OpenCode]
         Cursor[Cursor CLI]
         More[其它 ACP 兼容工具]
@@ -61,14 +61,14 @@ flowchart TB
 | 前端 | **React + Vite** 或 **Vue 3** | 生态成熟，聊天 UI 好做 |
 | 编辑器 MVP | **Monaco Editor** | 快速上线，语法高亮、diff |
 | 编辑器完整版 | **monaco-vscode-api** + **monaco-vscode-server** | 接近 VS Code：LSP、扩展、主题 |
-| AI 协议（首期） | **CodeWhale HTTP/SSE API** | 线程、审批、模式切换、工具调用完整 |
-| AI 协议（通用） | **ACP (Agent Client Protocol)** | CodeWhale、OpenCode 等均支持，便于扩展 |
+| AI 协议（首期） | **OpenCode HTTP/SSE API** | 线程、审批、模式切换、工具调用完整 |
+| AI 协议（通用） | **ACP (Agent Client Protocol)** | OpenCode 等均支持，便于扩展 |
 
 参考项目：
 
 - [Blink](https://github.com/bmarti44/blink) — Tauri + monaco-vscode-api 的完整 IDE
 - [SideX](https://dev.to/kendallbooker/i-rebuilt-vs-code-on-tauri-instead-of-electron-and-just-open-sourced-it-53ao) — Tauri 版 VS Code 思路
-- [CodeWhale Runtime API](https://github.com/Hmbown/CodeWhale/blob/main/docs/RUNTIME_API.md) — 首期 AI 集成契约
+- [OpenCode Runtime API](https://github.com/Hmbown/OpenCode/blob/main/docs/RUNTIME_API.md) — 首期 AI 集成契约
 
 ---
 
@@ -109,22 +109,22 @@ pub trait AgentProvider {
 
 ### 三种集成方式
 
-#### 1. HTTP/SSE（CodeWhale 首期首选）
+#### 1. HTTP/SSE（OpenCode 首期首选）
 
-CodeWhale 提供完整 Runtime API（`codewhale serve --http`）：
+OpenCode 提供完整 Runtime API（`OpenCode serve --http`）：
 
 - 线程/会话管理（`GET/POST /v1/threads`）
 - SSE 流式事件（`GET /v1/threads/{id}/events`）
 - 工具审批（`POST /v1/approvals/{id}`）
 - 模式切换（`PATCH /v1/threads/{id}`，`mode: plan | agent | yolo`）
-- 健康检查（`codewhale doctor --json`）
+- 健康检查（`OpenCode doctor --json`）
 
 适合需要审批门禁、线程历史、steer/interrupt 的完整体验。
 
 启动示例：
 
 ```bash
-codewhale serve --http --host 127.0.0.1 --port 7878
+OpenCode serve --http --host 127.0.0.1 --port 7878
 ```
 
 CORS 需允许 Tauri 开发端口（内置支持 `tauri://localhost`、`http://localhost:1420` 等）。
@@ -135,11 +135,11 @@ JSON-RPC over stdio，适合编辑器类集成：
 
 | 工具 | 启动命令 |
 |------|----------|
-| CodeWhale | `codewhale serve --acp` |
+| OpenCode | `OpenCode serve --acp` |
 | OpenCode | `opencode acp --cwd <workspace>` |
 | 未来工具 | 只要支持 ACP 即可接入 |
 
-Rust 侧用 `tokio::process::Command` 拉起子进程，stdin/stdout 做 JSON-RPC。ACP 版 CodeWhale 功能较 HTTP 保守（不含完整 shell/文件写入工具），适合轻量对话场景。
+Rust 侧用 `tokio::process::Command` 拉起子进程，stdin/stdout 做 JSON-RPC。ACP 版 OpenCode 功能较 HTTP 保守（不含完整 shell/文件写入工具），适合轻量对话场景。
 
 #### 3. CLI 包装（兜底）
 
@@ -147,24 +147,24 @@ Rust 侧用 `tokio::process::Command` 拉起子进程，stdin/stdout 做 JSON-RP
 
 ---
 
-## CodeWhale 集成要点
+## OpenCode 集成要点
 
 ### 模式与审批
 
-CodeWhale 有两条独立轴，UI 需分别暴露：
+OpenCode 有两条独立轴，UI 需分别暴露：
 
 | 轴 | 选项 | 说明 |
 |----|------|------|
 | **Mode** | `plan` / `agent` / `yolo` | plan 只读；agent 逐条审批；yolo 自动批准 |
-| **Approval** | `suggest` / `auto` / `never` | 审批策略（对应 `~/.codewhale/config.toml` 的 `[ui]` 段） |
+| **Approval** | `suggest` / `auto` / `never` | 审批策略（对应 `~/.OpenCode/config.toml` 的 `[ui]` 段） |
 
 通过 `PATCH /v1/threads/{id}` 可在运行时切换 `mode`、`model`、`auto_approve` 等。
 
 ### 关键 API 流程
 
 ```
-1. codewhale doctor --json          → 检查安装与 API Key
-2. codewhale serve --http           → 启动本地 Runtime（获取 auth token）
+1. OpenCode doctor --json          → 检查安装与 API Key
+2. OpenCode serve --http           → 启动本地 Runtime（获取 auth token）
 3. POST /v1/threads                 → 创建工作区线程
 4. POST /v1/threads/{id}/turns     → 发送用户消息
 5. GET  /v1/threads/{id}/events     → SSE 订阅流式回复与工具事件
@@ -177,7 +177,7 @@ CodeWhale 有两条独立轴，UI 需分别暴露：
 
 ### 原生配置
 
-CodeWhale 配置位于 `~/.codewhale/config.toml`（兼容旧路径 `~/.deepseek/config.toml`）：
+OpenCode 配置位于 `~/.OpenCode/config.toml`（兼容旧路径 `~/.deepseek/config.toml`）：
 
 ```toml
 api_key = "sk-..."
@@ -205,17 +205,17 @@ xcoder UI 修改模式/模型时，应写回此文件或通过 Runtime API 的 `
 
 ```toml
 [app]
-default_provider = "codewhale"
+default_provider = "OpenCode"
 default_workspace = "~/projects"
 theme = "dark"
 
 [[providers]]
-id = "codewhale"
+id = "OpenCode"
 type = "http"                    # acp | http | cli
-command = "codewhale"
+command = "OpenCode"
 args = ["serve", "--http", "--port", "7878"]
-config_path = "~/.codewhale/config.toml"
-health_cmd = ["codewhale", "doctor", "--json"]
+config_path = "~/.OpenCode/config.toml"
+health_cmd = ["OpenCode", "doctor", "--json"]
 
 [[providers]]
 id = "opencode"
@@ -226,7 +226,7 @@ config_path = "~/.config/opencode/opencode.json"
 health_cmd = ["opencode", "--version"]
 ```
 
-连接后，聊天面板的模式与模型从运行时动态获取（CodeWhale：`codewhale model list` + `doctor --json`；OpenCode：`/agent` + provider API）。
+连接后，聊天面板的模式与模型从运行时动态获取（OpenCode：`OpenCode model list` + `doctor --json`；OpenCode：`/agent` + provider API）。
 
 ---
 
@@ -238,7 +238,7 @@ health_cmd = ["opencode", "--version"]
 - Tauri `plugin-fs` 读写文件
 - `plugin-dialog` 打开工程目录
 - `notify` 监听文件变化
-- 聊天面板 + CodeWhale HTTP/SSE 基础对话
+- 聊天面板 + OpenCode HTTP/SSE 基础对话
 
 够用，但无 LSP、无扩展市场。
 
@@ -271,10 +271,10 @@ xcoder/
 │   │   └── agent/
 │   │       ├── mod.rs           # AgentProvider trait
 │   │       ├── acp/             # ACP JSON-RPC 客户端
-│   │       ├── http_sse/        # CodeWhale HTTP 适配
+│   │       ├── http_sse/        # OpenCode HTTP 适配
 │   │       ├── cli/             # CLI 包装
 │   │       └── providers/
-│   │           ├── codewhale.rs
+│   │           ├── OpenCode.rs
 │   │           └── opencode.rs
 │   └── Cargo.toml
 ├── src/
@@ -335,9 +335,9 @@ type AgentEvent =
 |------|------|------|
 | **P0** | 脚手架 | Tauri 2 + React + 三栏布局 |
 | **P1** | 工程浏览 | 打开目录、文件树、Monaco 编辑 |
-| **P2** | CodeWhale 聊天 | HTTP/SSE 接入，基础对话与流式渲染 |
+| **P2** | OpenCode 聊天 | HTTP/SSE 接入，基础对话与流式渲染 |
 | **P3** | 配置系统 | 多 Provider 配置、UI 选项、写回原生配置 |
-| **P4** | CodeWhale 完整能力 | 审批、模式切换、线程历史、steer/interrupt |
+| **P4** | OpenCode 完整能力 | 审批、模式切换、线程历史、steer/interrupt |
 | **P5** | 编辑器升级 | monaco-vscode-api + LSP + 扩展 |
 | **P6** | 打磨 | 终端、Git、Diff、快捷键 |
 
@@ -345,11 +345,11 @@ type AgentEvent =
 
 ## 关键设计决策
 
-1. **CodeWhale HTTP 首期，ACP 扩展** — 先用 HTTP/SSE 拿完整能力，其它工具走 ACP
+1. **OpenCode HTTP 首期，ACP 扩展** — 先用 HTTP/SSE 拿完整能力，其它工具走 ACP
 2. **配置不重复** — xcoder 只做路由与 UI 映射，参数写回各工具原生配置
 3. **编辑器分阶段** — 先 Monaco 验证产品，再换完整 Workbench
 4. **Rust 管进程** — AI 子进程、PTY、文件监听放 Rust，前端只管展示
-5. **事件统一** — 前端不感知 CodeWhale/OpenCode 协议差异
+5. **事件统一** — 前端不感知 OpenCode/OpenCode 协议差异
 
 ---
 
@@ -358,10 +358,10 @@ type AgentEvent =
 开发前需安装：
 
 ```bash
-# CodeWhale
-npm install -g codewhale
-codewhale auth set --provider deepseek --api-key <key>
-codewhale doctor
+# OpenCode
+npm install -g OpenCode
+OpenCode auth set --provider deepseek --api-key <key>
+OpenCode doctor
 
 # Tauri 开发环境
 # Rust, Node.js 18+, 平台 WebView2（Windows）

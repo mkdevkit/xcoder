@@ -15,21 +15,3 @@ args = [
 ]
 config_path = "~/.config/opencode/opencode.json"
 health_cmd = []
-
-[[providers]]
-id = "codewhale"
-type = "http"
-command = "codewhale"
-args = [
-    "serve",
-    "--http",
-    "--port",
-    "7878",
-    "--insecure",
-]
-config_path = "~/.codewhale/config.toml"
-health_cmd = [
-    "codewhale",
-    "doctor",
-    "--json",
-]

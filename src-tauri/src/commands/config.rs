@@ -1,8 +1,6 @@
-use crate::agent::codewhale::clear_provider_auth;
 use crate::agent::opencode::logout_provider_auth;
 use crate::config::provider_config::{
-    load_codewhale_config, load_opencode_config, save_codewhale_config, save_opencode_config,
-    CodewhaleConfigView, CodewhaleProviderEntry, OpencodeConfigView, OpencodeProviderEntry,
+    load_opencode_config, save_opencode_config, OpencodeConfigView, OpencodeProviderEntry,
 };
 use crate::config::{config_dir, config_path, load_app_config, save_app_config, AppConfig};
 use serde::Serialize;
@@ -15,14 +13,6 @@ pub struct ConfigPaths {
 }
 
 fn opencode_provider_ids(providers: &[OpencodeProviderEntry]) -> HashSet<String> {
-    providers
-        .iter()
-        .map(|entry| entry.id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect()
-}
-
-fn codewhale_provider_ids(providers: &[CodewhaleProviderEntry]) -> HashSet<String> {
     providers
         .iter()
         .map(|entry| entry.id.trim().to_string())
@@ -59,24 +49,6 @@ pub fn get_config_paths() -> Result<ConfigPaths, String> {
         dir: config_dir().to_string_lossy().to_string(),
         file: config_path().to_string_lossy().to_string(),
     })
-}
-
-#[tauri::command]
-pub fn load_codewhale_provider_config() -> Result<CodewhaleConfigView, String> {
-    load_codewhale_config()
-}
-
-#[tauri::command]
-pub fn save_codewhale_provider_config(config: CodewhaleConfigView) -> Result<(), String> {
-    let previous = load_codewhale_config()
-        .map(|view| codewhale_provider_ids(&view.providers))
-        .unwrap_or_default();
-    let next = codewhale_provider_ids(&config.providers);
-
-    save_codewhale_config(config)?;
-
-    cleanup_removed_provider_auth(&previous, &next, clear_provider_auth);
-    Ok(())
 }
 
 #[tauri::command]

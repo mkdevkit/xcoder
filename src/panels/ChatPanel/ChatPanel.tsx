@@ -7,6 +7,7 @@ import {
 } from "../../components/RichChatComposer";
 import { useChatStore } from "../../stores/chat";
 import { createProviderChatSlice } from "../../stores/providerChatSlice";
+import { isGenerating } from "../../utils/turnState";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useChatInputDrop } from "../../hooks/useChatInputDrop";
@@ -17,7 +18,6 @@ import {
   formatOpencodeVendorLabel,
   modelsForOpencodeVendor,
 } from "../../utils/opencodeModels";
-import { formatCodewhaleModelLabel } from "../../utils/codewhaleModels";
 import { localizeSessionTitle } from "../../utils/localChatHistory";
 import { isTauri } from "../../utils/tauri";
 import { ChatMessageList } from "./ChatMessageList";
@@ -66,6 +66,7 @@ export function ChatPanel() {
     threads,
     threadsLoading,
     streaming,
+    activeTurn,
     error,
     initialized,
     runtimeBusy,
@@ -73,7 +74,6 @@ export function ChatPanel() {
     opencodeModelCatalog,
     opencodeConnectedProviders,
     opencodeVendor,
-    codewhaleModelCatalog,
   } = useChatStore(
     useShallow((state) => {
       const slice =
@@ -91,12 +91,12 @@ export function ChatPanel() {
         model: slice.model,
         dynamicModes: slice.dynamicModes,
         streaming: slice.streaming,
+        activeTurn: slice.activeTurn,
         runtimeBusy: slice.runtimeBusy,
         error: slice.error,
         opencodeModelCatalog: slice.opencodeModelCatalog,
         opencodeConnectedProviders: slice.opencodeConnectedProviders,
         opencodeVendor: slice.opencodeVendor,
-        codewhaleModelCatalog: slice.codewhaleModelCatalog,
       };
     }),
   );
@@ -114,9 +114,10 @@ export function ChatPanel() {
   } = useChatStore();
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
+  const generating = isGenerating({ streaming, activeTurn });
   const canChat = Boolean(rootPath && connectedIntent && runtime.running && thread);
-  const canCompose = Boolean(rootPath && connectedIntent && runtime.running && !streaming);
-  const controlsLocked = streaming || runtimeBusy;
+  const canCompose = Boolean(rootPath && connectedIntent && runtime.running && !generating);
+  const controlsLocked = generating || runtimeBusy;
 
   const handleAttachReferences = useCallback((refs: string[]) => {
     composerRef.current?.insertReferences(refs);
@@ -132,14 +133,13 @@ export function ChatPanel() {
   } = useChatInputDrop({
     rootPath,
     onAttach: handleAttachReferences,
-    disabled: !rootPath || streaming,
+    disabled: !rootPath || generating,
     onFocus: () => composerRef.current?.focus(),
   });
 
   const modeOptions =
     dynamicModes.length > 0 ? dynamicModes : ["agent"];
   const isOpencode = providerId === "opencode";
-  const isCodewhale = providerId === "codewhale";
   const opencodeVendors = deriveOpencodeVendors(
     opencodeModelCatalog,
     opencodeConnectedProviders,
@@ -150,11 +150,8 @@ export function ChatPanel() {
   );
   const showOpencodeVendor =
     isOpencode && connectedIntent && runtime.running && opencodeVendors.length > 0;
-  const showModelSelect = isOpencode
-    ? opencodeModels.length > 0
-    : isCodewhale
-      ? codewhaleModelCatalog.length > 0
-      : false;
+  const showModelSelect =
+    isOpencode && connectedIntent && runtime.running && opencodeModels.length > 0;
   const providerLabel = getProviderLabel(providerId);
 
   const composerPlaceholder = !rootPath
@@ -182,7 +179,7 @@ export function ChatPanel() {
 
   const handleSend = async () => {
     const message = composerRef.current?.getMessage() ?? "";
-    if (!message || streaming || !connectedIntent || !runtime.running || !thread) return;
+    if (!message || generating || !connectedIntent || !runtime.running || !thread) return;
     if (!rootPath) return;
 
     await sendMessage(message);
@@ -191,7 +188,7 @@ export function ChatPanel() {
   };
 
   const handleSendOrCancel = async () => {
-    if (streaming) {
+    if (generating) {
       await cancelGeneration();
       return;
     }
@@ -365,26 +362,20 @@ export function ChatPanel() {
                 disabled={!initialized || controlsLocked}
                 title={model}
               >
-                {isOpencode
-                  ? opencodeModels.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.modelName}
-                      </option>
-                    ))
-                  : codewhaleModelCatalog.map((item) => (
-                      <option key={`${item.value}-${item.provider}`} value={item.value}>
-                        {formatCodewhaleModelLabel(item)}
-                      </option>
-                    ))}
+                {opencodeModels.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.modelName}
+                  </option>
+                ))}
               </select>
             )}
           </div>
           <button
-            className={`send-btn ${streaming ? "" : "primary"}`}
-            disabled={streaming ? !canChat : !canChat || !hasContent}
+            className={`send-btn ${generating ? "" : "primary"}`}
+            disabled={generating ? !canChat : !canChat || !hasContent}
             onClick={() => handleSendOrCancel().catch(console.error)}
           >
-            {streaming ? t("chat.cancel") : t("chat.send")}
+            {generating ? t("chat.cancel") : t("chat.send")}
           </button>
         </div>
       </div>

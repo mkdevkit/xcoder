@@ -14,18 +14,6 @@ pub fn runtime_http_base_url(args: &[String], default_host: &str, default_port: 
     format!("http://{host}:{port}")
 }
 
-pub fn default_codewhale_serve_args() -> Vec<String> {
-    vec![
-        "serve".to_string(),
-        "--http".to_string(),
-        "--host".to_string(),
-        "127.0.0.1".to_string(),
-        "--port".to_string(),
-        "7878".to_string(),
-        "--insecure".to_string(),
-    ]
-}
-
 pub fn default_opencode_serve_args() -> Vec<String> {
     vec![
         "serve".to_string(),

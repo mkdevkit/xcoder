@@ -22,5 +22,23 @@ pub struct HistoryMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStatus {
+    pub running: bool,
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub owned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadInfo {
+    pub id: String,
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub workspace: Option<String>,
 }

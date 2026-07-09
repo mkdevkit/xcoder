@@ -41,7 +41,6 @@ pub struct LocalChatSession {
 
 pub fn history_root(workspace: &str, provider: &str) -> Result<PathBuf, String> {
     let folder = match provider {
-        "codewhale" => ".codewhale/history",
         "opencode" => ".opencode/history",
         _ => return Err(format!("Unsupported provider for local history: {provider}")),
     };

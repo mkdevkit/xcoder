@@ -15,7 +15,7 @@ export function ChatMessageList() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const {
     messages,
-    streaming,
+    generating,
     pendingApproval,
     providerId,
     connectedIntent,
@@ -35,9 +35,9 @@ export function ChatMessageList() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
-      behavior: streaming ? "auto" : "smooth",
+      behavior: generating ? "auto" : "smooth",
     });
-  }, [scrollKey, pendingApproval, streaming]);
+  }, [scrollKey, pendingApproval, generating]);
 
   return (
     <div className="chat-messages">
@@ -53,7 +53,7 @@ export function ChatMessageList() {
         </div>
       )}
       {chatTurns.map((turn) => {
-        const streamActive = streaming && turn.isLast;
+        const streamActive = generating && turn.isLast;
         const hasTools = turn.inlineParts.some((part) => part.type === "tools");
         const hasAssistantBody = turnHasAssistantBody(turn.inlineParts);
 
@@ -71,7 +71,7 @@ export function ChatMessageList() {
           </div>
         );
       })}
-      {streaming && <StreamingIndicator />}
+      {generating && <StreamingIndicator />}
       {pendingApproval && (
         <ApprovalGate
           description={pendingApproval.description}

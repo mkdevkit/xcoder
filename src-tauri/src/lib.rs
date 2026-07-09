@@ -3,7 +3,6 @@ mod commands;
 mod config;
 mod utils;
 
-use agent::codewhale::CodewhaleState;
 use agent::opencode::OpencodeState;
 use commands::terminal::TerminalState;
 use commands::watch::WatchState;
@@ -38,7 +37,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(Mutex::new(CodewhaleState::default()))
         .manage(Mutex::new(OpencodeState::default()))
         .manage(Mutex::new(WatchState::default()))
         .manage(Mutex::new(TerminalState::default()))
@@ -60,8 +58,6 @@ pub fn run() {
             commands::config::load_config,
             commands::config::save_config,
             commands::config::get_config_paths,
-            commands::config::load_codewhale_provider_config,
-            commands::config::save_codewhale_provider_config,
             commands::config::load_opencode_provider_config,
             commands::config::save_opencode_provider_config,
             commands::project_config::ensure_project_config_cmd,
@@ -73,28 +69,10 @@ pub fn run() {
             commands::skills::list_project_skills_cmd,
             commands::skills::install_project_skill_cmd,
             commands::skills::remove_project_skill_cmd,
-            commands::mcp::query_codewhale_mcp_status,
             commands::mcp::query_opencode_mcp_status,
             commands::mcp::load_project_mcp_config,
             commands::mcp::save_project_mcp_config,
             commands::mcp::apply_mcp_server_connection,
-            commands::agent::codewhale_doctor,
-            commands::agent::codewhale_list_models,
-            commands::agent::codewhale_start_runtime,
-            commands::agent::codewhale_restart_runtime,
-            commands::agent::codewhale_stop_runtime,
-            commands::agent::codewhale_runtime_status,
-            commands::agent::codewhale_create_thread,
-            commands::agent::codewhale_send_turn,
-            commands::agent::codewhale_cancel_turn,
-            commands::agent::codewhale_set_thread_mode,
-            commands::agent::codewhale_approve,
-            commands::agent::codewhale_subscribe_events,
-            commands::agent::codewhale_list_threads,
-            commands::agent::codewhale_load_thread_history,
-            commands::agent::codewhale_poll_turn,
-            commands::agent::codewhale_get_pending_approval,
-            commands::agent::codewhale_delete_thread,
             commands::agent::opencode_doctor,
             commands::agent::opencode_start_runtime,
             commands::agent::opencode_restart_runtime,

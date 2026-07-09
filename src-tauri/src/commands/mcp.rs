@@ -1,8 +1,7 @@
 use crate::config::load_app_config;
 use crate::config::mcp_config::{
-    load_codewhale_mcp_config, load_project_codewhale_mcp_config, load_project_opencode_mcp_config,
-    save_mcp_config_for_scope, save_project_codewhale_mcp_config,
-    save_project_opencode_mcp_config, McpConfigView, McpServerEntry,
+    load_project_opencode_mcp_config, save_mcp_config_for_scope, save_project_opencode_mcp_config,
+    McpConfigView, McpServerEntry,
 };
 use crate::config::provider_config::{load_opencode_config, resolve_provider_config_path};
 use crate::utils::command::{build_command, resolve_executable};
@@ -86,13 +85,6 @@ fn load_mcp_servers_for_scope(
             }
             Ok(load_project_opencode_mcp_config(workspace)?.servers)
         }
-        ("codewhale", "global") => Ok(load_codewhale_mcp_config()?.servers),
-        ("codewhale", "project") => {
-            if workspace.is_empty() {
-                return Err("Workspace is required".to_string());
-            }
-            Ok(load_project_codewhale_mcp_config(workspace)?.servers)
-        }
         _ => Err(format!("Unsupported MCP scope: {provider}/{scope}")),
     }
 }
@@ -142,40 +134,6 @@ fn opencode_config_summary(scope: &str, workspace: &str) -> Result<String, Strin
 }
 
 #[tauri::command]
-pub async fn query_codewhale_mcp_status(
-    workspace: String,
-    scope: String,
-) -> Result<McpStatusResult, String> {
-    let workspace = workspace.trim();
-    let scope = scope.trim();
-    let cwd = if scope == "project" {
-        opencode_workdir(workspace)
-    } else {
-        None
-    };
-    let mut sections = Vec::new();
-
-    let list = run_provider_command_in("codewhale", &["mcp", "list"], cwd)?;
-    sections.push(format!("=== codewhale mcp list ===\n{}", command_output(&list)));
-
-    if list.status.success() {
-        if let Ok(tools) = run_provider_command_in("codewhale", &["mcp", "tools"], cwd) {
-            sections.push(format!(
-                "=== codewhale mcp tools ===\n{}",
-                command_output(&tools)
-            ));
-        }
-    }
-
-    let servers = load_mcp_servers_for_scope("codewhale", scope, workspace).unwrap_or_default();
-
-    Ok(McpStatusResult {
-        output: sections.join("\n\n"),
-        servers,
-    })
-}
-
-#[tauri::command]
 pub async fn query_opencode_mcp_status(
     workspace: String,
     scope: String,
@@ -217,7 +175,6 @@ pub fn load_project_mcp_config(workspace: String, provider: String) -> Result<Mc
         return Err("Workspace is required".to_string());
     }
     match provider.as_str() {
-        "codewhale" => load_project_codewhale_mcp_config(workspace),
         "opencode" => load_project_opencode_mcp_config(workspace),
         other => Err(format!("Unsupported provider for project MCP: {other}")),
     }
@@ -234,10 +191,6 @@ pub fn save_project_mcp_config(
         return Err("Workspace is required".to_string());
     }
     match provider.as_str() {
-        "codewhale" => {
-            save_project_codewhale_mcp_config(workspace, &servers)?;
-            load_project_codewhale_mcp_config(workspace)
-        }
         "opencode" => {
             save_project_opencode_mcp_config(workspace, &servers)?;
             load_project_opencode_mcp_config(workspace)
@@ -262,71 +215,27 @@ pub async fn apply_mcp_server_connection(
 
     let workspace = workspace.trim();
     let workdir = opencode_workdir(workspace);
-    let cwd = if provider == "codewhale" {
-        if scope == "project" {
-            workdir
-        } else {
-            None
-        }
-    } else {
-        workdir
-    };
-
-    if provider == "opencode" {
-        let target = servers
-            .iter()
-            .find(|entry| entry.id.trim() == server_id)
-            .ok_or_else(|| format!("MCP server not found: {server_id}"))?;
-        if connected {
-            validate_opencode_mcp_server(target)?;
-        }
-    }
-
-    save_mcp_config_for_scope(&provider, &scope, workspace, &servers)?;
-
-    if provider == "codewhale" {
-        let action = if connected { "enable" } else { "disable" };
-        let action_output = run_provider_command_in("codewhale", &["mcp", action, server_id], cwd)?;
-        if !action_output.status.success() {
-            return Err(command_output(&action_output));
-        }
-
-        let mut sections = vec![format!(
-            "=== codewhale mcp {action} {server_id} ===\n{}",
-            command_output(&action_output)
-        )];
-
-        if connected {
-            let connect_output =
-                run_provider_command_in("codewhale", &["mcp", "connect", server_id], cwd)?;
-            sections.push(format!(
-                "=== codewhale mcp connect {server_id} ===\n{}",
-                command_output(&connect_output)
-            ));
-            if !connect_output.status.success() {
-                return Err(sections.join("\n\n"));
-            }
-        }
-
-        let servers =
-            load_mcp_servers_for_scope("codewhale", &scope, workspace).unwrap_or_default();
-
-        return Ok(McpStatusResult {
-            output: sections.join("\n\n"),
-            servers,
-        });
-    }
 
     if provider != "opencode" {
         return Err(format!("Unsupported provider for MCP connection: {provider}"));
     }
+
+    let target = servers
+        .iter()
+        .find(|entry| entry.id.trim() == server_id)
+        .ok_or_else(|| format!("MCP server not found: {server_id}"))?;
+    if connected {
+        validate_opencode_mcp_server(target)?;
+    }
+
+    save_mcp_config_for_scope(&provider, &scope, workspace, &servers)?;
 
     let mut sections = Vec::new();
     if let Ok(summary) = opencode_config_summary(&scope, workspace) {
         sections.push(format!("=== saved MCP entries ===\n{summary}"));
     }
 
-    let list = run_provider_command_in("opencode", &["mcp", "list"], cwd)?;
+    let list = run_provider_command_in("opencode", &["mcp", "list"], workdir)?;
     if !list.status.success() {
         return Err(command_output(&list));
     }

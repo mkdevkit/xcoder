@@ -40,13 +40,6 @@ pub struct ProjectSkillInfo {
 fn project_skill_roots(provider_id: &str) -> Vec<&'static str> {
     match provider_id {
         "opencode" => vec![".opencode/skills", ".agents/skills", ".claude/skills"],
-        "codewhale" => vec![
-            ".agents/skills",
-            "skills",
-            ".opencode/skills",
-            ".claude/skills",
-            ".cursor/skills",
-        ],
         _ => vec![".agents/skills"],
     }
 }

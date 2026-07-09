@@ -24,6 +24,7 @@ export interface ChatMessage {
   timestamp: number;
   toolName?: string;
   approvalId?: string;
+  turnId?: string;
 }
 
 export interface ThreadInfo {
@@ -46,6 +47,7 @@ export interface HistoryMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   tool_name?: string;
+  turn_id?: string;
   timestamp: number;
 }
 
@@ -71,14 +73,6 @@ export interface OpencodeModelOption {
 export interface OpencodeProviderCatalog {
   models: OpencodeModelOption[];
   connectedProviderIds: string[];
-}
-
-export interface CodewhaleModelOption {
-  modelId: string;
-  provider: string;
-  label: string;
-  value: string;
-  available?: boolean;
 }
 
 export interface UiOptions {
