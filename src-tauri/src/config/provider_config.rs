@@ -1,3 +1,4 @@
+use crate::agent::opencode::read_provider_auth_keys;
 use crate::config::load_app_config;
 use crate::config::mcp_config::{build_opencode_mcp_json, parse_opencode_mcp_servers, McpServerEntry};
 use serde::{Deserialize, Serialize};
@@ -59,12 +60,99 @@ pub struct OpencodeModelEntry {
 #[serde(rename_all = "camelCase")]
 pub struct OpencodeProviderEntry {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub npm: String,
     pub base_url: String,
     pub api_key: String,
     pub set_cache_key: bool,
     #[serde(default)]
     pub models: Vec<OpencodeModelEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveOpencodeConfigResult {
+    pub warnings: Vec<String>,
+}
+
+const RESERVED_CUSTOM_PROVIDER_IDS: &[(&str, &str, &str)] = &[
+    (
+        "volcengine-plan",
+        "volcengine-coding",
+        "Volcengine Coding Plan",
+    ),
+    ("volcengine", "volcengine-custom", "Volcengine"),
+];
+
+fn auth_lookup_ids(provider_id: &str) -> Vec<&str> {
+    let id = provider_id.trim();
+    if id.is_empty() {
+        return Vec::new();
+    }
+    if id == "volcengine-coding" || id == "volcengine-plan" || id == "volcengine" {
+        return vec!["volcengine-coding", "volcengine-plan", "volcengine"];
+    }
+    vec![id]
+}
+
+fn merge_auth_keys_into_providers(providers: &mut [OpencodeProviderEntry]) {
+    let auth = read_provider_auth_keys();
+    if auth.is_empty() {
+        return;
+    }
+
+    for entry in providers {
+        if !entry.api_key.trim().is_empty() {
+            continue;
+        }
+        for alias in auth_lookup_ids(&entry.id) {
+            if let Some(key) = auth.get(alias) {
+                entry.api_key = key.clone();
+                break;
+            }
+        }
+    }
+}
+
+fn migrate_reserved_provider_ids(
+    providers: &mut Vec<OpencodeProviderEntry>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    for (from, to, display_name) in RESERVED_CUSTOM_PROVIDER_IDS {
+        let Some(index) = providers.iter().position(|entry| entry.id == *from) else {
+            continue;
+        };
+
+        if providers.iter().any(|entry| entry.id == *to) {
+            warnings.push(format!(
+                "Provider ID `{from}` 与 OpenCode 内置 ID 冲突且已存在 `{to}`，请手动合并或删除 `{from}`。"
+            ));
+            continue;
+        }
+
+        let mut entry = providers.remove(index);
+        entry.id = (*to).to_string();
+        if entry.name.trim().is_empty() {
+            entry.name = (*display_name).to_string();
+        }
+        providers.push(entry);
+        warnings.push(format!(
+            "已将保留 ID `{from}` 自动迁移为 `{to}`。保存后请在「项目」页断开并重新连接；模型引用请使用 `{to}/模型名`。"
+        ));
+    }
+
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+    warnings
+}
+
+fn remap_model_provider_id(model: &str, from: &str, to: &str) -> String {
+    let prefix = format!("{from}/");
+    if model.starts_with(&prefix) {
+        return format!("{to}/{}", &model[prefix.len()..]);
+    }
+    model.to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -373,6 +461,11 @@ fn parse_opencode_provider(id: &str, value: &Value) -> OpencodeProviderEntry {
 
     OpencodeProviderEntry {
         id: id.to_string(),
+        name: value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         npm: value
             .get("npm")
             .and_then(|v| v.as_str())
@@ -413,6 +506,7 @@ pub fn load_opencode_config() -> Result<OpencodeConfigView, String> {
         }
     }
     providers.sort_by(|a, b| a.id.cmp(&b.id));
+    merge_auth_keys_into_providers(&mut providers);
 
     let default_agent = json
         .get("default_agent")
@@ -447,9 +541,6 @@ fn build_opencode_provider_json(entry: &OpencodeProviderEntry, _existing: Option
             Value::String(entry.base_url.trim().to_string()),
         );
     }
-    if !entry.api_key.is_empty() {
-        options.insert("apiKey".to_string(), Value::String(entry.api_key.clone()));
-    }
     if entry.set_cache_key {
         options.insert("setCacheKey".to_string(), Value::Bool(true));
     }
@@ -460,11 +551,25 @@ fn build_opencode_provider_json(entry: &OpencodeProviderEntry, _existing: Option
         entry.npm.trim().to_string()
     };
 
-    json!({
+    let mut provider = json!({
         "npm": npm,
         "options": Value::Object(options),
         "models": models,
-    })
+    });
+    if let Some(obj) = provider.as_object_mut() {
+        let name = entry.name.trim();
+        if !name.is_empty() {
+            obj.insert("name".to_string(), Value::String(name.to_string()));
+        }
+    }
+    provider
+}
+
+pub fn prepare_opencode_config_for_save(
+    mut view: OpencodeConfigView,
+) -> (OpencodeConfigView, Vec<String>) {
+    let warnings = migrate_reserved_provider_ids(&mut view.providers);
+    (view, warnings)
 }
 
 pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
@@ -534,7 +639,13 @@ pub fn save_opencode_config(view: OpencodeConfigView) -> Result<(), String> {
         }
 
         if let Some(model) = obj.get("model").and_then(|value| value.as_str()) {
-            if let Some((provider, _)) = model.split_once('/') {
+            let mut remapped = model.to_string();
+            for (from, to, _) in RESERVED_CUSTOM_PROVIDER_IDS {
+                remapped = remap_model_provider_id(&remapped, from, to);
+            }
+            if remapped != model {
+                obj.insert("model".to_string(), Value::String(remapped));
+            } else if let Some((provider, _)) = model.split_once('/') {
                 if !configured_ids.iter().any(|id| id == provider) {
                     obj.remove("model");
                 }

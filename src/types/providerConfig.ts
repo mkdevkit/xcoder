@@ -21,11 +21,16 @@ export interface OpencodeModelEntry {
 
 export interface OpencodeProviderEntry {
   id: string;
+  name: string;
   npm: string;
   baseUrl: string;
   apiKey: string;
   setCacheKey: boolean;
   models: OpencodeModelEntry[];
+}
+
+export interface SaveOpencodeConfigResult {
+  warnings: string[];
 }
 
 export interface OpencodePermissionsView {

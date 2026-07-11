@@ -123,6 +123,8 @@ export type TranslationKey =
   | "preferences.loading"
   | "preferences.apiKey"
   | "preferences.apiKeyHint"
+  | "preferences.providerIdHint"
+  | "preferences.providerName"
   | "preferences.provider"
   | "preferences.defaultModel"
   | "preferences.defaultModelHint"

@@ -13,6 +13,7 @@ import type {
   OpencodeConfigView,
   OpencodeModelEntry,
   OpencodeProviderEntry,
+  SaveOpencodeConfigResult,
 } from "../../types/providerConfig";
 import { ModalityMultiSelect } from "./ModalityMultiSelect";
 import {
@@ -48,6 +49,7 @@ function normalizeModel(model: OpencodeModelEntry): OpencodeModelEntry {
 function emptyProvider(): OpencodeProviderEntry {
   return {
     id: "",
+    name: "",
     npm: "@ai-sdk/openai-compatible",
     baseUrl: "",
     apiKey: "",
@@ -99,6 +101,7 @@ export function OpenCodeConfigTab() {
         permissions: data.permissions ?? emptyPermissions(),
         providers: data.providers.map((provider) => ({
           ...provider,
+          name: provider.name ?? "",
           models: (provider.models ?? []).map(normalizeModel),
         })),
         mcpServers: data.mcpServers ?? [],
@@ -192,10 +195,18 @@ export function OpenCodeConfigTab() {
     setSaving(true);
     setStatus("idle");
     try {
-      await tauriInvoke("save_opencode_provider_config", { config });
+      const result = await tauriInvoke<SaveOpencodeConfigResult>(
+        "save_opencode_provider_config",
+        { config },
+      );
       await useChatStore.getState().reloadProviderConfig("opencode");
       setStatus("ok");
-      setStatusMessage(t("preferences.saved"));
+      const warningText = result.warnings?.filter(Boolean).join("\n");
+      setStatusMessage(
+        warningText
+          ? `${t("preferences.saved")}\n${warningText}`
+          : t("preferences.saved"),
+      );
       await load();
     } catch (error) {
       setStatus("err");
@@ -328,11 +339,22 @@ export function OpenCodeConfigTab() {
 
             <div className="preferences-field">
               <label>{t("preferences.providerId")}</label>
+              <p className="preferences-hint">{t("preferences.providerIdHint")}</p>
               <input
                 className="preferences-input"
                 value={entry.id}
                 onChange={(e) =>
                   updateProvider(providerIndex, { id: e.target.value })
+                }
+              />
+            </div>
+            <div className="preferences-field">
+              <label>{t("preferences.providerName")}</label>
+              <input
+                className="preferences-input"
+                value={entry.name}
+                onChange={(e) =>
+                  updateProvider(providerIndex, { name: e.target.value })
                 }
               />
             </div>

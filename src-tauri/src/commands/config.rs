@@ -1,6 +1,7 @@
 use crate::agent::opencode::{logout_provider_auth, sync_opencode_provider_auths};
 use crate::config::provider_config::{
-    load_opencode_config, save_opencode_config, OpencodeConfigView, OpencodeProviderEntry,
+    load_opencode_config, prepare_opencode_config_for_save, save_opencode_config,
+    OpencodeConfigView, OpencodeProviderEntry, SaveOpencodeConfigResult,
 };
 use crate::config::{config_dir, config_path, load_app_config, save_app_config, AppConfig};
 use serde::Serialize;
@@ -57,10 +58,14 @@ pub fn load_opencode_provider_config() -> Result<OpencodeConfigView, String> {
 }
 
 #[tauri::command]
-pub fn save_opencode_provider_config(config: OpencodeConfigView) -> Result<(), String> {
+pub fn save_opencode_provider_config(
+    config: OpencodeConfigView,
+) -> Result<SaveOpencodeConfigResult, String> {
     let previous = load_opencode_config()
         .map(|view| opencode_provider_ids(&view.providers))
         .unwrap_or_default();
+
+    let (config, warnings) = prepare_opencode_config_for_save(config);
     let next = opencode_provider_ids(&config.providers);
 
     save_opencode_config(config.clone())?;
@@ -68,5 +73,5 @@ pub fn save_opencode_provider_config(config: OpencodeConfigView) -> Result<(), S
     cleanup_removed_provider_auth(&previous, &next, logout_provider_auth);
     sync_opencode_provider_auths(&config.providers)?;
 
-    Ok(())
+    Ok(SaveOpencodeConfigResult { warnings })
 }

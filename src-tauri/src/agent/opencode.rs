@@ -1852,13 +1852,44 @@ fn opencode_auth_path() -> PathBuf {
         .join("auth.json")
 }
 
+pub fn read_provider_auth_keys() -> std::collections::HashMap<String, String> {
+    use serde_json::Map;
+
+    let path = opencode_auth_path();
+    if !path.is_file() {
+        return std::collections::HashMap::new();
+    }
+
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let auth: Map<String, Value> =
+        serde_json::from_str(&content).unwrap_or_else(|_| Map::new());
+
+    auth.into_iter()
+        .filter_map(|(provider, value)| {
+            let key = value.get("key").and_then(|v| v.as_str())?;
+            let trimmed = key.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some((provider, trimmed.to_string()))
+        })
+        .collect()
+}
+
 fn auth_provider_ids_for_storage(provider: &str) -> Vec<String> {
     let id = provider.trim();
     if id.is_empty() {
         return Vec::new();
     }
-    if id == "volcengine-plan" || id == "volcengine" {
-        return vec!["volcengine-plan".to_string(), "volcengine".to_string()];
+    if id == "volcengine-coding" || id == "volcengine-plan" || id == "volcengine" {
+        return vec![
+            "volcengine-coding".to_string(),
+            "volcengine-plan".to_string(),
+            "volcengine".to_string(),
+        ];
     }
     vec![id.to_string()]
 }
