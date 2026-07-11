@@ -290,6 +290,12 @@ function turnTailHasAbortNotice(
   return false;
 }
 
+export function isCurrentTurnCancelled(messages: HistoryMessage[]): boolean {
+  const userIndex = lastHistoryUserIndex(messages);
+  if (userIndex < 0) return false;
+  return turnTailHasAbortNotice(messages, userIndex);
+}
+
 export function ensureTurnErrorNotice(
   messages: HistoryMessage[],
   notice: string,

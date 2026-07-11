@@ -1,4 +1,4 @@
-use crate::agent::opencode::logout_provider_auth;
+use crate::agent::opencode::{logout_provider_auth, sync_opencode_provider_auths};
 use crate::config::provider_config::{
     load_opencode_config, save_opencode_config, OpencodeConfigView, OpencodeProviderEntry,
 };
@@ -63,8 +63,10 @@ pub fn save_opencode_provider_config(config: OpencodeConfigView) -> Result<(), S
         .unwrap_or_default();
     let next = opencode_provider_ids(&config.providers);
 
-    save_opencode_config(config)?;
+    save_opencode_config(config.clone())?;
 
     cleanup_removed_provider_auth(&previous, &next, logout_provider_auth);
+    sync_opencode_provider_auths(&config.providers)?;
+
     Ok(())
 }

@@ -1843,11 +1843,126 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
     }
 }
 
+fn opencode_auth_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("auth.json")
+}
+
+fn auth_provider_ids_for_storage(provider: &str) -> Vec<String> {
+    let id = provider.trim();
+    if id.is_empty() {
+        return Vec::new();
+    }
+    if id == "volcengine-plan" || id == "volcengine" {
+        return vec!["volcengine-plan".to_string(), "volcengine".to_string()];
+    }
+    vec![id.to_string()]
+}
+
+pub fn set_provider_api_auth(provider: &str, api_key: &str) -> Result<(), String> {
+    use serde_json::{json, Map};
+
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("API Key 不能为空".to_string());
+    }
+    let ids = auth_provider_ids_for_storage(provider);
+    if ids.is_empty() {
+        return Err("Provider ID 不能为空".to_string());
+    }
+
+    let path = opencode_auth_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let mut auth: Map<String, Value> = if path.is_file() {
+        let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&content).unwrap_or_else(|_| Map::new())
+    } else {
+        Map::new()
+    };
+
+    let entry = json!({
+        "type": "api",
+        "key": key,
+    });
+    for id in ids {
+        auth.insert(id, entry.clone());
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&Value::Object(auth)).map_err(|e| e.to_string())?;
+    fs::write(&path, serialized).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn remove_provider_api_auth(provider: &str) -> Result<(), String> {
+    use serde_json::Map;
+
+    let ids = auth_provider_ids_for_storage(provider);
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let path = opencode_auth_path();
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut auth: Map<String, Value> =
+        serde_json::from_str(&content).unwrap_or_else(|_| Map::new());
+
+    let mut changed = false;
+    for id in ids {
+        if auth.remove(&id).is_some() {
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    if auth.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&Value::Object(auth)).map_err(|e| e.to_string())?;
+    fs::write(&path, serialized).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn sync_opencode_provider_auths(
+    providers: &[crate::config::provider_config::OpencodeProviderEntry],
+) -> Result<(), String> {
+    for entry in providers {
+        let id = entry.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if entry.api_key.trim().is_empty() {
+            remove_provider_api_auth(id)?;
+        } else {
+            set_provider_api_auth(id, &entry.api_key)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn logout_provider_auth(provider: &str) -> Result<(), String> {
     let id = provider.trim();
     if id.is_empty() {
         return Ok(());
     }
+    remove_provider_api_auth(id)?;
     let program = resolve_opencode_command()?;
     let output = run_command(&program, &["auth", "logout", id])?;
     if output.status.success() {

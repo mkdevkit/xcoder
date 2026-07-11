@@ -34,7 +34,10 @@ import {
   syncEntriesFromServer,
   upsertToolEntry,
 } from "../utils/opencodeSessionStore";
-import { markCurrentTurnCancelled } from "../utils/chatHistory";
+import {
+  isCurrentTurnCancelled,
+  markCurrentTurnCancelled,
+} from "../utils/chatHistory";
 import {
   acceptsAgentStreamUpdates,
   createActiveTurn,
@@ -890,25 +893,24 @@ async function detectInFlightTurn(
   pending: { id: string; description: string } | null;
   activeTurnId?: string | null;
 }> {
-  const commands = getAgentCommands(providerId);
-
   if (providerId === "opencode") {
     try {
-      const [busy, pending] = await Promise.all([
-        commands.isSessionBusy
-          ? tauriInvoke<boolean>(
-              commands.isSessionBusy,
-              opencodeSessionArgs(get, providerId, threadId, workspace),
-            )
-          : Promise.resolve(false),
-        commands.getPendingApproval
-          ? tauriInvoke<{ id: string; description: string } | null>(
-              commands.getPendingApproval,
-              opencodeSessionArgs(get, providerId, threadId, workspace),
-            )
-          : Promise.resolve(null),
-      ]);
-      return { busy, pending };
+      const slice = getProviderSlice(get, providerId);
+      const poll = await tauriInvoke<{
+        messages: HistoryMessage[];
+        busy: boolean;
+        pending: { id: string; description: string } | null;
+        turn_complete: boolean;
+      }>("opencode_poll_turn", {
+        ...opencodeSessionArgs(get, providerId, threadId, workspace),
+        limit: opencodeStreamingMessageLimit(slice.messages, false),
+      });
+      const inFlight =
+        !poll.turn_complete && (poll.busy || Boolean(poll.pending?.id));
+      return {
+        busy: inFlight,
+        pending: poll.pending,
+      };
     } catch {
       return { busy: false, pending: null };
     }
@@ -930,9 +932,21 @@ async function resumeInFlightTurn(
   options?: { messages?: HistoryMessage[] },
 ) {
   const slice = getProviderSlice(get, providerId);
-  const messages =
+  let messages =
     options?.messages ??
     (await loadThreadHistoryMessages(get, providerId, workspace, threadId));
+
+  const localSession = await loadLocalChatSession(
+    workspace,
+    providerId,
+    threadId,
+  );
+  if (
+    localSession?.messages?.length &&
+    isCurrentTurnCancelled(localSession.messages)
+  ) {
+    messages = localSession.messages;
+  }
 
   if (messages) {
     patchProvider(set, providerId, {
@@ -949,6 +963,22 @@ async function resumeInFlightTurn(
 
   await ensureEventSubscription(providerId, threadId);
 
+  if (turnIdleSignals.has(providerId)) {
+    clearTurnIdleSignal(providerId);
+    patchActiveTurn(set, providerId, null, {
+      pendingApproval: null,
+    });
+    return;
+  }
+
+  const currentMessages = getProviderSlice(get, providerId).messages;
+  if (isCurrentTurnCancelled(currentMessages)) {
+    patchActiveTurn(set, providerId, null, {
+      pendingApproval: null,
+    });
+    return;
+  }
+
   const { busy, pending, activeTurnId } = await detectInFlightTurn(
     get,
     providerId,
@@ -956,7 +986,6 @@ async function resumeInFlightTurn(
     threadId,
   );
 
-  const currentMessages = getProviderSlice(get, providerId).messages;
   const resumedTurn = buildResumedActiveTurn(providerId, currentMessages, {
     pending,
     activeTurnId,
@@ -1477,6 +1506,7 @@ async function finalizeCancelledTurn(
     }
 
     await saveProviderChatLocally(get, providerId).catch(() => undefined);
+    markTurnIdleSignal(providerId);
   } finally {
     finishingTurnProviders.delete(providerId);
   }
@@ -2411,6 +2441,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     resetTurnCompleteStreak(providerId);
     markStreamingStarted(providerId);
+    clearTurnIdleSignal(providerId);
 
     const current = getProviderSlice(get, providerId);
     if (!current.thread) {

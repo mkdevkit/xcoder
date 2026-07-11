@@ -358,6 +358,7 @@ export function OpenCodeConfigTab() {
             </div>
             <div className="preferences-field">
               <label>{t("preferences.apiKey")}</label>
+              <p className="preferences-hint">{t("preferences.apiKeyHint")}</p>
               <input
                 className="preferences-input"
                 type="password"
