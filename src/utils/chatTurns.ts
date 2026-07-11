@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../types/agent";
+import { isSyntheticUserContent } from "./chatProjection";
 
 export type TurnInlinePart =
   | { type: "text"; id: string; content: string }
@@ -179,6 +180,10 @@ function groupOrderKey(group: ChatMessage[], tail: ChatMessage[]): number {
   return minIndex;
 }
 
+export function isSyntheticUserMessage(message: ChatMessage): boolean {
+  return message.role === "user" && isSyntheticUserContent(message.content);
+}
+
 export function buildChatTurns(messages: ChatMessage[]): ChatTurn[] {
   const turns: ChatTurn[] = [];
   let currentUser: ChatMessage | undefined;
@@ -199,6 +204,9 @@ export function buildChatTurns(messages: ChatMessage[]): ChatTurn[] {
 
   for (const message of messages) {
     if (message.role === "user") {
+      if (isSyntheticUserMessage(message)) {
+        continue;
+      }
       pushTurn(false);
       currentUser = message;
       currentTail = [];

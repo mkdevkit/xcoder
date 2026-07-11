@@ -2,6 +2,23 @@ import type { ChatMessage, HistoryMessage } from "../types/agent";
 import { normalizePlanningMessageOrder, stabilizeTurnErrorOrder } from "./chatHistory";
 import { isToolRunning } from "./toolMessage";
 
+export function isSyntheticUserContent(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return true;
+  if (
+    trimmed === "The following tool was executed by the user" ||
+    trimmed === "What did we do so far?" ||
+    trimmed.startsWith("Attached media from tool result:")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function isSyntheticUserEntry(entry: Pick<HistoryMessage, "role" | "content">): boolean {
+  return entry.role === "user" && isSyntheticUserContent(entry.content);
+}
+
 export function mapEntryToChatMessage(entry: HistoryMessage): ChatMessage {
   return {
     id: entry.id,
@@ -21,7 +38,8 @@ export function projectEntriesToChatMessages(
   }
   const normalized = entries
     .map((entry) => normalizeStoredEntry(entry))
-    .filter((entry): entry is HistoryMessage => entry !== null);
+    .filter((entry): entry is HistoryMessage => entry !== null)
+    .filter((entry) => !isSyntheticUserEntry(entry));
   return normalizePlanningMessageOrder(
     stabilizeTurnErrorOrder(normalized).map(mapEntryToChatMessage),
   );

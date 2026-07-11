@@ -787,6 +787,45 @@ fn part_timestamp(part: &Value, fallback: i64) -> i64 {
         .unwrap_or(fallback)
 }
 
+fn user_part_is_synthetic(part: &Value) -> bool {
+    matches!(
+        part.get("type").and_then(|v| v.as_str()),
+        Some("subtask" | "compaction")
+    )
+}
+
+fn is_synthetic_user_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed == "The following tool was executed by the user"
+        || trimmed == "What did we do so far?"
+    {
+        return true;
+    }
+    trimmed.starts_with("Attached media from tool result:")
+}
+
+fn collect_user_message_content(parts: &[Value]) -> String {
+    let mut content = String::new();
+    for part in parts {
+        if user_part_is_synthetic(part) {
+            continue;
+        }
+        if part.get("type").and_then(|v| v.as_str()) != Some("text") {
+            continue;
+        }
+        if let Some(text) = part_text(part) {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&text);
+        }
+    }
+    content
+}
+
 fn normalize_planning_message_order(batch: &mut [HistoryMessage]) {
     let mut index = 0usize;
     while index + 1 < batch.len() {
@@ -899,18 +938,8 @@ pub async fn load_session_history(
         let parts = entry["parts"].as_array().cloned().unwrap_or_default();
 
         if role == "user" {
-            let mut content = String::new();
-            for part in &parts {
-                if part["type"].as_str() == Some("text") {
-                    if let Some(text) = part_text(part) {
-                        if !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str(&text);
-                    }
-                }
-            }
-            if !content.is_empty() {
+            let content = collect_user_message_content(&parts);
+            if !is_synthetic_user_content(&content) {
                 messages.push(HistoryMessage {
                     id: message_id.clone(),
                     role: "user".to_string(),
