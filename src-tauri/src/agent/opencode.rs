@@ -1884,14 +1884,11 @@ fn auth_provider_ids_for_storage(provider: &str) -> Vec<String> {
     if id.is_empty() {
         return Vec::new();
     }
-    if id == "volcengine-coding" || id == "volcengine-plan" || id == "volcengine" {
-        return vec![
-            "volcengine-coding".to_string(),
-            "volcengine-plan".to_string(),
-            "volcengine".to_string(),
-        ];
-    }
     vec![id.to_string()]
+}
+
+fn legacy_volcengine_auth_ids() -> [&'static str; 2] {
+    ["volcengine-plan", "volcengine"]
 }
 
 pub fn set_provider_api_auth(provider: &str, api_key: &str) -> Result<(), String> {
@@ -1953,6 +1950,13 @@ pub fn remove_provider_api_auth(provider: &str) -> Result<(), String> {
     for id in ids {
         if auth.remove(&id).is_some() {
             changed = true;
+        }
+    }
+    if provider.trim() == "volcengine-coding" {
+        for legacy in legacy_volcengine_auth_ids() {
+            if auth.remove(legacy).is_some() {
+                changed = true;
+            }
         }
     }
 

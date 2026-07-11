@@ -90,7 +90,7 @@ fn auth_lookup_ids(provider_id: &str) -> Vec<&str> {
     if id.is_empty() {
         return Vec::new();
     }
-    if id == "volcengine-coding" || id == "volcengine-plan" || id == "volcengine" {
+    if id == "volcengine-coding" {
         return vec!["volcengine-coding", "volcengine-plan", "volcengine"];
     }
     vec![id]
