@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { useContextMenu } from "../components/ContextMenuProvider";
 import { useTranslation } from "../i18n";
+import { useSearchStore } from "../stores/search";
 import { useTerminalStore } from "../stores/terminal";
 import { useWorkspaceStore } from "../stores/workspace";
 import type { ContextMenuItem } from "../types/contextMenu";
@@ -44,6 +45,7 @@ export function useWorkbenchContextMenu() {
     getExplorerParentDir,
   } = useWorkspaceStore();
   const { createTerminal, activeId } = useTerminalStore();
+  const findInFolder = useSearchStore((state) => state.findInFolder);
   const { t } = useTranslation();
 
   const buildMenu = useCallback(
@@ -109,6 +111,16 @@ export function useWorkbenchContextMenu() {
         const primaryPath = menuPaths[menuPaths.length - 1] ?? filePath ?? explorerSelectedPath;
 
         if (filePath || menuPaths.length > 0) {
+          if (isDir && filePath && !multiSelected) {
+            items.push({
+              id: "explorer-find-in-folder",
+              label: t("context.findInFolder"),
+              onClick: () => {
+                if (rootPath) findInFolder(rootPath, filePath);
+              },
+            });
+          }
+
           items.push(
             {
               id: "explorer-rename",
@@ -245,6 +257,7 @@ export function useWorkbenchContextMenu() {
       deleteExplorerEntries,
       explorerSelectedPath,
       explorerSelectedPaths,
+      findInFolder,
       setExplorerSelectedPath,
       getActiveTab,
       getExplorerParentDir,

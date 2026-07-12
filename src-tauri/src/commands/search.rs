@@ -10,8 +10,18 @@ const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".output",
+    "coverage",
+    "vendor",
+    "__pycache__",
     ".specstory",
     ".cursor",
+    ".xcoder",
+    "src-tauri/target",
 ];
 
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -39,6 +49,8 @@ pub struct WorkspaceSearchOptions {
     pub include_pattern: Option<String>,
     #[serde(default)]
     pub exclude_pattern: Option<String>,
+    #[serde(default)]
+    pub scope_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +66,8 @@ pub struct WorkspaceReplaceOptions {
     pub include_pattern: Option<String>,
     #[serde(default)]
     pub exclude_pattern: Option<String>,
+    #[serde(default)]
+    pub scope_path: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -235,9 +249,44 @@ fn collect_matches_in_file(
     Ok(matches)
 }
 
-fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in WalkDir::new(root)
+fn normalize_path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+fn resolve_search_root(root: &Path, scope_path: &Option<String>) -> Result<PathBuf, String> {
+    let Some(scope_raw) = scope_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(root.to_path_buf());
+    };
+
+    let scope = PathBuf::from(scope_raw);
+    let scope = if scope.is_absolute() {
+        scope
+    } else {
+        root.join(scope)
+    };
+
+    if !scope.is_dir() {
+        return Err(format!("Not a directory: {}", scope.to_string_lossy()));
+    }
+
+    let root_key = normalize_path_key(root);
+    let scope_key = normalize_path_key(&scope);
+    if scope_key != root_key && !scope_key.starts_with(&(root_key.clone() + "/")) {
+        return Err("Search scope is outside workspace".to_string());
+    }
+
+    Ok(scope)
+}
+
+fn walk_workspace_files<F>(walk_root: &Path, workspace_root: &Path, mut visit: F) -> Result<(), String>
+where
+    F: FnMut(&Path, &str) -> Result<bool, String>,
+{
+    for entry in WalkDir::new(walk_root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
@@ -249,11 +298,18 @@ fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
         })
     {
         let Ok(entry) = entry else { continue };
-        if entry.file_type().is_file() {
-            files.push(entry.into_path());
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file = entry.into_path();
+        let Some(relative) = normalize_relative_path(&file, workspace_root) else {
+            continue;
+        };
+        if visit(&file, &relative)? {
+            break;
         }
     }
-    files
+    Ok(())
 }
 
 fn search_workspace_internal(options: &WorkspaceSearchOptions) -> Result<WorkspaceSearchResult, String> {
@@ -261,6 +317,7 @@ fn search_workspace_internal(options: &WorkspaceSearchOptions) -> Result<Workspa
     if !root.is_dir() {
         return Err(format!("Not a directory: {}", options.root));
     }
+    let walk_root = resolve_search_root(&root, &options.scope_path)?;
 
     let re = build_search_regex(
         &options.query,
@@ -276,23 +333,18 @@ fn search_workspace_internal(options: &WorkspaceSearchOptions) -> Result<Workspa
     let mut max_remaining = MAX_RESULTS;
     let mut matched_files = std::collections::BTreeSet::new();
 
-    for file in walk_workspace_files(&root) {
-        let Some(relative) = normalize_relative_path(&file, &root) else {
-            continue;
-        };
-        if !should_search_file(&relative, &include, &exclude) {
-            continue;
+    walk_workspace_files(&walk_root, &root, |file, relative| {
+        if !should_search_file(relative, &include, &exclude) {
+            return Ok(false);
         }
 
-        let file_matches = collect_matches_in_file(&file, &re, &mut max_remaining, &mut truncated)?;
+        let file_matches = collect_matches_in_file(file, &re, &mut max_remaining, &mut truncated)?;
         if !file_matches.is_empty() {
             matched_files.insert(file.to_string_lossy().to_string());
             all_matches.extend(file_matches);
         }
-        if truncated {
-            break;
-        }
-    }
+        Ok(truncated)
+    })?;
 
     Ok(WorkspaceSearchResult {
         match_count: all_matches.len(),
@@ -303,16 +355,20 @@ fn search_workspace_internal(options: &WorkspaceSearchOptions) -> Result<Workspa
 }
 
 #[tauri::command]
-pub fn search_in_workspace(options: WorkspaceSearchOptions) -> Result<WorkspaceSearchResult, String> {
-    search_workspace_internal(&options)
+pub async fn search_in_workspace(
+    options: WorkspaceSearchOptions,
+) -> Result<WorkspaceSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || search_workspace_internal(&options))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
-pub fn replace_in_workspace(options: WorkspaceReplaceOptions) -> Result<WorkspaceReplaceResult, String> {
+fn replace_workspace_internal(options: &WorkspaceReplaceOptions) -> Result<WorkspaceReplaceResult, String> {
     let root = PathBuf::from(&options.root);
     if !root.is_dir() {
         return Err(format!("Not a directory: {}", options.root));
     }
+    let walk_root = resolve_search_root(&root, &options.scope_path)?;
 
     let re = build_search_regex(
         &options.query,
@@ -326,15 +382,12 @@ pub fn replace_in_workspace(options: WorkspaceReplaceOptions) -> Result<Workspac
     let mut files_changed = 0usize;
     let mut replacements = 0usize;
 
-    for file in walk_workspace_files(&root) {
-        let Some(relative) = normalize_relative_path(&file, &root) else {
-            continue;
-        };
-        if !should_search_file(&relative, &include, &exclude) {
-            continue;
+    walk_workspace_files(&walk_root, &root, |file, relative| {
+        if !should_search_file(relative, &include, &exclude) {
+            return Ok(false);
         }
-        let Some(content) = read_searchable_text(&file)? else {
-            continue;
+        let Some(content) = read_searchable_text(file)? else {
+            return Ok(false);
         };
 
         let mut file_replacements = 0usize;
@@ -357,14 +410,24 @@ pub fn replace_in_workspace(options: WorkspaceReplaceOptions) -> Result<Workspac
         };
 
         if file_replacements > 0 && restored != content {
-            fs::write(&file, restored).map_err(|e| e.to_string())?;
+            fs::write(file, restored).map_err(|e| e.to_string())?;
             files_changed += 1;
             replacements += file_replacements;
         }
-    }
+        Ok(false)
+    })?;
 
     Ok(WorkspaceReplaceResult {
         files_changed,
         replacements,
     })
+}
+
+#[tauri::command]
+pub async fn replace_in_workspace(
+    options: WorkspaceReplaceOptions,
+) -> Result<WorkspaceReplaceResult, String> {
+    tauri::async_runtime::spawn_blocking(move || replace_workspace_internal(&options))
+        .await
+        .map_err(|error| error.to_string())?
 }

@@ -4,7 +4,9 @@ import type {
   WorkspaceSearchMatch,
   WorkspaceSearchResult,
 } from "../types/search";
+import { folderIncludePattern } from "../utils/path";
 import { tauriInvoke } from "../utils/tauri";
+import { useSettingsStore } from "./settings";
 
 interface SearchState {
   query: string;
@@ -14,6 +16,7 @@ interface SearchState {
   useRegex: boolean;
   includePattern: string;
   excludePattern: string;
+  scopePath: string | null;
   showReplace: boolean;
   searching: boolean;
   replacing: boolean;
@@ -24,6 +27,7 @@ interface SearchState {
   truncated: boolean;
   collapsedFiles: Record<string, boolean>;
   searchGeneration: number;
+  focusRequest: number;
   setQuery: (query: string) => void;
   setReplaceWith: (value: string) => void;
   setCaseSensitive: (value: boolean) => void;
@@ -31,8 +35,10 @@ interface SearchState {
   setUseRegex: (value: boolean) => void;
   setIncludePattern: (value: string) => void;
   setExcludePattern: (value: string) => void;
+  setScopePath: (path: string | null) => void;
   setShowReplace: (value: boolean) => void;
   toggleFileCollapsed: (path: string) => void;
+  findInFolder: (rootPath: string | null, folderPath: string) => void;
   runSearch: (rootPath: string | null) => Promise<void>;
   replaceAll: (rootPath: string | null) => Promise<WorkspaceReplaceResult | null>;
   clearResults: () => void;
@@ -57,6 +63,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   useRegex: false,
   includePattern: "",
   excludePattern: "",
+  scopePath: null,
   showReplace: false,
   searching: false,
   replacing: false,
@@ -67,6 +74,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   truncated: false,
   collapsedFiles: {},
   searchGeneration: 0,
+  focusRequest: 0,
 
   setQuery: (query) => set({ query }),
   setReplaceWith: (replaceWith) => set({ replaceWith }),
@@ -75,6 +83,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   setUseRegex: (useRegex) => set({ useRegex }),
   setIncludePattern: (includePattern) => set({ includePattern }),
   setExcludePattern: (excludePattern) => set({ excludePattern }),
+  setScopePath: (scopePath) => set({ scopePath }),
   setShowReplace: (showReplace) => set({ showReplace }),
   toggleFileCollapsed: (path) =>
     set((state) => ({
@@ -85,6 +94,21 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     })),
   clearResults: () => set(emptyResults()),
 
+  findInFolder: (rootPath, folderPath) => {
+    const includePattern = rootPath
+      ? folderIncludePattern(rootPath, folderPath)
+      : "";
+    useSettingsStore.getState().setSidebarView("search");
+    set((state) => ({
+      scopePath: folderPath,
+      includePattern,
+      focusRequest: state.focusRequest + 1,
+    }));
+    if (rootPath && get().query.trim()) {
+      void get().runSearch(rootPath);
+    }
+  },
+
   runSearch: async (rootPath) => {
     const {
       query,
@@ -93,6 +117,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       useRegex,
       includePattern,
       excludePattern,
+      scopePath,
       searchGeneration,
     } = get();
 
@@ -116,6 +141,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
             useRegex,
             includePattern: includePattern.trim() || null,
             excludePattern: excludePattern.trim() || null,
+            scopePath,
           },
         },
       );
@@ -150,6 +176,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       useRegex,
       includePattern,
       excludePattern,
+      scopePath,
     } = get();
 
     if (!rootPath || !query.trim()) return null;
@@ -168,6 +195,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
             useRegex,
             includePattern: includePattern.trim() || null,
             excludePattern: excludePattern.trim() || null,
+            scopePath,
           },
         },
       );

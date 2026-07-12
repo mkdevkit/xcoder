@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useSearchStore } from "../../stores/search";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import type { WorkspaceSearchMatch } from "../../types/search";
+import { relativePathFromRoot } from "../../utils/path";
 import { isTauri } from "../../utils/tauri";
 
 function SearchMatchPreview({
@@ -58,6 +59,7 @@ function displayPath(path: string, rootPath: string | null) {
 
 export function SearchPanel() {
   const { t } = useTranslation();
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const rootPath = useWorkspaceStore((state) => state.rootPath);
   const openFileAtLocation = useWorkspaceStore((state) => state.openFileAtLocation);
   const bumpExplorerRefresh = useWorkspaceStore(
@@ -72,6 +74,7 @@ export function SearchPanel() {
     useRegex,
     includePattern,
     excludePattern,
+    scopePath,
     showReplace,
     searching,
     replacing,
@@ -81,6 +84,7 @@ export function SearchPanel() {
     matchCount,
     truncated,
     collapsedFiles,
+    focusRequest,
     setQuery,
     setReplaceWith,
     setCaseSensitive,
@@ -88,6 +92,7 @@ export function SearchPanel() {
     setUseRegex,
     setIncludePattern,
     setExcludePattern,
+    setScopePath,
     setShowReplace,
     toggleFileCollapsed,
     runSearch,
@@ -96,6 +101,15 @@ export function SearchPanel() {
   } = useSearchStore();
 
   const grouped = useMemo(() => groupMatchesByFile(matches), [matches]);
+  const scopeLabel = useMemo(() => {
+    if (!scopePath || !rootPath) return "";
+    return relativePathFromRoot(rootPath, scopePath) || scopePath;
+  }, [rootPath, scopePath]);
+
+  useEffect(() => {
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [focusRequest]);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -104,7 +118,7 @@ export function SearchPanel() {
     }
     const timer = window.setTimeout(() => {
       runSearch(rootPath).catch(console.error);
-    }, 300);
+    }, 400);
     return () => window.clearTimeout(timer);
   }, [
     query,
@@ -113,6 +127,7 @@ export function SearchPanel() {
     useRegex,
     includePattern,
     excludePattern,
+    scopePath,
     rootPath,
     runSearch,
     clearResults,
@@ -188,6 +203,7 @@ export function SearchPanel() {
 
         <div className="search-input-row">
           <input
+            ref={searchInputRef}
             className="search-input"
             type="text"
             value={query}
@@ -200,6 +216,27 @@ export function SearchPanel() {
             }}
           />
         </div>
+
+        {scopePath && (
+          <div className="search-scope-row">
+            <span className="search-scope-label">{t("search.scopeLabel")}</span>
+            <span className="search-scope-value" title={scopePath}>
+              {scopeLabel}
+            </span>
+            <button
+              type="button"
+              className="search-scope-clear"
+              title={t("search.clearScope")}
+              aria-label={t("search.clearScope")}
+              onClick={() => {
+                setScopePath(null);
+                setIncludePattern("");
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {showReplace && (
           <div className="search-input-row replace-row">
@@ -382,6 +419,42 @@ const searchPanelStyles = `
     display: flex;
     gap: 6px;
     align-items: center;
+  }
+  .search-scope-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 22px;
+    padding: 0 2px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .search-scope-label {
+    flex-shrink: 0;
+  }
+  .search-scope-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+  .search-scope-clear {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--text-muted);
+    line-height: 1;
+  }
+  .search-scope-clear:hover {
+    background: var(--bg-hover);
+    color: var(--text);
   }
   .search-input,
   .search-filter-input {

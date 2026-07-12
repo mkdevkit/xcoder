@@ -19,6 +19,31 @@ export function joinPath(parent: string, name: string) {
   return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
 }
 
+export function relativePathFromRoot(rootPath: string, targetPath: string): string {
+  const normalize = (value: string) =>
+    value.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+  const root = normalize(rootPath);
+  const target = normalize(targetPath);
+  const rootLower = root.toLowerCase();
+  const targetLower = target.toLowerCase();
+  if (targetLower === rootLower) {
+    return "";
+  }
+  const prefix = `${rootLower}/`;
+  if (targetLower.startsWith(prefix)) {
+    return target.slice(root.length + 1);
+  }
+  return target;
+}
+
+export function folderIncludePattern(rootPath: string, folderPath: string): string {
+  const relative = relativePathFromRoot(rootPath, folderPath);
+  if (!relative) {
+    return "**";
+  }
+  return `${relative}/**`;
+}
+
 export function resolveFilePathInWorkspace(
   rawPath: string,
   rootPath: string | null,
