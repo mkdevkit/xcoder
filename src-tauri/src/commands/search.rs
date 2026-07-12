@@ -175,25 +175,36 @@ fn should_search_file(
     }
 }
 
+fn read_searchable_text(path: &Path) -> Result<Option<String>, String> {
+    if is_probably_binary(path) {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.contains(&0) {
+        return Ok(None);
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(Some(content)),
+        Err(_) => Ok(None),
+    }
+}
+
 fn collect_matches_in_file(
     path: &Path,
     re: &Regex,
     max_remaining: &mut usize,
     truncated: &mut bool,
 ) -> Result<Vec<WorkspaceSearchMatch>, String> {
-    if is_probably_binary(path) {
+    let Some(content) = read_searchable_text(path)? else {
         return Ok(Vec::new());
-    }
-
-    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
-    if metadata.len() > MAX_FILE_SIZE {
-        return Ok(Vec::new());
-    }
-
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if content.contains('\0') {
-        return Ok(Vec::new());
-    }
+    };
 
     let path_str = path.to_string_lossy().to_string();
     let mut matches = Vec::new();
@@ -322,18 +333,8 @@ pub fn replace_in_workspace(options: WorkspaceReplaceOptions) -> Result<Workspac
         if !should_search_file(&relative, &include, &exclude) {
             continue;
         }
-        if is_probably_binary(&file) {
+        let Some(content) = read_searchable_text(&file)? else {
             continue;
-        }
-
-        let metadata = fs::metadata(&file).map_err(|e| e.to_string())?;
-        if metadata.len() > MAX_FILE_SIZE {
-            continue;
-        }
-
-        let content = match fs::read_to_string(&file) {
-            Ok(value) if !value.contains('\0') => value,
-            _ => continue,
         };
 
         let mut file_replacements = 0usize;
