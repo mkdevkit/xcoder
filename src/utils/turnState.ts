@@ -1,4 +1,4 @@
-export type TurnPhase = "idle" | "streaming" | "cancelling" | "awaiting_approval";
+export type TurnPhase = "idle" | "streaming" | "cancelling" | "awaiting_approval" | "awaiting_question";
 
 export type TurnAnchorKind = "turn_id" | "message_id";
 
@@ -39,7 +39,11 @@ export function isTurnBusy(turn: ActiveTurn | null | undefined): boolean {
 
 export function streamingFromTurn(turn: ActiveTurn | null | undefined): boolean {
   if (!turn) return false;
-  return turn.phase === "streaming" || turn.phase === "awaiting_approval";
+  return (
+    turn.phase === "streaming" ||
+    turn.phase === "awaiting_approval" ||
+    turn.phase === "awaiting_question"
+  );
 }
 
 export function isGenerating(slice: {
@@ -57,7 +61,11 @@ export function acceptsAgentStreamUpdates(
   fallbackStreaming: boolean,
 ): boolean {
   if (turn) {
-    return turn.phase === "streaming" || turn.phase === "awaiting_approval";
+    return (
+      turn.phase === "streaming" ||
+      turn.phase === "awaiting_approval" ||
+      turn.phase === "awaiting_question"
+    );
   }
   return fallbackStreaming;
 }

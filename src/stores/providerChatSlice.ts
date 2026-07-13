@@ -1,6 +1,7 @@
 import type {
   HistoryMessage,
   OpencodeModelOption,
+  PendingQuestion,
   RuntimeStatus,
   ThreadInfo,
   ThreadSummary,
@@ -26,6 +27,7 @@ export interface ProviderChatSlice {
   runtimeBusy: boolean;
   runtimeAction: "connect" | "disconnect" | "restart" | null;
   pendingApproval: { id: string; description: string } | null;
+  pendingQuestion: PendingQuestion | null;
   error: string | null;
 }
 
@@ -49,6 +51,7 @@ export function createProviderChatSlice(_providerId: string): ProviderChatSlice 
     runtimeBusy: false,
     runtimeAction: null,
     pendingApproval: null,
+    pendingQuestion: null,
     error: null,
   };
 }

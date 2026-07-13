@@ -16,6 +16,29 @@ pub struct PendingApproval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionInfo {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default)]
+    pub custom: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingQuestion {
+    pub id: String,
+    pub questions: Vec<QuestionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
     pub id: String,
     pub role: String,

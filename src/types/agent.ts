@@ -1,5 +1,23 @@
 import { t } from "../i18n";
 
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface QuestionInfo {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface PendingQuestion {
+  id: string;
+  questions: QuestionInfo[];
+}
+
 export type AgentEvent =
   | { type: "text_delta"; content: string; partId?: string; messageId?: string }
   | { type: "text_snapshot"; content: string; partId?: string; messageId?: string }
@@ -9,6 +27,8 @@ export type AgentEvent =
   | { type: "tool_result"; output: string }
   | { type: "approval_required"; id: string; description: string }
   | { type: "approval_resolved" }
+  | { type: "question_required"; id: string; questions: QuestionInfo[] }
+  | { type: "question_resolved" }
   | { type: "file_change"; path: string; diff: string }
   | { type: "turn_completed" }
   | { type: "session_idle" }
@@ -180,6 +200,47 @@ export function mapRuntimeEvent(raw: Record<string, unknown>): AgentEvent | null
 
   if (event === "approval.resolved") {
     return { type: "approval_resolved" };
+  }
+
+  if (event === "question.required") {
+    const id = String(payload.id ?? payload.requestID ?? "");
+    const rawQuestions = payload.questions;
+    if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+      return null;
+    }
+    const questions: QuestionInfo[] = [];
+    for (const item of rawQuestions) {
+      const q = item as Record<string, unknown>;
+      const question = String(q.question ?? "");
+      if (!question) continue;
+      const options: QuestionOption[] = [];
+      if (Array.isArray(q.options)) {
+        for (const opt of q.options) {
+          const o = opt as Record<string, unknown>;
+          const label = String(o.label ?? "");
+          if (!label) continue;
+          options.push({
+            label,
+            description: String(o.description ?? ""),
+          });
+        }
+      }
+      questions.push({
+        question,
+        header: String(q.header ?? ""),
+        options,
+        multiple: Boolean(q.multiple),
+        custom: q.custom === undefined ? true : Boolean(q.custom),
+      });
+    }
+    if (!id || questions.length === 0) {
+      return null;
+    }
+    return { type: "question_required", id, questions };
+  }
+
+  if (event === "question.resolved") {
+    return { type: "question_resolved" };
   }
 
   if (event === "turn.completed" || event === "session.turn.completed") {

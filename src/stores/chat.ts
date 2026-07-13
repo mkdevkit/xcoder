@@ -8,6 +8,7 @@ import { getAgentCommands } from "../utils/agentProvider";
 import type {
   AppConfig,
   HistoryMessage,
+  PendingQuestion,
   ProviderConfig,
   RuntimeStatus,
   ThreadInfo,
@@ -113,6 +114,7 @@ async function softDisconnectProvider(
   patchActiveTurn(set, providerId, null, {
     connectedIntent: false,
     pendingApproval: null,
+    pendingQuestion: null,
     error: null,
     runtime: status,
   });
@@ -149,6 +151,8 @@ interface ChatState {
   sendMessage: (text: string) => Promise<void>;
   cancelGeneration: () => Promise<void>;
   approve: (allow: boolean) => Promise<void>;
+  replyQuestion: (answers: string[][]) => Promise<void>;
+  rejectQuestion: () => Promise<void>;
   refreshPendingApproval: () => Promise<void>;
   setupEventListener: () => Promise<() => void>;
   getActiveProvider: () => ProviderConfig | null;
@@ -330,16 +334,22 @@ function buildResumedActiveTurn(
   messages: HistoryMessage[],
   options: {
     pending: { id: string; description: string } | null;
+    pendingQuestion?: PendingQuestion | null;
     activeTurnId?: string | null;
   },
 ): ActiveTurn | null {
   const localUser = lastLocalUserMessage(messages);
   if (providerId === "opencode" && localUser) {
+    const phase = options.pendingQuestion
+      ? "awaiting_question"
+      : options.pending
+        ? "awaiting_approval"
+        : "streaming";
     return createActiveTurn(
       localUser.id,
       "message_id",
       localUser.id,
-      options.pending ? "awaiting_approval" : "streaming",
+      phase,
     );
   }
   return null;
@@ -748,6 +758,7 @@ async function fetchTurnCompleteState(
       busy: boolean;
       turn_complete: boolean;
       pending: { id: string; description: string } | null;
+      pending_question: PendingQuestion | null;
     }>("opencode_poll_turn", {
       ...opencodeSessionArgs(get, providerId, slice.thread.id),
       limit: opencodeStreamingMessageLimit(slice.messages, true),
@@ -755,7 +766,7 @@ async function fetchTurnCompleteState(
     return {
       busy: poll.busy,
       turn_complete: poll.turn_complete,
-      pending: Boolean(poll.pending?.id),
+      pending: Boolean(poll.pending?.id || poll.pending_question?.id),
     };
   }
 
@@ -891,6 +902,7 @@ async function detectInFlightTurn(
 ): Promise<{
   busy: boolean;
   pending: { id: string; description: string } | null;
+  pendingQuestion: PendingQuestion | null;
   activeTurnId?: string | null;
 }> {
   if (providerId === "opencode") {
@@ -900,23 +912,28 @@ async function detectInFlightTurn(
         messages: HistoryMessage[];
         busy: boolean;
         pending: { id: string; description: string } | null;
+        pending_question: PendingQuestion | null;
         turn_complete: boolean;
       }>("opencode_poll_turn", {
         ...opencodeSessionArgs(get, providerId, threadId, workspace),
         limit: opencodeStreamingMessageLimit(slice.messages, false),
       });
       const inFlight =
-        !poll.turn_complete && (poll.busy || Boolean(poll.pending?.id));
+        !poll.turn_complete &&
+        (poll.busy ||
+          Boolean(poll.pending?.id) ||
+          Boolean(poll.pending_question?.id));
       return {
         busy: inFlight,
         pending: poll.pending,
+        pendingQuestion: poll.pending_question,
       };
     } catch {
-      return { busy: false, pending: null };
+      return { busy: false, pending: null, pendingQuestion: null };
     }
   }
 
-  return { busy: false, pending: null, activeTurnId: null };
+  return { busy: false, pending: null, pendingQuestion: null, activeTurnId: null };
 }
 
 async function resumeInFlightTurn(
@@ -979,17 +996,25 @@ async function resumeInFlightTurn(
     return;
   }
 
-  const { busy, pending, activeTurnId } = await detectInFlightTurn(
-    get,
-    providerId,
-    workspace,
-    threadId,
-  );
+  const { busy, pending, pendingQuestion, activeTurnId } =
+    await detectInFlightTurn(get, providerId, workspace, threadId);
 
   const resumedTurn = buildResumedActiveTurn(providerId, currentMessages, {
     pending,
+    pendingQuestion,
     activeTurnId,
   });
+
+  if (pendingQuestion?.id) {
+    markStreamingStarted(providerId);
+    patchActiveTurn(set, providerId, resumedTurn, {
+      pendingQuestion,
+      pendingApproval: null,
+      error: null,
+    });
+    startStreamingHistorySync(get, set, providerId);
+    return;
+  }
 
   if (pending?.id) {
     markStreamingStarted(providerId);
@@ -1005,6 +1030,7 @@ async function resumeInFlightTurn(
     markStreamingStarted(providerId);
     patchActiveTurn(set, providerId, resumedTurn, {
       pendingApproval: null,
+      pendingQuestion: null,
       error: null,
     });
     startStreamingHistorySync(get, set, providerId);
@@ -1108,19 +1134,27 @@ async function syncMessagesFromServerOnce(
   try {
     let history: HistoryMessage[] | undefined;
     let polledPending: { id: string; description: string } | null | undefined;
+    let polledPendingQuestion: PendingQuestion | null | undefined;
     let polledTurnComplete = false;
 
     if (useOpencodeStreaming && sseFresh && !forceFullHistory) {
       const status = await tauriInvoke<{
         busy: boolean;
         pending: { id: string; description: string } | null;
+        pending_question: PendingQuestion | null;
       }>("opencode_poll_status", opencodeSessionArgs(get, providerId, threadId));
       polledPending = status.pending;
-      if (!status.busy && !status.pending?.id) {
+      polledPendingQuestion = status.pending_question;
+      if (
+        !status.busy &&
+        !status.pending?.id &&
+        !status.pending_question?.id
+      ) {
         const poll = await tauriInvoke<{
           messages: HistoryMessage[];
           busy: boolean;
           pending: { id: string; description: string } | null;
+          pending_question: PendingQuestion | null;
           turn_complete: boolean;
         }>("opencode_poll_turn", {
           ...opencodeSessionArgs(get, providerId, threadId),
@@ -1128,6 +1162,7 @@ async function syncMessagesFromServerOnce(
         });
         history = poll.messages;
         polledPending = poll.pending;
+        polledPendingQuestion = poll.pending_question;
         polledTurnComplete = poll.turn_complete;
       }
     } else if (useOpencodeStreaming && forceFullHistory) {
@@ -1136,11 +1171,13 @@ async function syncMessagesFromServerOnce(
         opencodeSessionArgs(get, providerId, threadId),
       );
       polledPending = null;
+      polledPendingQuestion = null;
     } else if (useOpencodeStreaming) {
       const poll = await tauriInvoke<{
         messages: HistoryMessage[];
         busy: boolean;
         pending: { id: string; description: string } | null;
+        pending_question: PendingQuestion | null;
         turn_complete: boolean;
       }>("opencode_poll_turn", {
         ...opencodeSessionArgs(get, providerId, threadId),
@@ -1148,6 +1185,7 @@ async function syncMessagesFromServerOnce(
       });
       history = poll.messages;
       polledPending = poll.pending;
+      polledPendingQuestion = poll.pending_question;
       polledTurnComplete = poll.turn_complete;
     } else {
       history = await tauriInvoke<HistoryMessage[]>(
@@ -1212,6 +1250,19 @@ async function syncMessagesFromServerOnce(
     }
 
     if (providerId === "opencode") {
+      if (polledPendingQuestion?.id) {
+        cancelScheduledCompleteTurn(providerId);
+        const pendingSlice = getProviderSlice(get, providerId);
+        const pendingTurn = pendingSlice.activeTurn
+          ? withTurnPhase(pendingSlice.activeTurn, "awaiting_question")
+          : pendingSlice.activeTurn;
+        patchActiveTurn(set, providerId, pendingTurn, {
+          pendingQuestion: polledPendingQuestion,
+          pendingApproval: null,
+        });
+        ensureStreamingHistorySync(get, set, providerId);
+        return;
+      }
       if (polledPending?.id) {
         cancelScheduledCompleteTurn(providerId);
         const pendingSlice = getProviderSlice(get, providerId);
@@ -1220,6 +1271,7 @@ async function syncMessagesFromServerOnce(
           : pendingSlice.activeTurn;
         patchActiveTurn(set, providerId, pendingTurn, {
           pendingApproval: polledPending,
+          pendingQuestion: null,
         });
         ensureStreamingHistorySync(get, set, providerId);
         return;
@@ -1228,10 +1280,14 @@ async function syncMessagesFromServerOnce(
       if (afterPendingCheck.pendingApproval) {
         patchProvider(set, providerId, { pendingApproval: null });
       }
+      if (afterPendingCheck.pendingQuestion) {
+        patchProvider(set, providerId, { pendingQuestion: null });
+      }
 
       if (
         polledTurnComplete &&
-        !getProviderSlice(get, providerId).pendingApproval
+        !getProviderSlice(get, providerId).pendingApproval &&
+        !getProviderSlice(get, providerId).pendingQuestion
       ) {
         await tryFinalizeTurnIfReady(get, set, providerId);
         return;
@@ -1240,7 +1296,8 @@ async function syncMessagesFromServerOnce(
       const postSyncSlice = getProviderSlice(get, providerId);
       if (
         turnIdleSignals.has(providerId) &&
-        !postSyncSlice.pendingApproval
+        !postSyncSlice.pendingApproval &&
+        !postSyncSlice.pendingQuestion
       ) {
         await tryFinalizeTurnIfReady(get, set, providerId);
         return;
@@ -1525,6 +1582,37 @@ async function runPendingApprovalCheck(
   if (!isGenerating(slice)) return false;
 
   const commands = getAgentCommands(resolvedId);
+  if (commands.getPendingQuestion && slice.thread) {
+    try {
+      const pendingQuestion = await tauriInvoke<PendingQuestion | null>(
+        commands.getPendingQuestion,
+        resolvedId === "opencode"
+          ? opencodeSessionArgs(get, resolvedId, slice.thread.id)
+          : { threadId: slice.thread.id },
+      );
+      if (pendingQuestion?.id) {
+        cancelScheduledCompleteTurn(resolvedId);
+        const current = getProviderSlice(get, resolvedId);
+        patchActiveTurn(
+          set,
+          resolvedId,
+          current.activeTurn
+            ? withTurnPhase(current.activeTurn, "awaiting_question")
+            : current.activeTurn,
+          { pendingQuestion, pendingApproval: null },
+        );
+        return true;
+      }
+      if (slice.pendingQuestion) {
+        patchProvider(set, resolvedId, { pendingQuestion: null });
+      }
+    } catch {
+      if (slice.pendingQuestion?.id) {
+        return true;
+      }
+    }
+  }
+
   if (commands.getPendingApproval && slice.thread) {
     try {
       const pending = await tauriInvoke<{
@@ -1545,7 +1633,7 @@ async function runPendingApprovalCheck(
           current.activeTurn
             ? withTurnPhase(current.activeTurn, "awaiting_approval")
             : current.activeTurn,
-          { pendingApproval: pending },
+          { pendingApproval: pending, pendingQuestion: null },
         );
         return true;
       }
@@ -1560,6 +1648,9 @@ async function runPendingApprovalCheck(
 
   if (slice.pendingApproval) {
     patchProvider(set, resolvedId, { pendingApproval: null });
+  }
+  if (slice.pendingQuestion) {
+    patchProvider(set, resolvedId, { pendingQuestion: null });
   }
   return false;
 }
@@ -1741,6 +1832,7 @@ function syncProviderWorkspace(
     patch.messages = [];
     patch.streaming = false;
     patch.pendingApproval = null;
+    patch.pendingQuestion = null;
     patch.error = null;
   }
   patchProvider(set, providerId, patch);
@@ -2569,6 +2661,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!slice.thread || !isGenerating(slice)) return;
 
     const commands = getAgentCommands(providerId);
+
+    if (commands.getPendingQuestion) {
+      try {
+        const pendingQuestion = await tauriInvoke<PendingQuestion | null>(
+          commands.getPendingQuestion,
+          providerId === "opencode"
+            ? opencodeSessionArgs(get, providerId, slice.thread.id)
+            : { threadId: slice.thread.id },
+        );
+        if (pendingQuestion) {
+          cancelScheduledCompleteTurn(providerId);
+          const current = getProviderSlice(get, providerId);
+          patchActiveTurn(
+            set,
+            providerId,
+            current.activeTurn
+              ? withTurnPhase(current.activeTurn, "awaiting_question")
+              : current.activeTurn,
+            { pendingQuestion, pendingApproval: null },
+          );
+          ensureStreamingHistorySync(get, set, providerId);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     if (!commands.getPendingApproval) return;
 
     try {
@@ -2590,7 +2710,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           current.activeTurn
             ? withTurnPhase(current.activeTurn, "awaiting_approval")
             : current.activeTurn,
-          { pendingApproval: pending },
+          { pendingApproval: pending, pendingQuestion: null },
         );
         ensureStreamingHistorySync(get, set, providerId);
       }
@@ -2642,6 +2762,93 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (msg.includes("404") || msg.includes("no pending approval")) {
         patchProvider(set, providerId, {
           pendingApproval: null,
+          error: t("error.approvalExpired"),
+        });
+      } else {
+        patchProvider(set, providerId, { error: msg });
+      }
+    }
+  },
+
+  replyQuestion: async (answers) => {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.pendingQuestion || !slice.thread) return;
+    if (!slice.pendingQuestion.id) {
+      await get().refreshPendingApproval();
+      const refreshed = getProviderSlice(get, providerId);
+      if (!refreshed.pendingQuestion?.id) {
+        patchProvider(set, providerId, {
+          error: t("error.approvalIdMissing"),
+        });
+        return;
+      }
+    }
+
+    const active = getProviderSlice(get, providerId);
+    const commands = getAgentCommands(providerId);
+    if (!commands.replyQuestion) return;
+
+    try {
+      await tauriInvoke(commands.replyQuestion, {
+        sessionId: active.thread!.id,
+        requestId: active.pendingQuestion!.id,
+        answers,
+        workspace: resolveProviderWorkspace(
+          get,
+          providerId,
+          active.thread!.workspace,
+        ),
+      });
+      patchProvider(set, providerId, {
+        pendingQuestion: null,
+        streaming: true,
+        error: null,
+      });
+      ensureStreamingHistorySync(get, set, providerId);
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("404") || msg.includes("unknown request")) {
+        patchProvider(set, providerId, {
+          pendingQuestion: null,
+          error: t("error.approvalExpired"),
+        });
+      } else {
+        patchProvider(set, providerId, { error: msg });
+      }
+    }
+  },
+
+  rejectQuestion: async () => {
+    const { providerId } = get();
+    const slice = getProviderSlice(get, providerId);
+    if (!slice.pendingQuestion || !slice.thread) return;
+
+    const active = getProviderSlice(get, providerId);
+    const commands = getAgentCommands(providerId);
+    if (!commands.rejectQuestion) return;
+
+    try {
+      await tauriInvoke(commands.rejectQuestion, {
+        sessionId: active.thread!.id,
+        requestId: active.pendingQuestion!.id,
+        workspace: resolveProviderWorkspace(
+          get,
+          providerId,
+          active.thread!.workspace,
+        ),
+      });
+      patchProvider(set, providerId, {
+        pendingQuestion: null,
+        streaming: true,
+        error: null,
+      });
+      ensureStreamingHistorySync(get, set, providerId);
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("404") || msg.includes("unknown request")) {
+        patchProvider(set, providerId, {
+          pendingQuestion: null,
           error: t("error.approvalExpired"),
         });
       } else {
@@ -2839,6 +3046,68 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ? withTurnPhase(activeSlice.activeTurn, "streaming")
                 : activeSlice.activeTurn,
               { pendingApproval: null },
+            );
+          }
+
+          if (mapped.type === "question_required") {
+            const activeSlice = getProviderSlice(get, resolvedId);
+            if (
+              !acceptsAgentStreamUpdates(
+                activeSlice.activeTurn,
+                activeSlice.streaming,
+              )
+            ) {
+              return;
+            }
+            cancelScheduledCompleteTurn(resolvedId);
+            patchActiveTurn(
+              set,
+              resolvedId,
+              activeSlice.activeTurn
+                ? withTurnPhase(activeSlice.activeTurn, "awaiting_question")
+                : activeSlice.activeTurn,
+              {
+                pendingQuestion: {
+                  id: mapped.id,
+                  questions: mapped.questions,
+                },
+                pendingApproval: null,
+              },
+            );
+            ensureStreamingHistorySync(get, set, resolvedId);
+
+            const commands = getAgentCommands(resolvedId);
+            if (commands.getPendingQuestion) {
+              const refresh = async () => {
+                const slice = getProviderSlice(get, resolvedId);
+                if (!slice.thread) return;
+                try {
+                  const pending = await tauriInvoke<PendingQuestion | null>(
+                    commands.getPendingQuestion!,
+                    resolvedId === "opencode"
+                      ? opencodeSessionArgs(get, resolvedId, slice.thread.id)
+                      : { threadId: slice.thread.id },
+                  );
+                  if (pending) {
+                    patchProvider(set, resolvedId, { pendingQuestion: pending });
+                  }
+                } catch {
+                  // keep event-derived question card
+                }
+              };
+              refresh().catch(() => undefined);
+            }
+          }
+
+          if (mapped.type === "question_resolved") {
+            const activeSlice = getProviderSlice(get, resolvedId);
+            patchActiveTurn(
+              set,
+              resolvedId,
+              activeSlice.activeTurn
+                ? withTurnPhase(activeSlice.activeTurn, "streaming")
+                : activeSlice.activeTurn,
+              { pendingQuestion: null },
             );
           }
 
@@ -3044,6 +3313,7 @@ export function useActiveProviderChat() {
         runtimeBusy: slice.runtimeBusy,
         runtimeAction: slice.runtimeAction,
         pendingApproval: slice.pendingApproval,
+        pendingQuestion: slice.pendingQuestion,
         error: slice.error,
       };
     }),

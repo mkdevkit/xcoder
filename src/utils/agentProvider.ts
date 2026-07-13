@@ -17,6 +17,9 @@ export interface AgentCommands {
   listThreads: string;
   loadThreadHistory: string;
   getPendingApproval?: string;
+  getPendingQuestion?: string;
+  replyQuestion?: string;
+  rejectQuestion?: string;
   isSessionBusy?: string;
   deleteThread: string;
   updateThreadTitle?: string;
@@ -40,6 +43,9 @@ export function getAgentCommands(providerId: string): AgentCommands {
     listThreads: "opencode_list_sessions",
     loadThreadHistory: "opencode_load_session_history",
     getPendingApproval: "opencode_get_pending_approval",
+    getPendingQuestion: "opencode_get_pending_question",
+    replyQuestion: "opencode_reply_question",
+    rejectQuestion: "opencode_reject_question",
     isSessionBusy: "opencode_is_session_busy",
     deleteThread: "opencode_delete_session",
     updateThreadTitle: "opencode_update_session_title",

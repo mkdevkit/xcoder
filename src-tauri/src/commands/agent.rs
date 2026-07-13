@@ -1,9 +1,10 @@
-﻿use crate::agent::history::{HistoryMessage, PendingApproval, RuntimeStatus, ThreadInfo, ThreadSummary};
+﻿use crate::agent::history::{HistoryMessage, PendingApproval, PendingQuestion, RuntimeStatus, ThreadInfo, ThreadSummary};
 use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
-    delete_session, get_pending_permission, is_healthy as opencode_is_healthy, list_agents,
+    delete_session, get_pending_permission, get_pending_question, is_healthy as opencode_is_healthy, list_agents,
     list_provider_models, list_sessions, load_session_history, is_session_busy,
     normalize_event as opencode_normalize_event, poll_session_status, poll_turn_state,
+    reject_question, reply_question,
     send_prompt, shared_http_client, update_session_title,
     spawn_runtime as spawn_opencode_runtime, wait_for_health as wait_for_opencode_health,
     OpencodeState,
@@ -572,6 +573,60 @@ pub async fn opencode_get_pending_approval(
     let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
     get_pending_permission(&client, &url, &session_id, workspace.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn opencode_get_pending_question(
+    session_id: String,
+    workspace: Option<String>,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<Option<PendingQuestion>, String> {
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
+    let client = reqwest::Client::new();
+    get_pending_question(&client, &url, &session_id, workspace.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn opencode_reply_question(
+    session_id: String,
+    request_id: String,
+    answers: Vec<Vec<String>>,
+    workspace: Option<String>,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<(), String> {
+    let _ = session_id;
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
+    let client = reqwest::Client::new();
+    reply_question(
+        &client,
+        &url,
+        &request_id,
+        answers,
+        workspace.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn opencode_reject_question(
+    session_id: String,
+    request_id: String,
+    workspace: Option<String>,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<(), String> {
+    let _ = session_id;
+    let url = opencode_resolve_service_url(&state).await?;
+    let workspace = opencode_workspace(&state, workspace)?;
+    let client = reqwest::Client::new();
+    reject_question(
+        &client,
+        &url,
+        &request_id,
+        workspace.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

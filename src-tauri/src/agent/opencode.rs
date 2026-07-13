@@ -715,6 +715,160 @@ pub async fn get_pending_permission(
     Ok(None)
 }
 
+fn question_entries(json: &Value) -> Vec<&Value> {
+    if let Some(array) = json.as_array() {
+        return array.iter().collect();
+    }
+    if let Some(array) = json.get("data").and_then(|v| v.as_array()) {
+        return array.iter().collect();
+    }
+    if let Some(array) = json.get("questions").and_then(|v| v.as_array()) {
+        return array.iter().collect();
+    }
+    Vec::new()
+}
+
+fn parse_question_infos(value: Option<&Value>) -> Vec<crate::agent::history::QuestionInfo> {
+    let Some(array) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    array
+        .iter()
+        .filter_map(|item| {
+            let question = item.get("question")?.as_str()?.to_string();
+            let header = item
+                .get("header")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let options = item
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|opts| {
+                    opts.iter()
+                        .filter_map(|opt| {
+                            Some(crate::agent::history::QuestionOption {
+                                label: opt.get("label")?.as_str()?.to_string(),
+                                description: opt
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let multiple = item
+                .get("multiple")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let custom = item
+                .get("custom")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            Some(crate::agent::history::QuestionInfo {
+                question,
+                header,
+                options,
+                multiple,
+                custom,
+            })
+        })
+        .collect()
+}
+
+pub async fn get_pending_question(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &str,
+    workspace: Option<&str>,
+) -> Result<Option<crate::agent::history::PendingQuestion>, String> {
+    let response = with_directory(client.get(format!("{url}/question")), workspace)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("List questions failed: {text}"));
+    }
+
+    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    let entries = question_entries(&json);
+
+    for entry in entries {
+        let sid = entry.get("sessionID").and_then(|v| v.as_str());
+        if sid != Some(session_id) {
+            continue;
+        }
+
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let questions = parse_question_infos(entry.get("questions"));
+        if questions.is_empty() {
+            continue;
+        }
+
+        return Ok(Some(crate::agent::history::PendingQuestion {
+            id: id.to_string(),
+            questions,
+        }));
+    }
+
+    Ok(None)
+}
+
+pub async fn reply_question(
+    client: &reqwest::Client,
+    url: &str,
+    request_id: &str,
+    answers: Vec<Vec<String>>,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let response = with_directory(
+        client.post(format!("{url}/question/{request_id}/reply")),
+        workspace,
+    )
+    .json(&serde_json::json!({ "answers": answers }))
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    Err(format!("Reply question failed: {text}"))
+}
+
+pub async fn reject_question(
+    client: &reqwest::Client,
+    url: &str,
+    request_id: &str,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let response = with_directory(
+        client.post(format!("{url}/question/{request_id}/reject")),
+        workspace,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    Err(format!("Reject question failed: {text}"))
+}
+
 pub async fn approve_permission(
     client: &reqwest::Client,
     url: &str,
@@ -1207,6 +1361,7 @@ pub struct OpencodeTurnPoll {
     pub messages: Vec<HistoryMessage>,
     pub busy: bool,
     pub pending: Option<crate::agent::history::PendingApproval>,
+    pub pending_question: Option<crate::agent::history::PendingQuestion>,
     pub turn_complete: bool,
 }
 
@@ -1220,13 +1375,16 @@ pub async fn poll_turn_state(
     let history_fut = load_session_history(client, url, session_id, workspace, limit);
     let status_fut = session_status_type(client, url, session_id, workspace);
     let permission_fut = get_pending_permission(client, url, session_id, workspace);
+    let question_fut = get_pending_question(client, url, session_id, workspace);
 
-    let (history_res, status_res, permission_res) =
-        tokio::join!(history_fut, status_fut, permission_fut);
+    let (history_res, status_res, permission_res, question_res) =
+        tokio::join!(history_fut, status_fut, permission_fut, question_fut);
 
     let messages = history_res?;
     let pending = permission_res?;
-    let busy = if pending.is_some() {
+    let pending_question = question_res?;
+    let has_pending = pending.is_some() || pending_question.is_some();
+    let busy = if has_pending {
         true
     } else {
         resolve_session_busy(
@@ -1239,12 +1397,13 @@ pub async fn poll_turn_state(
         .await?
     };
 
-    let turn_complete = pending.is_none() && !busy;
+    let turn_complete = !has_pending && !busy;
 
     Ok(OpencodeTurnPoll {
         messages,
         busy,
         pending,
+        pending_question,
         turn_complete,
     })
 }
@@ -1253,6 +1412,7 @@ pub async fn poll_turn_state(
 pub struct OpencodeSessionStatusPoll {
     pub busy: bool,
     pub pending: Option<crate::agent::history::PendingApproval>,
+    pub pending_question: Option<crate::agent::history::PendingQuestion>,
 }
 
 pub async fn poll_session_status(
@@ -1263,11 +1423,15 @@ pub async fn poll_session_status(
 ) -> Result<OpencodeSessionStatusPoll, String> {
     let status_fut = session_status_type(client, url, session_id, workspace);
     let permission_fut = get_pending_permission(client, url, session_id, workspace);
+    let question_fut = get_pending_question(client, url, session_id, workspace);
 
-    let (status_res, permission_res) = tokio::join!(status_fut, permission_fut);
+    let (status_res, permission_res, question_res) =
+        tokio::join!(status_fut, permission_fut, question_fut);
 
     let pending = permission_res?;
-    let busy = if pending.is_some() {
+    let pending_question = question_res?;
+    let has_pending = pending.is_some() || pending_question.is_some();
+    let busy = if has_pending {
         true
     } else {
         resolve_session_busy(
@@ -1280,7 +1444,11 @@ pub async fn poll_session_status(
         .await?
     };
 
-    Ok(OpencodeSessionStatusPoll { busy, pending })
+    Ok(OpencodeSessionStatusPoll {
+        busy,
+        pending,
+        pending_question,
+    })
 }
 
 pub async fn is_session_busy(
@@ -1290,6 +1458,9 @@ pub async fn is_session_busy(
     workspace: Option<&str>,
 ) -> Result<bool, String> {
     if let Ok(Some(_)) = get_pending_permission(client, url, session_id, workspace).await {
+        return Ok(true);
+    }
+    if let Ok(Some(_)) = get_pending_question(client, url, session_id, workspace).await {
         return Ok(true);
     }
 
@@ -1667,6 +1838,42 @@ pub fn normalize_event(raw: &Value, session_id: &str) -> Option<Value> {
             }
             Some(serde_json::json!({
                 "event": "approval.resolved",
+                "payload": {}
+            }))
+        }
+        "question.asked" => {
+            let sid = properties.get("sessionID").and_then(|v| v.as_str());
+            if let Some(sid) = sid {
+                if !session_id.is_empty() && sid != session_id {
+                    return None;
+                }
+            }
+            let id = properties
+                .get("id")
+                .or_else(|| properties.get("requestID"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let questions = properties
+                .get("questions")
+                .cloned()
+                .unwrap_or(Value::Array(vec![]));
+            Some(serde_json::json!({
+                "event": "question.required",
+                "payload": {
+                    "id": id,
+                    "questions": questions,
+                }
+            }))
+        }
+        "question.replied" | "question.rejected" => {
+            let sid = properties.get("sessionID").and_then(|v| v.as_str());
+            if let Some(sid) = sid {
+                if !session_id.is_empty() && sid != session_id {
+                    return None;
+                }
+            }
+            Some(serde_json::json!({
+                "event": "question.resolved",
                 "payload": {}
             }))
         }

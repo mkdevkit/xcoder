@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { ApprovalGate } from "../../components/ApprovalGate";
+import { QuestionGate } from "../../components/QuestionGate";
 import { AssistantTurnBubble } from "../../components/AssistantTurnBubble";
 import { MessageBubble } from "../../components/MessageBubble";
 import { StreamingIndicator } from "../../components/StreamingIndicator";
@@ -19,6 +20,7 @@ export function ChatMessageList() {
     messages,
     generating,
     pendingApproval,
+    pendingQuestion,
     providerId,
     connectedIntent,
     runtime,
@@ -26,6 +28,8 @@ export function ChatMessageList() {
     activeTurn,
   } = useActiveProviderChat();
   const approve = useChatStore((state) => state.approve);
+  const replyQuestion = useChatStore((state) => state.replyQuestion);
+  const rejectQuestion = useChatStore((state) => state.rejectQuestion);
   const { t } = useTranslation();
   const providerLabel = getProviderLabel(providerId);
 
@@ -47,7 +51,7 @@ export function ChatMessageList() {
     bottomRef.current?.scrollIntoView({
       behavior: generating ? "auto" : "smooth",
     });
-  }, [scrollKey, pendingApproval, generating]);
+  }, [scrollKey, pendingApproval, pendingQuestion, generating]);
 
   return (
     <div className="chat-messages">
@@ -93,6 +97,13 @@ export function ChatMessageList() {
         );
       })}
       {generating && <StreamingIndicator labelKey={statusLabelKey} />}
+      {pendingQuestion && (
+        <QuestionGate
+          pending={pendingQuestion}
+          onSubmit={(answers) => replyQuestion(answers).catch(console.error)}
+          onDismiss={() => rejectQuestion().catch(console.error)}
+        />
+      )}
       {pendingApproval && (
         <ApprovalGate
           description={pendingApproval.description}
