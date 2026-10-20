@@ -83,6 +83,22 @@ export interface AgentEventEnvelope {
   event: Record<string, unknown>;
 }
 
+export interface MigratableSession {
+  id: string;
+  title: string;
+  directory: string;
+  projectId: string;
+  projectWorktree?: string | null;
+  updatedAt?: number | null;
+  orphan: boolean;
+}
+
+export interface SessionMigrationResult {
+  migrated: number;
+  targetProjectId: string;
+  targetDirectory: string;
+}
+
 export interface OpencodeModelOption {
   providerId: string;
   providerName: string;

@@ -99,6 +99,8 @@ pub fn run() {
             commands::agent::opencode_reply_question,
             commands::agent::opencode_reject_question,
             commands::agent::opencode_delete_session,
+            commands::agent::opencode_list_migratable_sessions,
+            commands::agent::opencode_migrate_sessions,
             commands::history::save_local_chat_history,
             commands::history::list_local_chat_sessions,
             commands::history::load_local_chat_session,

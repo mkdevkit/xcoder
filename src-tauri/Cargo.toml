@@ -28,3 +28,4 @@ portable-pty = "0.8"
 walkdir = "2"
 regex = "1"
 globset = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }

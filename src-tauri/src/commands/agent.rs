@@ -1,4 +1,7 @@
 ﻿use crate::agent::history::{HistoryMessage, PendingApproval, PendingQuestion, RuntimeStatus, ThreadInfo, ThreadSummary};
+use crate::agent::migration::{
+    self, MigratableSession, MigrationResult,
+};
 use crate::agent::opencode::{
     approve_permission, base_url as opencode_base_url, cancel_generation, check_installed, create_session,
     delete_session, get_pending_permission, get_pending_question, is_healthy as opencode_is_healthy, list_agents,
@@ -12,6 +15,7 @@ use crate::agent::opencode::{
 use crate::commands::project_config::sync_project_opencode_from_config;
 use crate::utils::runtime_lifecycle::{kill_child_tree, kill_tcp_listener};
 use futures_util::StreamExt;
+use std::path::Path;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 
@@ -709,4 +713,87 @@ pub async fn opencode_delete_session(
     let workspace = opencode_workspace(&state, workspace)?;
     let client = reqwest::Client::new();
     delete_session(&client, &url, &session_id, workspace.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn opencode_list_migratable_sessions(
+    limit: Option<u32>,
+) -> Result<Vec<MigratableSession>, String> {
+    tokio::task::spawn_blocking(move || {
+        migration::list_migratable_sessions(limit.unwrap_or(500))
+    })
+    .await
+    .map_err(|error| format!("读取会话列表失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn opencode_migrate_sessions(
+    session_ids: Vec<String>,
+    workspace: String,
+    state: State<'_, Mutex<OpencodeState>>,
+) -> Result<MigrationResult, String> {
+    if session_ids.is_empty() {
+        return Err("请选择要迁移的会话".to_string());
+    }
+
+    let url = opencode_resolve_service_url(&state).await?;
+    let client = reqwest::Client::new();
+    let global_backup = migration::read_global_project().ok().flatten();
+    let response = client
+        .get(format!("{url}/project/current"))
+        .query(&[("directory", workspace.as_str())])
+        .send()
+        .await
+        .map_err(|error| format!("解析目标项目失败：{error}"))?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("解析目标项目失败：{text}"));
+    }
+
+    let project: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析目标项目失败：{error}"))?;
+    let target_project_id = project["id"]
+        .as_str()
+        .ok_or_else(|| "解析目标项目失败：缺少项目 ID".to_string())?
+        .to_string();
+
+    // OpenCode falls back to the global project for git repositories that have
+    // no cached project id, remote, or root commit. That fallback rewrites the
+    // global project worktree, so refuse it and restore the row instead.
+    let in_git_worktree = Path::new(&workspace)
+        .ancestors()
+        .any(|path| path.join(".git").exists());
+    if target_project_id == "global" && in_git_worktree {
+        if let Some(backup) = global_backup {
+            if backup.worktree == "/" {
+                let _ = migration::restore_global_project(&backup);
+            }
+        }
+        return Err(
+            "无法识别目标项目的 Git 标识：请先在该目录创建至少一个提交，或配置 git remote。"
+                .to_string(),
+        );
+    }
+
+    let ids_for_task = session_ids.clone();
+    let project_for_task = target_project_id.clone();
+    let workspace_for_task = workspace.clone();
+    let migrated = tokio::task::spawn_blocking(move || {
+        migration::migrate_sessions(
+            &ids_for_task,
+            &project_for_task,
+            &workspace_for_task,
+        )
+    })
+    .await
+    .map_err(|error| format!("迁移任务失败：{error}"))??;
+
+    Ok(MigrationResult {
+        migrated,
+        target_project_id,
+        target_directory: workspace,
+    })
 }

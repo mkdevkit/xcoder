@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "provider": "opencode",
+  "workspace": "D:\\WorkSpace\\mkdevkit\\xcoder",
+  "active_session_id": "ses_ea87f81a8ffe3SOl2MD1jQInyy",
+  "sessions": [
+    {
+      "id": "ses_ea87f81a8ffe3SOl2MD1jQInyy",
+      "title": "我想你搞个会话迁移功能，在新会话列表最后面的增加会话按钮后再加个接钮弹窗，也是要打开项目目录后才…",
+      "updated_at": "2026-10-20T04:34:34.412Z",
+      "markdown_file": "2026-10-20T04-34-34_ses_ea87f81a8ffe3SOl2MD1jQInyy.md",
+      "data_file": "2026-10-20T04-34-34_ses_ea87f81a8ffe3SOl2MD1jQInyy.json",
+      "preview": "已完成会话迁移功能：  - 在会话行 `+` 新建按钮后新增 `⇄` 迁移按钮，仅在打开项目且 OpenCode 运行、非生成中时可用。 - 弹窗列出所有项目的根会话，支持搜索和多选，并标记“目录不存在 / 已在当前项目”；子会话会递归一并…"
+    }
+  ]
+}

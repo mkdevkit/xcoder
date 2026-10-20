@@ -14,8 +14,13 @@ import {
 } from "../../utils/chatTurns";
 import { currentChatTurnHasRunningTools } from "../../utils/chatProjection";
 
+const NEAR_BOTTOM_PX = 80;
+
 export function ChatMessageList() {
+  const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const gateRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const {
     messages,
     generating,
@@ -41,6 +46,8 @@ export function ChatMessageList() {
   const statusLabelKey: TranslationKey = runningTools
     ? "chat.runningTools"
     : "chat.generating";
+  const awaitingInput = Boolean(pendingApproval || pendingQuestion);
+  const pendingGateId = pendingQuestion?.id ?? pendingApproval?.id ?? null;
 
   const scrollKey = useMemo(() => {
     const last = messages[messages.length - 1];
@@ -48,13 +55,41 @@ export function ChatMessageList() {
   }, [messages]);
 
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distance <= NEAR_BOTTOM_PX;
+    };
+
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // 审批/选项面板出现时：停住贴底跟随，把面板顶部滚进可视区，方便浏览长选项
+  useEffect(() => {
+    if (!pendingGateId) {
+      stickToBottomRef.current = true;
+      return;
+    }
+    stickToBottomRef.current = false;
+    gateRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [pendingGateId]);
+
+  useEffect(() => {
+    if (awaitingInput) return;
+    if (!stickToBottomRef.current) return;
     bottomRef.current?.scrollIntoView({
       behavior: generating ? "auto" : "smooth",
     });
-  }, [scrollKey, pendingApproval, pendingQuestion, generating]);
+  }, [scrollKey, generating, awaitingInput]);
 
   return (
-    <div className="chat-messages">
+    <div className="chat-messages" ref={containerRef}>
       {messages.length === 0 && (
         <div className="chat-placeholder">
           {!connectedIntent
@@ -97,19 +132,23 @@ export function ChatMessageList() {
         );
       })}
       {generating && <StreamingIndicator labelKey={statusLabelKey} />}
-      {pendingQuestion && (
-        <QuestionGate
-          pending={pendingQuestion}
-          onSubmit={(answers) => replyQuestion(answers).catch(console.error)}
-          onDismiss={() => rejectQuestion().catch(console.error)}
-        />
-      )}
-      {pendingApproval && (
-        <ApprovalGate
-          description={pendingApproval.description}
-          onApprove={() => approve(true).catch(console.error)}
-          onDeny={() => approve(false).catch(console.error)}
-        />
+      {(pendingQuestion || pendingApproval) && (
+        <div ref={gateRef}>
+          {pendingQuestion && (
+            <QuestionGate
+              pending={pendingQuestion}
+              onSubmit={(answers) => replyQuestion(answers).catch(console.error)}
+              onDismiss={() => rejectQuestion().catch(console.error)}
+            />
+          )}
+          {pendingApproval && (
+            <ApprovalGate
+              description={pendingApproval.description}
+              onApprove={() => approve(true).catch(console.error)}
+              onDeny={() => approve(false).catch(console.error)}
+            />
+          )}
+        </div>
       )}
       <div ref={bottomRef} />
     </div>

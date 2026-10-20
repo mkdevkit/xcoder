@@ -25,6 +25,8 @@ export interface AgentCommands {
   updateThreadTitle?: string;
   listAgents?: string;
   listProviderModels?: string;
+  listMigratableSessions?: string;
+  migrateSessions?: string;
 }
 
 export function getAgentCommands(providerId: string): AgentCommands {
@@ -51,6 +53,8 @@ export function getAgentCommands(providerId: string): AgentCommands {
     updateThreadTitle: "opencode_update_session_title",
     listAgents: "opencode_list_agents",
     listProviderModels: "opencode_list_provider_models",
+    listMigratableSessions: "opencode_list_migratable_sessions",
+    migrateSessions: "opencode_migrate_sessions",
   };
 }
 

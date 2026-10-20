@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { PanelResizeHandle } from "../../components/PanelResizeHandle";
 import {
@@ -20,6 +20,7 @@ import {
 } from "../../utils/opencodeModels";
 import { localizeSessionTitle } from "../../utils/localChatHistory";
 import { ChatMessageList } from "./ChatMessageList";
+import { SessionMigrateDialog } from "./SessionMigrateDialog";
 
 const CHAT_INPUT_HEIGHT_KEY = "xcoder:chat-input-height";
 const CHAT_INPUT_MIN_HEIGHT = 112;
@@ -55,6 +56,7 @@ export function ChatPanel() {
   const composerRef = useRef<RichChatComposerHandle>(null);
   const [hasContent, setHasContent] = useState(false);
   const [inputAreaHeight, setInputAreaHeight] = useState(readStoredInputHeight);
+  const [migrateOpen, setMigrateOpen] = useState(false);
   const {
     providerId,
     runtime,
@@ -103,6 +105,7 @@ export function ChatPanel() {
     selectThread,
     createNewThread,
     deleteThread,
+    loadThreads,
     setMode,
     setModel,
     setOpencodeVendor,
@@ -112,6 +115,10 @@ export function ChatPanel() {
   const { rootPath } = useWorkspaceStore();
   const { t } = useTranslation();
   const generating = isGenerating({ streaming, activeTurn });
+
+  useEffect(() => {
+    if (!rootPath) setMigrateOpen(false);
+  }, [rootPath]);
   const canChat = Boolean(rootPath && connectedIntent && runtime.running && thread);
   const canCompose = Boolean(rootPath && connectedIntent && runtime.running && !generating);
   const controlsLocked = generating || runtimeBusy;
@@ -272,6 +279,17 @@ export function ChatPanel() {
             >
               +
             </button>
+            {isOpencode && (
+              <button
+                type="button"
+                className="thread-migrate-btn"
+                title={t("chat.migrateSession")}
+                disabled={!rootPath || controlsLocked || !runtime.running}
+                onClick={() => setMigrateOpen(true)}
+              >
+                ⇄
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -364,6 +382,15 @@ export function ChatPanel() {
         </div>
       </div>
 
+      {rootPath && (
+        <SessionMigrateDialog
+          open={migrateOpen}
+          workspace={rootPath}
+          onClose={() => setMigrateOpen(false)}
+          onMigrated={() => loadThreads(rootPath, providerId)}
+        />
+      )}
+
       <style>{`
         .chat-panel {
           height: 100%;
@@ -424,7 +451,8 @@ export function ChatPanel() {
           min-width: 0;
         }
         .thread-new-btn,
-        .thread-delete-btn {
+        .thread-delete-btn,
+        .thread-migrate-btn {
           width: 28px;
           padding: 0;
           flex-shrink: 0;
