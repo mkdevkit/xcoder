@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore } from "../../stores/settings";
 import { useTranslation } from "../../i18n";
 import { FileExplorer } from "../FileExplorer/FileExplorer";
@@ -5,7 +6,12 @@ import { SearchPanel } from "../SearchPanel/SearchPanel";
 import { SidebarActivityBar } from "./SidebarActivityBar";
 
 export function SidebarPanel() {
-  const { sidebarView, setSidebarView } = useSettingsStore();
+  const { sidebarView, setSidebarView } = useSettingsStore(
+    useShallow((state) => ({
+      sidebarView: state.sidebarView,
+      setSidebarView: state.setSidebarView,
+    })),
+  );
   const { t } = useTranslation();
 
   return (

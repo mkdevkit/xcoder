@@ -108,6 +108,7 @@ async function softDisconnectProvider(
   ) => void,
   providerId: string,
 ) {
+  flushPendingStreamDeltas(set);
   stopStreamingHistorySync(providerId);
   cancelScheduledCompleteTurn(providerId);
   const status = await pollProviderRuntimeStatus(providerId);
@@ -481,6 +482,7 @@ async function tryFinalizeTurnIfReady(
   ) => void,
   providerId: string,
 ) {
+  flushPendingStreamDeltas(set);
   const slice = getProviderSlice(get, providerId);
   if (!isGenerating(slice) || !slice.thread) return;
 
@@ -716,6 +718,102 @@ const turnCompleteStreak = new Map<string, number>();
 const turnCompleteEmptyStreak = new Map<string, number>();
 const streamingStartedAt = new Map<string, number>();
 const turnIdleSignals = new Map<string, number>();
+
+type PendingStreamDelta = {
+  providerId: string;
+  kind: "text" | "reasoning";
+  partId: string;
+  content: string;
+  threadId: string;
+  anchorId: string | null;
+  baselineEntryIds: readonly string[] | undefined;
+  parentMessageId: string | null;
+};
+
+const STREAM_DELTA_FLUSH_MS = 32;
+const pendingStreamDeltas: PendingStreamDelta[] = [];
+let pendingStreamDeltaTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueStreamDelta(
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+  delta: PendingStreamDelta,
+) {
+  pendingStreamDeltas.push(delta);
+  if (pendingStreamDeltaTimer !== null) return;
+  pendingStreamDeltaTimer = setTimeout(() => {
+    pendingStreamDeltaTimer = null;
+    flushPendingStreamDeltas(set);
+  }, STREAM_DELTA_FLUSH_MS);
+}
+
+function flushPendingStreamDeltas(
+  set: (
+    partial:
+      | Partial<ChatState>
+      | ((state: ChatState) => Partial<ChatState>),
+  ) => void,
+) {
+  if (pendingStreamDeltaTimer !== null) {
+    clearTimeout(pendingStreamDeltaTimer);
+    pendingStreamDeltaTimer = null;
+  }
+  if (pendingStreamDeltas.length === 0) return;
+
+  const batch = pendingStreamDeltas.splice(0, pendingStreamDeltas.length);
+  const coalesced: PendingStreamDelta[] = [];
+  for (const delta of batch) {
+    const previous = coalesced[coalesced.length - 1];
+    if (
+      previous &&
+      previous.providerId === delta.providerId &&
+      previous.kind === delta.kind &&
+      previous.partId === delta.partId &&
+      previous.threadId === delta.threadId &&
+      previous.parentMessageId === delta.parentMessageId
+    ) {
+      previous.content += delta.content;
+    } else {
+      coalesced.push({ ...delta });
+    }
+  }
+
+  set((state) => {
+    const providerStates = { ...state.providerStates };
+    let changed = false;
+    for (const delta of coalesced) {
+      const slice =
+        providerStates[delta.providerId] ??
+        createProviderChatSlice(delta.providerId);
+      if (slice.thread?.id !== delta.threadId) continue;
+      const messages =
+        delta.kind === "text"
+          ? appendTextDelta(
+              slice.messages,
+              delta.partId,
+              delta.content,
+              delta.anchorId,
+              delta.baselineEntryIds,
+              delta.parentMessageId,
+            )
+          : appendReasoningDelta(
+              slice.messages,
+              delta.partId,
+              delta.content,
+              delta.anchorId,
+              delta.baselineEntryIds,
+              delta.parentMessageId,
+            );
+      if (messages === slice.messages) continue;
+      providerStates[delta.providerId] = { ...slice, messages };
+      changed = true;
+    }
+    return changed ? { providerStates } : state;
+  });
+}
 
 function resetTurnCompleteStreak(providerId: string) {
   turnCompleteStreak.delete(providerId);
@@ -1106,6 +1204,7 @@ async function syncMessagesFromServerOnce(
   force = false,
   forceFullHistory = false,
 ) {
+  flushPendingStreamDeltas(set);
   const slice = getProviderSlice(get, providerId);
   if (!slice.thread) return;
   if (!isGenerating(slice) && !force) return;
@@ -1194,6 +1293,7 @@ async function syncMessagesFromServerOnce(
       );
     }
 
+    flushPendingStreamDeltas(set);
     const latest = getProviderSlice(get, providerId);
     if (!latest.thread || latest.thread.id !== threadId) return;
 
@@ -1414,6 +1514,7 @@ async function tryFinishOpencodeTurn(
   providerId: string,
   options?: { force?: boolean },
 ) {
+  flushPendingStreamDeltas(set);
   cancelScheduledCompleteTurn(providerId);
   if (
     !options?.force &&
@@ -1437,6 +1538,7 @@ async function completeTurnForProvider(
 ) {
   if (finishingTurnProviders.has(resolvedId)) return;
   finishingTurnProviders.add(resolvedId);
+  flushPendingStreamDeltas(set);
   try {
     if (!options?.force && (await runPendingApprovalCheck(get, set, resolvedId))) {
       cancelScheduledCompleteTurn(resolvedId);
@@ -1951,6 +2053,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setProvider: (providerId) => {
+    flushPendingStreamDeltas(set);
     set((state) => ({
       providerId,
       providerStates: ensureProviderSlice(state.providerStates, providerId),
@@ -1964,6 +2067,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onProjectOpened: async (workspace, projectConfig) => {
+    flushPendingStreamDeltas(set);
     const { config } = get();
     if (!config) return;
 
@@ -2329,6 +2433,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectThread: async (threadId, workspace) => {
+    flushPendingStreamDeltas(set);
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     if (slice.thread?.id === threadId) {
@@ -2393,6 +2498,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   createNewThread: async (workspace) => {
+    flushPendingStreamDeltas(set);
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     if (!slice.connectedIntent) {
@@ -2521,6 +2627,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    flushPendingStreamDeltas(set);
     const { providerId } = get();
     cancelScheduledCompleteTurn(providerId);
     clearOpencodeSseActivity(providerId);
@@ -2592,6 +2699,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   cancelGeneration: async () => {
+    flushPendingStreamDeltas(set);
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     if (!isGenerating(slice) || !slice.thread) return;
@@ -2881,6 +2989,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!mapped) return;
           const resolvedId = eventProviderId || get().providerId;
 
+          if (
+            mapped.type !== "text_delta" &&
+            mapped.type !== "reasoning_delta"
+          ) {
+            flushPendingStreamDeltas(set);
+          }
+
           const isActiveStreamingTurn = () => {
             const slice = getProviderSlice(get, resolvedId);
             return acceptsAgentStreamUpdates(slice.activeTurn, slice.streaming);
@@ -2888,19 +3003,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (mapped.type === "text_delta") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
+            const slice = getProviderSlice(get, resolvedId);
+            if (!slice.thread) return;
             markOpencodeAnswerTextSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
-            applyToProvider(resolvedId, (slice) => ({
-              messages: appendTextDelta(
-                slice.messages,
-                mapped.partId!,
-                mapped.content,
-                slice.activeTurn?.anchorId,
-                slice.activeTurn?.baselineEntryIds,
-                parentMessageIdForEvent(slice, mapped.messageId),
-              ),
-            }));
+            const latest = getProviderSlice(get, resolvedId);
+            queueStreamDelta(set, {
+              providerId: resolvedId,
+              kind: "text",
+              partId: mapped.partId,
+              content: mapped.content,
+              threadId: slice.thread.id,
+              anchorId: latest.activeTurn?.anchorId ?? null,
+              baselineEntryIds: latest.activeTurn?.baselineEntryIds,
+              parentMessageId:
+                mapped.messageId ??
+                latest.activeTurn?.assistantMessageId ??
+                null,
+            });
             ensureStreamingHistorySync(get, set, resolvedId);
           } else if (mapped.type === "text_snapshot") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
@@ -2919,19 +3040,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
           } else if (mapped.type === "reasoning_delta") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
+            const slice = getProviderSlice(get, resolvedId);
+            if (!slice.thread) return;
             markOpencodeStreamSseActivity(resolvedId);
             cancelScheduledCompleteTurn(resolvedId);
             rememberAssistantMessageId(get, set, resolvedId, mapped.messageId);
-            applyToProvider(resolvedId, (slice) => ({
-              messages: appendReasoningDelta(
-                slice.messages,
-                mapped.partId!,
-                mapped.content,
-                slice.activeTurn?.anchorId,
-                slice.activeTurn?.baselineEntryIds,
-                parentMessageIdForEvent(slice, mapped.messageId),
-              ),
-            }));
+            const latest = getProviderSlice(get, resolvedId);
+            queueStreamDelta(set, {
+              providerId: resolvedId,
+              kind: "reasoning",
+              partId: mapped.partId,
+              content: mapped.content,
+              threadId: slice.thread.id,
+              anchorId: latest.activeTurn?.anchorId ?? null,
+              baselineEntryIds: latest.activeTurn?.baselineEntryIds,
+              parentMessageId:
+                mapped.messageId ??
+                latest.activeTurn?.assistantMessageId ??
+                null,
+            });
           } else if (mapped.type === "reasoning_snapshot") {
             if (!isActiveStreamingTurn() || !mapped.partId) return;
             markOpencodeStreamSseActivity(resolvedId);
@@ -2982,7 +3109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (mapped.path) {
               workspace.reloadOpenFilesIfClean([mapped.path]);
             }
-            workspace.bumpExplorerRefresh();
+            workspace.bumpExplorerRefreshSoon();
           }
 
           if (mapped.type === "approval_required") {
@@ -3187,6 +3314,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
 
     const unlistenError = await listen<unknown>("agent-error", (event) => {
+      flushPendingStreamDeltas(set);
       const { providerId: eventProviderId, message } = parseAgentError(
         event.payload,
       );
@@ -3215,6 +3343,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     return () => {
+      flushPendingStreamDeltas(set);
       unlistenEvent();
       unlistenError();
     };

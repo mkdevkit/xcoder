@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useContextMenu } from "../components/ContextMenuProvider";
 import { useTranslation } from "../i18n";
 import { useSearchStore } from "../stores/search";
@@ -43,8 +44,31 @@ export function useWorkbenchContextMenu() {
     deleteExplorerEntry,
     deleteExplorerEntries,
     getExplorerParentDir,
-  } = useWorkspaceStore();
-  const { createTerminal, activeId } = useTerminalStore();
+  } = useWorkspaceStore(
+    useShallow((state) => ({
+      rootPath: state.rootPath,
+      activeFile: state.activeFile,
+      bumpExplorerRefresh: state.bumpExplorerRefresh,
+      saveActiveFile: state.saveActiveFile,
+      reloadActiveFile: state.reloadActiveFile,
+      closeTab: state.closeTab,
+      getActiveTab: state.getActiveTab,
+      explorerSelectedPath: state.explorerSelectedPath,
+      explorerSelectedPaths: state.explorerSelectedPaths,
+      setExplorerSelectedPath: state.setExplorerSelectedPath,
+      beginExplorerRename: state.beginExplorerRename,
+      beginExplorerCreate: state.beginExplorerCreate,
+      deleteExplorerEntry: state.deleteExplorerEntry,
+      deleteExplorerEntries: state.deleteExplorerEntries,
+      getExplorerParentDir: state.getExplorerParentDir,
+    })),
+  );
+  const { createTerminal, activeId } = useTerminalStore(
+    useShallow((state) => ({
+      createTerminal: state.createTerminal,
+      activeId: state.activeId,
+    })),
+  );
   const findInFolder = useSearchStore((state) => state.findInFolder);
   const { t } = useTranslation();
 

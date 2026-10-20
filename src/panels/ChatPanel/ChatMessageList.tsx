@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef } from "react";
 import { ApprovalGate } from "../../components/ApprovalGate";
 import { QuestionGate } from "../../components/QuestionGate";
 import { AssistantTurnBubble } from "../../components/AssistantTurnBubble";
@@ -38,10 +38,14 @@ export function ChatMessageList() {
   const { t } = useTranslation();
   const providerLabel = getProviderLabel(providerId);
 
-  const chatTurns = useMemo(() => buildChatTurns(messages), [messages]);
+  const deferredMessages = useDeferredValue(messages);
+  const chatTurns = useMemo(
+    () => buildChatTurns(deferredMessages),
+    [deferredMessages],
+  );
   const runningTools = useMemo(
-    () => generating && currentChatTurnHasRunningTools(messages),
-    [generating, messages],
+    () => generating && currentChatTurnHasRunningTools(deferredMessages),
+    [generating, deferredMessages],
   );
   const statusLabelKey: TranslationKey = runningTools
     ? "chat.runningTools"
@@ -50,9 +54,9 @@ export function ChatMessageList() {
   const pendingGateId = pendingQuestion?.id ?? pendingApproval?.id ?? null;
 
   const scrollKey = useMemo(() => {
-    const last = messages[messages.length - 1];
-    return `${messages.length}:${last?.id ?? ""}:${last?.content?.length ?? 0}`;
-  }, [messages]);
+    const last = deferredMessages[deferredMessages.length - 1];
+    return `${deferredMessages.length}:${last?.id ?? ""}:${last?.content?.length ?? 0}`;
+  }, [deferredMessages]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -83,9 +87,9 @@ export function ChatMessageList() {
   useEffect(() => {
     if (awaitingInput) return;
     if (!stickToBottomRef.current) return;
-    bottomRef.current?.scrollIntoView({
-      behavior: generating ? "auto" : "smooth",
-    });
+    const container = containerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
   }, [scrollKey, generating, awaitingInput]);
 
   return (

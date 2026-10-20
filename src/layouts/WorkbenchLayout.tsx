@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import appIcon from "../../src-tauri/icons/icon.png";
 import { MenuBar, type MenuBarMenu } from "../components/MenuBar";
 import { PanelResizeHandle } from "../components/PanelResizeHandle";
@@ -28,11 +29,40 @@ export function WorkbenchLayout() {
     resizeSidebarBy,
     resizeChatBy,
     resizeTerminalBy,
-  } = useSettingsStore();
+  } = useSettingsStore(
+    useShallow((state) => ({
+      sidebarWidth: state.sidebarWidth,
+      chatWidth: state.chatWidth,
+      terminalVisible: state.terminalVisible,
+      terminalHeight: state.terminalHeight,
+      resizeSidebarBy: state.resizeSidebarBy,
+      resizeChatBy: state.resizeChatBy,
+      resizeTerminalBy: state.resizeTerminalBy,
+    })),
+  );
   const centerColumnRef = useRef<HTMLElement>(null);
-  const { openFolder, openPreferencesTab, openRecentProject, closeProject, recentProjects, rootPath, activeFile, setupWorkspaceListener } =
-    useWorkspaceStore();
-  const { createTerminal } = useTerminalStore();
+  const {
+    openFolder,
+    openPreferencesTab,
+    openRecentProject,
+    closeProject,
+    recentProjects,
+    rootPath,
+    activeFile,
+    setupWorkspaceListener,
+  } = useWorkspaceStore(
+    useShallow((state) => ({
+      openFolder: state.openFolder,
+      openPreferencesTab: state.openPreferencesTab,
+      openRecentProject: state.openRecentProject,
+      closeProject: state.closeProject,
+      recentProjects: state.recentProjects,
+      rootPath: state.rootPath,
+      activeFile: state.activeFile,
+      setupWorkspaceListener: state.setupWorkspaceListener,
+    })),
+  );
+  const createTerminal = useTerminalStore((state) => state.createTerminal);
   const connectedIntent = useChatStore(
     (state) =>
       (state.providerStates[state.providerId] ??

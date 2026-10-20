@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useDropZone } from "../../hooks/useDropZone";
@@ -113,7 +114,7 @@ function TreeNode({
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const { listDirectory } = useWorkspaceStore();
+  const listDirectory = useWorkspaceStore((state) => state.listDirectory);
 
   const isRenaming =
     explorerEdit?.mode === "rename" && explorerEdit.targetPath === entry.path;
@@ -263,7 +264,28 @@ export function FileExplorer() {
     openFile,
     importPathsIntoExplorer,
     movePathsInExplorer,
-  } = useWorkspaceStore();
+  } = useWorkspaceStore(
+    useShallow((state) => ({
+      rootPath: state.rootPath,
+      listDirectory: state.listDirectory,
+      explorerRefreshKey: state.explorerRefreshKey,
+      explorerSelectedPath: state.explorerSelectedPath,
+      explorerSelectedPaths: state.explorerSelectedPaths,
+      explorerEdit: state.explorerEdit,
+      explorerError: state.explorerError,
+      setExplorerSelectedPath: state.setExplorerSelectedPath,
+      selectExplorerEntry: state.selectExplorerEntry,
+      selectExplorerRange: state.selectExplorerRange,
+      isExplorerPathSelected: state.isExplorerPathSelected,
+      beginExplorerRename: state.beginExplorerRename,
+      cancelExplorerEdit: state.cancelExplorerEdit,
+      commitExplorerEdit: state.commitExplorerEdit,
+      deleteExplorerEntries: state.deleteExplorerEntries,
+      openFile: state.openFile,
+      importPathsIntoExplorer: state.importPathsIntoExplorer,
+      movePathsInExplorer: state.movePathsInExplorer,
+    })),
+  );
   const { t } = useTranslation();
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);

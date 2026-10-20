@@ -60,6 +60,7 @@ interface WorkspaceState {
   explorerError: string | null;
   recentProjects: string[];
   bumpExplorerRefresh: () => void;
+  bumpExplorerRefreshSoon: () => void;
   setExplorerSelectedPath: (path: string | null, isDir?: boolean) => void;
   selectExplorerEntry: (
     path: string,
@@ -108,6 +109,7 @@ interface WorkspaceState {
 }
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let explorerRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let reloadOpenFilesTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingReloadPaths: string[] = [];
 
@@ -252,8 +254,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   getActiveTab: () => syncActiveTab(get().openTabs, get().activeFile),
 
-  bumpExplorerRefresh: () =>
-    set((state) => ({ explorerRefreshKey: state.explorerRefreshKey + 1 })),
+  bumpExplorerRefresh: () => {
+    if (explorerRefreshTimer) {
+      clearTimeout(explorerRefreshTimer);
+      explorerRefreshTimer = null;
+    }
+    set((state) => ({ explorerRefreshKey: state.explorerRefreshKey + 1 }));
+  },
+
+  bumpExplorerRefreshSoon: () => {
+    if (explorerRefreshTimer) {
+      clearTimeout(explorerRefreshTimer);
+    }
+    explorerRefreshTimer = setTimeout(() => {
+      explorerRefreshTimer = null;
+      get().bumpExplorerRefresh();
+    }, 250);
+  },
 
   setExplorerSelectedPath: (path, isDir) => {
     if (!path) {
@@ -943,6 +960,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return () => {
       if (refreshTimer) {
         clearTimeout(refreshTimer);
+      }
+      if (explorerRefreshTimer) {
+        clearTimeout(explorerRefreshTimer);
+        explorerRefreshTimer = null;
       }
       if (reloadOpenFilesTimer) {
         clearTimeout(reloadOpenFilesTimer);

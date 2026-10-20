@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore } from "../../stores/settings";
 import { useTerminalStore } from "../../stores/terminal";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -5,10 +6,18 @@ import { useTranslation } from "../../i18n";
 import { TerminalInstance } from "./TerminalInstance";
 
 export function TerminalPanel() {
-  const { terminalVisible } = useSettingsStore();
+  const terminalVisible = useSettingsStore((state) => state.terminalVisible);
   const { tabs, activeId, closeTerminal, createTerminal, setActiveTerminal } =
-    useTerminalStore();
-  const { rootPath } = useWorkspaceStore();
+    useTerminalStore(
+      useShallow((state) => ({
+        tabs: state.tabs,
+        activeId: state.activeId,
+        closeTerminal: state.closeTerminal,
+        createTerminal: state.createTerminal,
+        setActiveTerminal: state.setActiveTerminal,
+      })),
+    );
+  const rootPath = useWorkspaceStore((state) => state.rootPath);
   const { t } = useTranslation();
 
   const handleCloseActive = async () => {

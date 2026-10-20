@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "../../i18n";
 import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
 import { useChatStore } from "../../stores/chat";
@@ -27,7 +28,23 @@ export function EditorPanel() {
     openDroppedPaths,
     recentProjects,
     openRecentProject,
-  } = useWorkspaceStore();
+  } = useWorkspaceStore(
+    useShallow((state) => ({
+      openTabs: state.openTabs,
+      activeFile: state.activeFile,
+      editorReveal: state.editorReveal,
+      setActiveFile: state.setActiveFile,
+      closeTab: state.closeTab,
+      setFileContent: state.setFileContent,
+      saveActiveFile: state.saveActiveFile,
+      consumeEditorReveal: state.consumeEditorReveal,
+      getActiveTab: state.getActiveTab,
+      rootPath: state.rootPath,
+      openDroppedPaths: state.openDroppedPaths,
+      recentProjects: state.recentProjects,
+      openRecentProject: state.openRecentProject,
+    })),
+  );
   const appTheme = useChatStore((state) => state.config?.app.theme ?? "dark");
   const monacoTheme = appTheme === "light" ? "vs" : "vs-dark";
 

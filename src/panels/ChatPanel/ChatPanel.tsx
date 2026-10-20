@@ -111,8 +111,20 @@ export function ChatPanel() {
     setOpencodeVendor,
     sendMessage,
     cancelGeneration,
-  } = useChatStore();
-  const { rootPath } = useWorkspaceStore();
+  } = useChatStore(
+    useShallow((state) => ({
+      selectThread: state.selectThread,
+      createNewThread: state.createNewThread,
+      deleteThread: state.deleteThread,
+      loadThreads: state.loadThreads,
+      setMode: state.setMode,
+      setModel: state.setModel,
+      setOpencodeVendor: state.setOpencodeVendor,
+      sendMessage: state.sendMessage,
+      cancelGeneration: state.cancelGeneration,
+    })),
+  );
+  const rootPath = useWorkspaceStore((state) => state.rootPath);
   const { t } = useTranslation();
   const generating = isGenerating({ streaming, activeTurn });
 
