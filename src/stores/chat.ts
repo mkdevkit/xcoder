@@ -22,6 +22,7 @@ import {
   finalizeTurnEntries,
   isTurnHistoryStable,
   hasUnsyncedLocalTurnTail,
+  lastUserEntryIndex,
   projectEntriesToChatMessages,
   sessionTitleFromEntries,
   turnHasDisplayableEntries,
@@ -442,7 +443,7 @@ async function prepareOpencodeTurnForComplete(
   let previous = getProviderSlice(get, providerId).messages;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const localBefore = getProviderSlice(get, providerId).messages;
-    await syncMessagesFromServerOnce(get, set, providerId, true, true);
+    await syncMessagesFromServerOnce(get, set, providerId, true, false);
     const latestState = await fetchTurnCompleteState(get, providerId);
     if (latestState.pending || latestState.busy || !latestState.turn_complete) {
       return false;
@@ -527,7 +528,7 @@ async function endTurnFromRuntimeEvent(
     markTurnIdleSignal(providerId);
   }
 
-  const forceFullHistory = options?.forceFullHistory ?? true;
+  const forceFullHistory = options?.forceFullHistory ?? false;
   await syncMessagesFromServerOnce(
     get,
     set,
@@ -672,7 +673,7 @@ const OPENCODE_SSE_FALLBACK_MS = 1800;
 const TURN_COMPLETE_EMPTY_MAX_STREAK = 4;
 const OPENCODE_FORCE_FULL_POLL_MS = 8_000;
 const OPENCODE_STREAMING_MESSAGE_LIMIT_MIN = 48;
-const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 160;
+const OPENCODE_STREAMING_MESSAGE_LIMIT_MAX = 500;
 
 function streamingPollIntervalMs(providerId: string) {
   return STREAMING_POLL_MS[providerId] ?? DEFAULT_STREAMING_POLL_MS;
@@ -695,13 +696,16 @@ function opencodeStreamingMessageLimit(
   messages: HistoryMessage[],
   busy?: boolean,
 ) {
+  const lastUserIndex = lastUserEntryIndex(messages);
+  const currentTurnEntries =
+    lastUserIndex >= 0 ? messages.length - lastUserIndex : messages.length;
   const estimatedEntries = Math.max(
     20,
-    Math.ceil(messages.length / 2) + (busy ? 24 : 12),
+    currentTurnEntries + (busy ? 24 : 12),
   );
   const max = busy
     ? OPENCODE_STREAMING_MESSAGE_LIMIT_MAX
-    : Math.min(120, OPENCODE_STREAMING_MESSAGE_LIMIT_MAX);
+    : Math.min(300, OPENCODE_STREAMING_MESSAGE_LIMIT_MAX);
   return Math.min(
     max,
     Math.max(OPENCODE_STREAMING_MESSAGE_LIMIT_MIN, estimatedEntries),
@@ -1651,7 +1655,7 @@ async function finalizeCancelledTurn(
 
     slice = getProviderSlice(get, providerId);
     if (slice.thread) {
-      await syncMessagesFromServer(get, set, providerId, true, true);
+      await syncMessagesFromServer(get, set, providerId, true, false);
       const afterSync = getProviderSlice(get, providerId);
       patchActiveTurn(set, providerId, null, {
         messages: finalizeTurnEntries(
@@ -3262,7 +3266,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const activeSlice = getProviderSlice(get, resolvedId);
             if (!isGenerating(activeSlice)) return;
             void endTurnFromRuntimeEvent(get, set, resolvedId, {
-              forceFullHistory: true,
               reason: "completed",
             });
           }

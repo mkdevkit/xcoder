@@ -7,10 +7,10 @@
     {
       "id": "ses_ea87f81a8ffe3SOl2MD1jQInyy",
       "title": "我想你搞个会话迁移功能，在新会话列表最后面的增加会话按钮后再加个接钮弹窗，也是要打开项目目录后才…",
-      "updated_at": "2026-10-20T08:58:18.039Z",
-      "markdown_file": "2026-10-20T08-58-18_ses_ea87f81a8ffe3SOl2MD1jQInyy.md",
-      "data_file": "2026-10-20T08-58-18_ses_ea87f81a8ffe3SOl2MD1jQInyy.json",
-      "preview": "已按优先级做了优化：  - 流式 `text/reasoning` delta 现在会合并为每 32ms 一次 store 更新；在 turn 结束、切换会话、取消、历史同步前会强制 flush，避免丢字或重复。 - `file_chang…"
+      "updated_at": "2026-10-24T10:45:35.378Z",
+      "markdown_file": "2026-10-24T10-45-35_ses_ea87f81a8ffe3SOl2MD1jQInyy.md",
+      "data_file": "2026-10-24T10-45-35_ses_ea87f81a8ffe3SOl2MD1jQInyy.json",
+      "preview": "已完成两件事：  **1. OpenCode 已更新** - `opencode --version` 现在为 `1.19.4`（最新版）。 - 当前 4096 端口的 `opencode serve` 仍是旧进程 `1.17.16`，需要…"
     }
   ]
 }
