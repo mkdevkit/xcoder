@@ -29,6 +29,10 @@ function hasXcoderDir(workspace: string | null) {
   }
 }
 
+function shouldAutoOpen() {
+  return vscode.workspace.isTrusted && hasXcoderDir(workspacePath());
+}
+
 function buildWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
   const htmlPath = vscode.Uri.joinPath(
     extensionUri,
@@ -258,7 +262,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       const workspace = workspacePath();
-      if (hasXcoderDir(workspace)) {
+      if (shouldAutoOpen()) {
         void chatProvider.show();
       }
       for (const webview of webviews.keys()) {
@@ -276,7 +280,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  if (hasXcoderDir(workspacePath())) {
+  if (shouldAutoOpen()) {
     void chatProvider.show();
   }
 }

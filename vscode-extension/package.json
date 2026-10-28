@@ -2,11 +2,16 @@
   "name": "xcoder-vscode",
   "displayName": "Xcoder",
   "description": "Xcoder chat and OpenCode preferences inside VS Code",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "mkdevkit",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
   },
   "categories": [
     "AI",
