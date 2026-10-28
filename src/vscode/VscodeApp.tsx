@@ -3,6 +3,7 @@ import { useTranslation } from "../i18n";
 import { ChatPanel } from "../panels/ChatPanel/ChatPanel";
 import { PreferencesPanel } from "../panels/PreferencesPanel/PreferencesPanel";
 import { useChatStore } from "../stores/chat";
+import { createProviderChatSlice } from "../stores/providerChatSlice";
 import { useWorkspaceStore } from "../stores/workspace";
 import { applyAppTheme } from "../utils/appTheme";
 import { tauriInvoke } from "../utils/tauri";
@@ -124,6 +125,14 @@ export function VscodeApp() {
     init?.view === "preferences" ? "preferences" : "chat",
   );
   const connectedWorkspace = useRef<string | null>(null);
+  const userSelectedTab = useRef(false);
+  const wasConnected = useRef(false);
+  const connected = useChatStore((state) => {
+    const slice =
+      state.providerStates[state.providerId] ??
+      createProviderChatSlice(state.providerId);
+    return Boolean(slice.connectedIntent && slice.runtime.running);
+  });
 
   useEffect(() => {
     const handleClipboardShortcut = (event: KeyboardEvent) => {
@@ -289,12 +298,27 @@ export function VscodeApp() {
     })();
   }, [tab, workspace]);
 
+  useEffect(() => {
+    if (!connected) {
+      setTab("preferences");
+    } else if (
+      !wasConnected.current &&
+      !userSelectedTab.current &&
+      init?.view === "chat"
+    ) {
+      setTab("chat");
+    }
+    wasConnected.current = connected;
+  }, [connected, init?.view]);
+
   const tabs = useMemo(
     () => [
-      { id: "chat" as const, label: t("vscode.chat") },
+      ...(connected
+        ? [{ id: "chat" as const, label: t("vscode.chat") }]
+        : []),
       { id: "preferences" as const, label: t("vscode.preferences") },
     ],
-    [t],
+    [connected, t],
   );
 
   if (!init) {
@@ -311,7 +335,10 @@ export function VscodeApp() {
             role="tab"
             className={`vscode-tab ${tab === item.id ? "active" : ""}`}
             aria-selected={tab === item.id}
-            onClick={() => setTab(item.id)}
+            onClick={() => {
+              userSelectedTab.current = true;
+              setTab(item.id);
+            }}
           >
             {item.label}
           </button>
@@ -322,7 +349,7 @@ export function VscodeApp() {
       </div>
 
       <div className="vscode-content">
-        {tab === "preferences" ? (
+        {tab === "preferences" || !connected ? (
           <div className="vscode-preferences">
             <PreferencesPanel
               showMcp={false}
