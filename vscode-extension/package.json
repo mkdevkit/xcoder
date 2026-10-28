@@ -1,0 +1,58 @@
+{
+  "name": "xcoder-vscode",
+  "displayName": "Xcoder",
+  "description": "Xcoder chat and OpenCode preferences inside VS Code",
+  "version": "0.1.0",
+  "publisher": "mkdevkit",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:xcoder.openChat",
+    "onCommand:xcoder.openPreferences",
+    "onCommand:xcoder.restartRuntime"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "xcoder.openChat",
+        "title": "Xcoder: Open Chat"
+      },
+      {
+        "command": "xcoder.openPreferences",
+        "title": "Xcoder: Open Preferences"
+      },
+      {
+        "command": "xcoder.restartRuntime",
+        "title": "Xcoder: Restart OpenCode Runtime"
+      }
+    ],
+    "configuration": {
+      "title": "Xcoder",
+      "properties": {
+        "xcoder.opencodePort": {
+          "type": "number",
+          "default": 4097,
+          "description": "Port used by the OpenCode server launched by the VS Code extension."
+        },
+        "xcoder.opencodeCommand": {
+          "type": "string",
+          "default": "opencode",
+          "description": "OpenCode executable used to launch the local server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -w -p tsconfig.json"
+  }
+}

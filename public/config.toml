@@ -1,0 +1,17 @@
+[app]
+default_provider = "opencode"
+theme = "dark"
+
+[[providers]]
+id = "opencode"
+type = "http"
+command = "opencode"
+args = [
+    "serve",
+    "--hostname",
+    "127.0.0.1",
+    "--port",
+    "4096",
+]
+config_path = "~/.config/opencode/opencode.json"
+health_cmd = []

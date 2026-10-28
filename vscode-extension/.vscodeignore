@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+tsconfig.json
+node_modules/**
+**/*.map
+media/config.toml
+media/logo.svg
+media/xcoder.png

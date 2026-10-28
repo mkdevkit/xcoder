@@ -1,0 +1,10 @@
+{
+  "provider": "opencode",
+  "defaultModel": "",
+  "opencodePermissions": {
+    "edit": "",
+    "bash": "",
+    "read": "",
+    "webfetch": ""
+  }
+}

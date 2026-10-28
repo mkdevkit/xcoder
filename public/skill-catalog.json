@@ -1,0 +1,53 @@
+{
+  "directoryUrl": "https://skills.sh",
+  "sources": [
+    {
+      "id": "vercel-labs/agent-skills",
+      "label": "Vercel Agent Skills",
+      "skills": [
+        {
+          "name": "web-design-guidelines",
+          "description": "Review UI against web design and accessibility guidelines."
+        },
+        {
+          "name": "react-best-practices",
+          "description": "React and Next.js performance and composition best practices."
+        },
+        {
+          "name": "react-native-skills",
+          "description": "React Native patterns and platform-specific guidance."
+        },
+        {
+          "name": "composition-patterns",
+          "description": "Component composition patterns for scalable React code."
+        },
+        {
+          "name": "deploy-to-vercel",
+          "description": "Deploy projects to Vercel with correct configuration."
+        },
+        {
+          "name": "vercel-optimize",
+          "description": "Optimize Vercel deployments and runtime performance."
+        },
+        {
+          "name": "writing-guidelines",
+          "description": "Consistent technical writing and documentation style."
+        }
+      ]
+    },
+    {
+      "id": "vercel-labs/skills",
+      "label": "Vercel Skills CLI Examples",
+      "skills": [
+        {
+          "name": "find-skills",
+          "description": "Discover and recommend agent skills for a task."
+        },
+        {
+          "name": "skill-creator",
+          "description": "Scaffold and author new agent skills."
+        }
+      ]
+    }
+  ]
+}
