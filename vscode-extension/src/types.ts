@@ -78,6 +78,22 @@ export interface StatusPoll {
   pending_question: PendingQuestion | null;
 }
 
+export interface MigratableSession {
+  id: string;
+  title: string;
+  directory: string;
+  projectId: string;
+  projectWorktree?: string | null;
+  updatedAt?: number | null;
+  orphan: boolean;
+}
+
+export interface SessionMigrationResult {
+  migrated: number;
+  targetProjectId: string;
+  targetDirectory: string;
+}
+
 export interface LocalSessionMeta {
   id: string;
   title: string;

@@ -358,9 +358,19 @@ export class XcoderBridge {
         );
         return null;
       case "opencode_list_migratable_sessions":
-        return [];
-      case "opencode_migrate_sessions":
-        throw new Error("Session migration is available in the desktop app only");
+        return this.options.service.listMigratableSessions(
+          numberArg(args, "limit") ?? 500,
+        );
+      case "opencode_migrate_sessions": {
+        const workspace = stringArg(args, "workspace") || this.workspace || "";
+        if (!workspace) throw new Error("Workspace is required");
+        const sessionIds = Array.isArray(args.sessionIds)
+          ? args.sessionIds.filter(
+              (id): id is string => typeof id === "string" && id.length > 0,
+            )
+          : [];
+        return this.options.service.migrateSessions(sessionIds, workspace);
+      }
 
       case "load_skill_catalog_cmd":
         return loadSkillCatalog(this.options.context.extensionUri.fsPath);

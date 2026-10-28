@@ -5,12 +5,14 @@ import path from "node:path";
 import * as vscode from "vscode";
 import type {
   HistoryMessage,
+  MigratableSession,
   OpencodeModelOption,
   OpencodeProviderCatalog,
   PendingApproval,
   PendingQuestion,
   QuestionInfo,
   RuntimeStatus,
+  SessionMigrationResult,
   StatusPoll,
   ThreadInfo,
   ThreadSummary,
@@ -52,6 +54,16 @@ function normalizeDirectory(value: string) {
 function sameDirectory(left: string | undefined, right: string) {
   if (!left || !right) return false;
   return normalizeDirectory(left) === normalizeDirectory(right);
+}
+
+function hasGitAncestor(directory: string) {
+  let current = path.resolve(directory);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".git"))) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
 }
 
 function asEntries(value: unknown): Record<string, unknown>[] {
@@ -403,6 +415,86 @@ export class OpenCodeService {
         };
       })
       .filter((item) => !!item.id);
+  }
+
+  async listMigratableSessions(limit = 500): Promise<MigratableSession[]> {
+    const items = await this.request<Record<string, unknown>[]>(
+      `/experimental/session${this.query({
+        limit,
+        roots: "true",
+        archived: "false",
+      })}`,
+    );
+    const result: MigratableSession[] = [];
+    for (const item of items ?? []) {
+      const id = typeof item.id === "string" ? item.id : "";
+      if (!id) continue;
+      const directory =
+        typeof item.directory === "string" ? item.directory : "";
+      const project = (item.project ?? {}) as Record<string, unknown>;
+      const time = (item.time ?? {}) as Record<string, unknown>;
+      const projectId =
+        (typeof item.projectID === "string" && item.projectID) ||
+        (typeof project.id === "string" && project.id) ||
+        "";
+      result.push({
+        id,
+        title:
+          (typeof item.title === "string" && item.title) ||
+          (typeof item.slug === "string" && item.slug) ||
+          id,
+        directory,
+        projectId,
+        projectWorktree:
+          typeof project.worktree === "string" ? project.worktree : null,
+        updatedAt: typeof time.updated === "number" ? time.updated : null,
+        orphan: !directory || !fs.existsSync(directory),
+      });
+    }
+    return result;
+  }
+
+  async migrateSessions(
+    sessionIds: string[],
+    workspace: string,
+  ): Promise<SessionMigrationResult> {
+    const unique = Array.from(
+      new Set(sessionIds.filter((id) => typeof id === "string" && id)),
+    );
+    if (unique.length === 0) {
+      throw new Error("请选择要迁移的会话");
+    }
+
+    const project = await this.request<Record<string, unknown>>(
+      `/project/current${this.query({ directory: workspace })}`,
+    );
+    const targetProjectId =
+      typeof project?.id === "string" ? project.id : "";
+    if (!targetProjectId) {
+      throw new Error("解析目标项目失败：缺少项目 ID");
+    }
+    if (targetProjectId === "global" && hasGitAncestor(workspace)) {
+      throw new Error(
+        "无法识别目标项目的 Git 标识：请先在该目录创建至少一个提交，或配置 git remote。",
+      );
+    }
+
+    for (const sessionID of unique) {
+      await this.request<null>("/experimental/control-plane/move-session", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionID,
+          destination: { directory: workspace },
+          moveChanges: false,
+        }),
+      });
+    }
+
+    return {
+      migrated: unique.length,
+      targetProjectId,
+      targetDirectory: workspace,
+    };
   }
 
   async listProviderModels(): Promise<OpencodeProviderCatalog> {

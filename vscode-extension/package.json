@@ -2,7 +2,7 @@
   "name": "xcoder-vscode",
   "displayName": "Xcoder",
   "description": "Xcoder chat and OpenCode preferences inside VS Code",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "mkdevkit",
   "license": "MIT",
   "engines": {

@@ -294,7 +294,7 @@ export function ChatPanel() {
             >
               +
             </button>
-            {isOpencode && !isVsCode && (
+            {isOpencode && (
               <button
                 type="button"
                 className="thread-migrate-btn"
