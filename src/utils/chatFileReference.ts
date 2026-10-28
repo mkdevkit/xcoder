@@ -75,6 +75,36 @@ export function isInternalPathDrag(dataTransfer: DataTransfer): boolean {
   return dataTransfer.types.includes(XCODER_PATH_MIME);
 }
 
+function uriToFilePath(uri: string): string {
+  const value = uri.trim();
+  if (!value.toLowerCase().startsWith("file:")) return "";
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "file:") return "";
+    let pathname = decodeURIComponent(parsed.pathname);
+    if (parsed.host && parsed.host !== "localhost") {
+      pathname = `//${parsed.host}${pathname}`;
+    }
+    if (/^\/[A-Za-z]:\//.test(pathname)) {
+      pathname = pathname.slice(1);
+    }
+    return pathname;
+  } catch {
+    return "";
+  }
+}
+
+export function pathsFromUriList(value: string): string[] {
+  const paths: string[] = [];
+  for (const line of value.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const path = uriToFilePath(trimmed);
+    if (path) paths.push(path);
+  }
+  return paths;
+}
+
 export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
   const multi = dataTransfer.getData(XCODER_PATHS_MIME);
   if (multi) {
@@ -96,9 +126,21 @@ export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
     return [custom];
   }
 
+  const internalUris = pathsFromUriList(
+    dataTransfer.getData("application/vnd.code.uri-list"),
+  );
+  if (internalUris.length > 0) return internalUris;
+
+  const uriList = pathsFromUriList(dataTransfer.getData("text/uri-list"));
+  if (uriList.length > 0) return uriList;
+
   const plain = dataTransfer.getData("text/plain").trim();
   if (!plain) return [];
   if (plain.startsWith("@")) return [plain];
+  if (plain.toLowerCase().startsWith("file:")) {
+    const path = uriToFilePath(plain);
+    return path ? [path] : [];
+  }
   if (plain.includes("/") || plain.includes("\\")) {
     return [plain];
   }

@@ -29,34 +29,6 @@ function readInitialMessage(): InitMessage | null {
   return window.__XCODER_INIT__ ?? null;
 }
 
-function findEditableTarget(
-  target: EventTarget | null,
-): HTMLInputElement | HTMLTextAreaElement | HTMLElement | null {
-  if (!(target instanceof HTMLElement)) return null;
-  if (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement
-  ) {
-    return target;
-  }
-  const editable = target.closest<HTMLElement>('[contenteditable="true"]');
-  return editable?.isContentEditable ? editable : null;
-}
-
-function selectedTextAtTarget(
-  target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
-) {
-  if (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement
-  ) {
-    const start = target.selectionStart ?? 0;
-    const end = target.selectionEnd ?? 0;
-    return end > start ? target.value.slice(start, end) : "";
-  }
-  return window.getSelection()?.toString() ?? "";
-}
-
 export function VscodeApp() {
   const { t } = useTranslation();
   const [init, setInit] = useState<InitMessage | null>(readInitialMessage);
@@ -75,28 +47,6 @@ export function VscodeApp() {
       createProviderChatSlice(state.providerId);
     return Boolean(slice.connectedIntent && slice.runtime.running);
   });
-
-  useEffect(() => {
-    const handleClipboardShortcut = (event: KeyboardEvent) => {
-      if (event.isComposing || event.altKey) return;
-      if (event.key.toLowerCase() !== "c") return;
-      const isMac = /Mac|iPhone|iPad/i.test(navigator.platform);
-      const modifier = isMac ? event.metaKey : event.ctrlKey;
-      if (!modifier) return;
-      if (!navigator.clipboard?.writeText) return;
-      const target = findEditableTarget(event.target);
-      const text = target
-        ? selectedTextAtTarget(target)
-        : (window.getSelection()?.toString() ?? "");
-      if (!text) return;
-      event.preventDefault();
-      void navigator.clipboard.writeText(text).catch(console.error);
-    };
-
-    window.addEventListener("keydown", handleClipboardShortcut, true);
-    return () =>
-      window.removeEventListener("keydown", handleClipboardShortcut, true);
-  }, []);
 
   useEffect(() => {
     const storedInit = window.__XCODER_INIT__;
