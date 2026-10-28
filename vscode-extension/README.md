@@ -5,7 +5,8 @@ This extension embeds Xcoder's chat panel and OpenCode preferences inside VS Cod
 ## Usage
 
 - Open a folder in VS Code.
-- Click the **Xcoder** status bar item or run `Xcoder: Open Chat` to open the chat panel on the right side of the editor.
+- If the opened folder contains a `.xcoder` directory, chat opens automatically on the right and connects to OpenCode.
+- Otherwise click the **Xcoder** status bar item or run `Xcoder: Open Chat` to open and connect the chat panel.
 - Run `Xcoder: Open Preferences` to edit general settings, OpenCode providers, OpenCode Go credentials, and project settings.
 - Project preferences are stored in `.xcoder/config.json`.
 - Local chat history is stored in `.opencode/history`.
@@ -14,20 +15,38 @@ This extension embeds Xcoder's chat panel and OpenCode preferences inside VS Cod
 
 ## Settings
 
-- `xcoder.opencodePort` (default `4097`): port used by the OpenCode server started by the extension.
+- `xcoder.opencodePort` (default `4096`): port of the shared OpenCode server. Use the same port as the desktop app to share one OpenCode process.
 - `xcoder.opencodeCommand` (default `opencode`): OpenCode executable name or path.
 
 ## Build
 
+Requires Node.js 18+ and VS Code 1.85+.
+
 From the repository root:
 
 ```bash
-npm run build:vscode
-npx tsc -p vscode-extension/tsconfig.json
-```
-
-To produce a `.vsix` package:
-
-```bash
+npm install
 npm run vscode:export
 ```
+
+This builds the webview, compiles the extension host, and packages:
+
+```text
+dist-vscode/xcoder-vscode.vsix
+```
+
+To compile without creating a VSIX:
+
+```bash
+npm run vscode:package
+```
+
+Install or update the extension:
+
+```bash
+code --install-extension dist-vscode/xcoder-vscode.vsix --force
+```
+
+Then run **Developer: Reload Window** from the Command Palette. View contributions are not reloaded until the window reloads.
+
+The chat view uses the Secondary Side Bar to stay full height beside the bottom Terminal panel. This layout requires VS Code; Cursor currently rejects extension `secondarySidebar` contributions.

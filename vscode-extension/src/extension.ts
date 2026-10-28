@@ -1,10 +1,10 @@
 import fs from "node:fs";
+import path from "node:path";
 import * as vscode from "vscode";
 import { XcoderBridge } from "./bridge";
 import { OpenCodeService } from "./opencode";
 
 let service: OpenCodeService | undefined;
-let chatPanel: vscode.WebviewPanel | undefined;
 let preferencesPanel: vscode.WebviewPanel | undefined;
 const webviews = new Map<vscode.Webview, XcoderBridge>();
 
@@ -20,10 +20,16 @@ function themeName() {
     : "dark";
 }
 
-function buildWebviewHtml(
-  webview: vscode.Webview,
-  extensionUri: vscode.Uri,
-) {
+function hasXcoderDir(workspace: string | null) {
+  if (!workspace) return false;
+  try {
+    return fs.statSync(path.join(workspace, ".xcoder")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function buildWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
   const htmlPath = vscode.Uri.joinPath(
     extensionUri,
     "media",
@@ -103,25 +109,82 @@ async function handleWebviewMessage(
   }
 }
 
-function openWebviewPanel(
-  context: vscode.ExtensionContext,
-  service: OpenCodeService,
-  view: WebviewKind,
-) {
-  const existing = view === "chat" ? chatPanel : preferencesPanel;
-  if (existing) {
-    existing.reveal(undefined, view !== "chat");
-    postInit(existing.webview, view);
-    return existing;
+class ChatViewProvider implements vscode.WebviewViewProvider {
+  private view: vscode.WebviewView | undefined;
+
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly service: OpenCodeService,
+  ) {}
+
+  resolveWebviewView(view: vscode.WebviewView): void | Thenable<void> {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode.Uri.joinPath(this.context.extensionUri, "resources"),
+      ],
+    };
+    view.webview.html = buildWebviewHtml(
+      view.webview,
+      this.context.extensionUri,
+    );
+    const bridge = new XcoderBridge({
+      post: (message) => {
+        void view.webview.postMessage(message);
+      },
+      service: this.service,
+      context: this.context,
+      getWorkspace: workspacePath,
+    });
+    webviews.set(view.webview, bridge);
+
+    view.webview.onDidReceiveMessage((message) => {
+      void handleWebviewMessage(message, view.webview, bridge, "chat");
+    });
+    view.onDidDispose(() => {
+      webviews.delete(view.webview);
+      if (this.view === view) this.view = undefined;
+    });
+    postInit(view.webview, "chat");
   }
 
-  const title = view === "chat" ? "Xcoder Chat" : "Xcoder Preferences";
-  const column =
-    view === "chat" ? vscode.ViewColumn.Beside : vscode.ViewColumn.One;
+  async show() {
+    try {
+      await vscode.commands.executeCommand(
+        "workbench.action.focusAuxiliaryBar",
+      );
+    } catch {
+      // older builds may not expose this command
+    }
+    if (this.view) {
+      this.view.show(false);
+      postInit(this.view.webview, "chat");
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand("xcoder.chatRight.focus");
+    } catch {
+      // the view will be resolved when the user opens it manually
+    }
+  }
+}
+
+function openPreferences(
+  context: vscode.ExtensionContext,
+  service: OpenCodeService,
+) {
+  if (preferencesPanel) {
+    preferencesPanel.reveal(undefined, true);
+    postInit(preferencesPanel.webview, "preferences");
+    return;
+  }
+
   const panel = vscode.window.createWebviewPanel(
-    `xcoder.${view}`,
-    title,
-    column,
+    "xcoder.preferences",
+    "Xcoder Preferences",
+    vscode.ViewColumn.One,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -131,13 +194,7 @@ function openWebviewPanel(
       ],
     },
   );
-
-  if (view === "chat") {
-    chatPanel = panel;
-  } else {
-    preferencesPanel = panel;
-  }
-
+  preferencesPanel = panel;
   panel.webview.html = buildWebviewHtml(panel.webview, context.extensionUri);
   const bridge = new XcoderBridge({
     post: (message) => {
@@ -149,23 +206,19 @@ function openWebviewPanel(
   });
   webviews.set(panel.webview, bridge);
   panel.webview.onDidReceiveMessage((message) => {
-    void handleWebviewMessage(message, panel.webview, bridge, view);
+    void handleWebviewMessage(message, panel.webview, bridge, "preferences");
   });
   panel.onDidDispose(() => {
     webviews.delete(panel.webview);
-    if (view === "chat") {
-      chatPanel = undefined;
-    } else {
-      preferencesPanel = undefined;
-    }
+    preferencesPanel = undefined;
   });
-  postInit(panel.webview, view);
-  return panel;
+  postInit(panel.webview, "preferences");
 }
 
 export function activate(context: vscode.ExtensionContext) {
   service = new OpenCodeService(context);
   const sharedService = service;
+  const chatProvider = new ChatViewProvider(context, sharedService);
 
   const statusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -179,11 +232,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     statusItem,
+    vscode.window.registerWebviewViewProvider("xcoder.chatRight", chatProvider, {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    }),
     vscode.commands.registerCommand("xcoder.openChat", () => {
-      openWebviewPanel(context, sharedService, "chat");
+      void chatProvider.show();
     }),
     vscode.commands.registerCommand("xcoder.openPreferences", () => {
-      openWebviewPanel(context, sharedService, "preferences");
+      openPreferences(context, sharedService);
     }),
     vscode.commands.registerCommand("xcoder.restartRuntime", async () => {
       try {
@@ -200,6 +258,9 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       const workspace = workspacePath();
+      if (hasXcoderDir(workspace)) {
+        void chatProvider.show();
+      }
       for (const webview of webviews.keys()) {
         void webview.postMessage({ type: "workspace", workspace });
       }
@@ -214,6 +275,10 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
   );
+
+  if (hasXcoderDir(workspacePath())) {
+    void chatProvider.show();
+  }
 }
 
 export async function deactivate() {

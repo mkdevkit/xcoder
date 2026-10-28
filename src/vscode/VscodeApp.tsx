@@ -7,6 +7,7 @@ import { createProviderChatSlice } from "../stores/providerChatSlice";
 import { useWorkspaceStore } from "../stores/workspace";
 import { applyAppTheme } from "../utils/appTheme";
 import { tauriInvoke } from "../utils/tauri";
+import { workspacesMatch } from "../utils/path";
 import type { ProjectConfigInfo } from "../types/projectConfig";
 
 type VscodeTab = "chat" | "preferences";
@@ -42,68 +43,6 @@ function findEditableTarget(
   return editable?.isContentEditable ? editable : null;
 }
 
-function insertTextAtTarget(
-  target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
-  text: string,
-) {
-  if (!text) return;
-  target.focus();
-
-  if (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement
-  ) {
-    const start = target.selectionStart ?? target.value.length;
-    const end = target.selectionEnd ?? start;
-    const next = `${target.value.slice(0, start)}${text}${target.value.slice(end)}`;
-    const prototype =
-      target instanceof HTMLInputElement
-        ? HTMLInputElement.prototype
-        : HTMLTextAreaElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    setter?.call(target, next);
-    target.setSelectionRange(start + text.length, start + text.length);
-    target.dispatchEvent(new Event("input", { bubbles: true }));
-    return;
-  }
-
-  const selection = window.getSelection();
-  const range = document.createRange();
-  if (
-    selection &&
-    selection.rangeCount > 0 &&
-    target.contains(selection.getRangeAt(0).commonAncestorContainer)
-  ) {
-    range.selectNodeContents(target);
-    range.setStart(
-      selection.getRangeAt(0).startContainer,
-      selection.getRangeAt(0).startOffset,
-    );
-    range.setEnd(
-      selection.getRangeAt(0).endContainer,
-      selection.getRangeAt(0).endOffset,
-    );
-  } else {
-    range.selectNodeContents(target);
-    range.collapse(false);
-  }
-
-  range.deleteContents();
-  const node = document.createTextNode(text);
-  range.insertNode(node);
-  range.setStartAfter(node);
-  range.collapse(true);
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-  target.dispatchEvent(
-    new InputEvent("input", {
-      bubbles: true,
-      inputType: "insertText",
-      data: text,
-    }),
-  );
-}
-
 function selectedTextAtTarget(
   target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
 ) {
@@ -124,7 +63,10 @@ export function VscodeApp() {
   const [tab, setTab] = useState<VscodeTab>(
     init?.view === "preferences" ? "preferences" : "chat",
   );
-  const connectedWorkspace = useRef<string | null>(null);
+  const [preferencesMounted, setPreferencesMounted] = useState(false);
+  const [connectNonce, setConnectNonce] = useState(0);
+  const connectingRef = useRef(false);
+  const pendingConnectRef = useRef(false);
   const userSelectedTab = useRef(false);
   const wasConnected = useRef(false);
   const connected = useChatStore((state) => {
@@ -137,30 +79,18 @@ export function VscodeApp() {
   useEffect(() => {
     const handleClipboardShortcut = (event: KeyboardEvent) => {
       if (event.isComposing || event.altKey) return;
+      if (event.key.toLowerCase() !== "c") return;
       const isMac = /Mac|iPhone|iPad/i.test(navigator.platform);
       const modifier = isMac ? event.metaKey : event.ctrlKey;
       if (!modifier) return;
-      const key = event.key.toLowerCase();
-      if (key !== "v" && key !== "c") return;
+      if (!navigator.clipboard?.writeText) return;
       const target = findEditableTarget(event.target);
-
-      if (key === "c") {
-        if (!navigator.clipboard?.writeText) return;
-        const text = target
-          ? selectedTextAtTarget(target)
-          : (window.getSelection()?.toString() ?? "");
-        if (!text) return;
-        event.preventDefault();
-        void navigator.clipboard.writeText(text).catch(console.error);
-        return;
-      }
-
-      if (!target || !navigator.clipboard?.readText) return;
+      const text = target
+        ? selectedTextAtTarget(target)
+        : (window.getSelection()?.toString() ?? "");
+      if (!text) return;
       event.preventDefault();
-      void navigator.clipboard
-        .readText()
-        .then((text) => insertTextAtTarget(target, text))
-        .catch(console.error);
+      void navigator.clipboard.writeText(text).catch(console.error);
     };
 
     window.addEventListener("keydown", handleClipboardShortcut, true);
@@ -174,6 +104,10 @@ export function VscodeApp() {
       setInit((current) => current ?? storedInit);
       if (storedInit.view === "preferences") {
         setTab("preferences");
+      } else if (storedInit.view === "chat") {
+        userSelectedTab.current = false;
+        setTab("chat");
+        setConnectNonce((value) => value + 1);
       }
     }
     const onInit = (event: Event) => {
@@ -192,6 +126,10 @@ export function VscodeApp() {
       });
       if (message.view === "preferences") {
         setTab("preferences");
+      } else if (message.view === "chat") {
+        userSelectedTab.current = false;
+        setTab("chat");
+        setConnectNonce((value) => value + 1);
       }
     };
     window.addEventListener("xcoder:init", onInit);
@@ -199,6 +137,8 @@ export function VscodeApp() {
   }, []);
 
   const workspace = init?.workspace ?? null;
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
 
   useEffect(() => {
     if (!init) return;
@@ -267,17 +207,37 @@ export function VscodeApp() {
   }, [workspace]);
 
   useEffect(() => {
-    if (tab !== "chat" || !workspace) return;
-    if (connectedWorkspace.current === workspace) return;
-    connectedWorkspace.current = workspace;
+    if (connectNonce === 0) return;
+    const targetWorkspace = workspaceRef.current;
+    if (!targetWorkspace) return;
+    if (connectingRef.current) {
+      pendingConnectRef.current = true;
+      return;
+    }
 
+    const state = useChatStore.getState();
+    const slice =
+      state.providerStates[state.providerId] ??
+      createProviderChatSlice(state.providerId);
+    const currentWorkspace =
+      slice.chatWorkspace ?? slice.thread?.workspace ?? null;
+    if (
+      slice.connectedIntent &&
+      slice.runtime.running &&
+      currentWorkspace &&
+      workspacesMatch(currentWorkspace, targetWorkspace)
+    ) {
+      return;
+    }
+
+    connectingRef.current = true;
     void (async () => {
       try {
         const chat = useChatStore.getState();
         if (!chat.config) await chat.loadConfig();
         const info = await tauriInvoke<ProjectConfigInfo>(
           "ensure_project_config_cmd",
-          { workspace },
+          { workspace: targetWorkspace },
         );
         useWorkspaceStore.setState({
           projectConfig: info.config,
@@ -285,21 +245,28 @@ export function VscodeApp() {
         });
         await useChatStore
           .getState()
-          .onProjectOpened(workspace, info.config);
+          .onProjectOpened(targetWorkspace, info.config);
       } catch (error) {
         console.error("Failed to open project config:", error);
         await useChatStore
           .getState()
-          .connectRuntime(workspace)
+          .connectRuntime(targetWorkspace)
           .catch((connectError) =>
             console.error("Failed to connect OpenCode runtime:", connectError),
           );
+      } finally {
+        connectingRef.current = false;
+        if (pendingConnectRef.current) {
+          pendingConnectRef.current = false;
+          setConnectNonce((value) => value + 1);
+        }
       }
     })();
-  }, [tab, workspace]);
+  }, [connectNonce]);
 
   useEffect(() => {
     if (!connected) {
+      userSelectedTab.current = false;
       setTab("preferences");
     } else if (
       !wasConnected.current &&
@@ -310,6 +277,21 @@ export function VscodeApp() {
     }
     wasConnected.current = connected;
   }, [connected, init?.view]);
+
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab === "preferences" || !connected) {
+      setPreferencesMounted(true);
+      return;
+    }
+    if (!connected || preferencesMounted) return;
+    const timer = window.setTimeout(() => setPreferencesMounted(true), 1200);
+    return () => window.clearTimeout(timer);
+  }, [tab, connected, preferencesMounted]);
 
   const tabs = useMemo(
     () => [
@@ -349,20 +331,25 @@ export function VscodeApp() {
       </div>
 
       <div className="vscode-content">
-        {tab === "preferences" || !connected ? (
-          <div className="vscode-preferences">
+        {workspace && connected && (
+          <div
+            className={`vscode-pane ${tab === "chat" ? "active" : "hidden"}`}
+          >
+            <ChatPanel />
+          </div>
+        )}
+        {preferencesMounted && (
+          <div
+            className={`vscode-pane preferences ${
+              tab === "preferences" || !connected ? "active" : "hidden"
+            }`}
+          >
             <PreferencesPanel
               showMcp={false}
               showProjectMcp={false}
               showProjectRules={false}
             />
           </div>
-        ) : !workspace ? (
-          <div className="vscode-empty">
-            <p>{t("chat.openFolderFirst")}</p>
-          </div>
-        ) : (
-          <ChatPanel />
         )}
       </div>
 
@@ -416,18 +403,27 @@ export function VscodeApp() {
           padding-left: 12px;
         }
         .vscode-content {
+          position: relative;
           flex: 1;
           min-height: 0;
           display: flex;
           flex-direction: column;
         }
-        .vscode-content > .chat-panel {
+        .vscode-pane {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+        }
+        .vscode-pane.hidden {
+          visibility: hidden;
+          pointer-events: none;
+        }
+        .vscode-pane > .chat-panel {
           flex: 1;
           min-height: 0;
         }
-        .vscode-preferences {
-          flex: 1;
-          min-height: 0;
+        .vscode-pane.preferences {
           overflow: auto;
           padding: 8px 16px 24px;
         }

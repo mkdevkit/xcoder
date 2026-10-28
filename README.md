@@ -358,6 +358,37 @@ npm run tauri build
 
 This pre-installs NSIS tools to `%LOCALAPPDATA%\tauri\NSIS`. You can also use the compiled exe directly without waiting for the installer.
 
+### VS Code extension
+
+The extension lives in `vscode-extension/` and is packaged from the repository root.
+
+```bash
+npm install
+npm run vscode:export
+```
+
+This builds the webview, compiles the extension host, and writes:
+
+```text
+dist-vscode/xcoder-vscode.vsix
+```
+
+To compile without packaging:
+
+```bash
+npm run vscode:package
+```
+
+Install the VSIX:
+
+```bash
+code --install-extension dist-vscode/xcoder-vscode.vsix --force
+```
+
+After installing or updating, run **Developer: Reload Window** from the Command Palette (`Ctrl+Shift+P`). VS Code does not reload view contributions until the window reloads.
+
+The chat view is contributed to the Secondary Side Bar so it stays full height beside the bottom Terminal panel. This layout requires VS Code; Cursor currently rejects extension `secondarySidebar` contributions.
+
 ## FAQ
 
 | Issue | Fix |

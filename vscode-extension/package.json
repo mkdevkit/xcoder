@@ -2,7 +2,7 @@
   "name": "xcoder-vscode",
   "displayName": "Xcoder",
   "description": "Xcoder chat and OpenCode preferences inside VS Code",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "mkdevkit",
   "license": "MIT",
   "engines": {
@@ -15,6 +15,7 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onView:xcoder.chatRight",
     "onCommand:xcoder.openChat",
     "onCommand:xcoder.openPreferences",
     "onCommand:xcoder.restartRuntime"
@@ -40,8 +41,8 @@
       "properties": {
         "xcoder.opencodePort": {
           "type": "number",
-          "default": 4097,
-          "description": "Port used by the OpenCode server launched by the VS Code extension."
+          "default": 4096,
+          "description": "Port of the shared OpenCode server. Use the same port as the desktop app to share one OpenCode process."
         },
         "xcoder.opencodeCommand": {
           "type": "string",
@@ -49,6 +50,24 @@
           "description": "OpenCode executable used to launch the local server."
         }
       }
+    },
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "xcoder.chatRightContainer",
+          "title": "Xcoder",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "xcoder.chatRightContainer": [
+        {
+          "type": "webview",
+          "id": "xcoder.chatRight",
+          "name": "Chat"
+        }
+      ]
     }
   },
   "scripts": {

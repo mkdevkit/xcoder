@@ -358,6 +358,37 @@ npm run tauri build
 
 该脚本会把 NSIS 工具预装到 `%LOCALAPPDATA%\tauri\NSIS`。也可直接使用已编译好的 exe，不必等安装包。
 
+### VS Code 插件
+
+插件位于 `vscode-extension/`，在仓库根目录打包。
+
+```bash
+npm install
+npm run vscode:export
+```
+
+该命令会构建 webview、编译扩展宿主，并生成：
+
+```text
+dist-vscode/xcoder-vscode.vsix
+```
+
+只编译、不打包：
+
+```bash
+npm run vscode:package
+```
+
+安装 VSIX：
+
+```bash
+code --install-extension dist-vscode/xcoder-vscode.vsix --force
+```
+
+安装或更新后，在命令面板（`Ctrl+Shift+P`）执行 **Developer: Reload Window**。VS Code 不会热更新扩展的 view 贡献，必须重载窗口。
+
+聊天 view 挂在辅助侧边栏（Secondary Side Bar），因此底部打开终端时仍能保持右侧全高。该布局需要 VS Code；Cursor 目前会拒绝扩展的 `secondarySidebar` 贡献。
+
 ## 常见问题
 
 | 现象 | 处理 |

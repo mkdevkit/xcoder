@@ -128,14 +128,15 @@ export class XcoderBridge {
       }
 
       case "load_config":
-        return loadAppConfig(
-          this.options.context.globalStorageUri.fsPath,
-          this.options.service.port,
+        return this.withRuntimePort(
+          loadAppConfig(
+            this.options.context.globalStorageUri.fsPath,
+            this.options.service.port,
+          ),
         );
       case "save_config": {
         const config = args.config;
         saveAppConfig(this.options.context.globalStorageUri.fsPath, config);
-        await this.syncPortFromConfig(config);
         return null;
       }
       case "get_config_paths": {
@@ -495,21 +496,29 @@ export class XcoderBridge {
     }
   }
 
-  private async syncPortFromConfig(config: unknown) {
+  private withRuntimePort<T>(config: T): T {
     const record = config as
       | { providers?: { id?: string; args?: unknown }[] }
       | undefined;
     const provider = record?.providers?.find(
       (item) => item.id === "opencode",
     );
-    if (!provider || !Array.isArray(provider.args)) return;
-    const index = provider.args.indexOf("--port");
-    const value = index >= 0 ? Number(provider.args[index + 1]) : NaN;
-    if (Number.isFinite(value) && value > 0) {
-      await vscode.workspace
-        .getConfiguration("xcoder")
-        .update("opencodePort", value, vscode.ConfigurationTarget.Global);
-    }
+    if (!provider) return config;
+    const args = Array.isArray(provider.args)
+      ? [...(provider.args as string[])]
+      : [];
+    const setArg = (flag: string, value: string) => {
+      const index = args.indexOf(flag);
+      if (index >= 0) {
+        args[index + 1] = value;
+      } else {
+        args.push(flag, value);
+      }
+    };
+    setArg("--hostname", "127.0.0.1");
+    setArg("--port", String(this.options.service.port));
+    provider.args = args;
+    return config;
   }
 
   private async openDialog(args: InvokeArgs) {

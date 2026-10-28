@@ -116,6 +116,7 @@ function questionInfos(value: unknown): QuestionInfo[] {
 export class OpenCodeService {
   private child: ChildProcess | null = null;
   private owned = false;
+  private startedPort: number | null = null;
   private readonly output: vscode.OutputChannel;
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -123,7 +124,9 @@ export class OpenCodeService {
   }
 
   async dispose() {
-    await this.stop();
+    // Keep the shared OpenCode server alive so other VS Code windows and the
+    // desktop app can keep using it. Users can stop it explicitly from
+    // Preferences or the restart command.
     this.output.dispose();
   }
 
@@ -132,8 +135,8 @@ export class OpenCodeService {
   }
 
   get port() {
-    const value = this.configuration.get<number>("opencodePort", 4097);
-    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4097;
+    const value = this.configuration.get<number>("opencodePort", 4096);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4096;
   }
 
   get baseUrl() {
@@ -188,21 +191,26 @@ export class OpenCodeService {
     return text ? `?${text}` : "";
   }
 
-  async health(): Promise<boolean> {
+  private async healthAt(port: number): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/global/health`, {
-        signal: AbortSignal.timeout(3_000),
-      });
+      const response = await fetch(
+        `http://127.0.0.1:${port}/global/health`,
+        { signal: AbortSignal.timeout(3_000) },
+      );
       return response.ok;
     } catch {
       return false;
     }
   }
 
-  private async waitForHealth(timeoutMs = 20_000) {
+  async health(): Promise<boolean> {
+    return this.healthAt(this.port);
+  }
+
+  private async waitForHealth(port: number, timeoutMs = 20_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await this.health()) return;
+      if (await this.healthAt(port)) return;
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     throw new Error("OpenCode server failed to start");
@@ -231,14 +239,20 @@ export class OpenCodeService {
   }
 
   private async spawnServer(workspace?: string | null) {
+    // The workspace (and therefore the port) may have changed. Stop the
+    // previously owned server before starting a new one on the new port.
+    if (this.child) {
+      this.killChildTree();
+    }
     const cwd = workspace || this.workspace || os.homedir();
+    const port = this.port;
     const command = this.resolveCommand();
     const args = [
       "serve",
       "--hostname",
       "127.0.0.1",
       "--port",
-      String(this.port),
+      String(port),
     ];
     this.output.appendLine(`Starting ${command} ${args.join(" ")} (${cwd})`);
     const child = spawn(command, args, {
@@ -249,6 +263,7 @@ export class OpenCodeService {
     });
     this.child = child;
     this.owned = true;
+    this.startedPort = port;
     child.stderr?.on("data", (chunk) => {
       this.output.append(String(chunk));
     });
@@ -258,7 +273,7 @@ export class OpenCodeService {
         this.owned = false;
       }
     });
-    await this.waitForHealth();
+    await this.waitForHealth(port);
     return child;
   }
 
@@ -267,6 +282,7 @@ export class OpenCodeService {
     if (!child?.pid) return;
     this.child = null;
     this.owned = false;
+    this.startedPort = null;
     if (process.platform === "win32") {
       exec(`taskkill /PID ${child.pid} /T /F`, () => undefined);
       return;
@@ -282,8 +298,7 @@ export class OpenCodeService {
     }
   }
 
-  private killPortListener() {
-    const port = this.port;
+  private killPortListener(port = this.port) {
     if (process.platform === "win32") {
       exec(`netstat -ano -p tcp | findstr :${port}`, (error, stdout) => {
         if (error || !stdout) return;
@@ -318,23 +333,28 @@ export class OpenCodeService {
     return {
       running,
       base_url: running ? this.baseUrl : undefined,
-      owned: this.owned,
+      owned: this.owned && this.startedPort === this.port,
     };
   }
 
   async start(workspace?: string | null): Promise<RuntimeStatus> {
     if (await this.health()) {
-      return { running: true, base_url: this.baseUrl, owned: this.owned };
+      return {
+        running: true,
+        base_url: this.baseUrl,
+        owned: this.owned && this.startedPort === this.port,
+      };
     }
     await this.spawnServer(workspace);
     return { running: true, base_url: this.baseUrl, owned: true };
   }
 
   async restart(workspace?: string | null): Promise<RuntimeStatus> {
+    const port = this.port;
     this.killChildTree();
-    this.killPortListener();
+    this.killPortListener(port);
     for (let i = 0; i < 20; i += 1) {
-      if (!(await this.health())) break;
+      if (!(await this.healthAt(port))) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     await this.spawnServer(workspace);
@@ -342,10 +362,11 @@ export class OpenCodeService {
   }
 
   async stop(): Promise<void> {
+    const port = this.startedPort ?? this.port;
     this.killChildTree();
-    this.killPortListener();
+    this.killPortListener(port);
     for (let i = 0; i < 20; i += 1) {
-      if (!(await this.health())) return;
+      if (!(await this.healthAt(port))) return;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }

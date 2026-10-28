@@ -2302,9 +2302,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         workspace,
       );
       const status = await pollProviderRuntimeStatus(providerId);
-      const runtime = status.running
-        ? await restartProviderRuntime(providerId, resolvedWorkspace)
+      let runtime = status.running
+        ? await startProviderRuntime(providerId, resolvedWorkspace, false)
         : await startProviderRuntime(providerId, resolvedWorkspace, true);
+      if (!runtime.running) {
+        runtime = await startProviderRuntime(
+          providerId,
+          resolvedWorkspace,
+          true,
+        );
+      }
       if (!runtime.running) {
         throw new Error(t("error.aiServiceStartFailed"));
       }
