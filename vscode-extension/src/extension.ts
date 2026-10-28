@@ -164,7 +164,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     try {
-      await vscode.commands.executeCommand("xcoder.chatRight.focus");
+      await vscode.commands.executeCommand("xcoder-chat-right.focus");
     } catch {
       // the view will be resolved when the user opens it manually
     }
@@ -232,7 +232,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     statusItem,
-    vscode.window.registerWebviewViewProvider("xcoder.chatRight", chatProvider, {
+    vscode.window.registerWebviewViewProvider("xcoder-chat-right", chatProvider, {
       webviewOptions: {
         retainContextWhenHidden: true,
       },
