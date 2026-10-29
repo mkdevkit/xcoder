@@ -533,6 +533,7 @@ export function VscodeApp() {
           border-bottom: 1px solid var(--border);
           background: var(--bg-panel);
           flex-shrink: 0;
+          overflow: hidden;
         }
         .vscode-tab {
           height: 26px;
@@ -541,6 +542,8 @@ export function VscodeApp() {
           border-radius: 4px;
           background: transparent;
           color: var(--text-muted);
+          flex: 0 0 auto;
+          white-space: nowrap;
         }
         .vscode-tab:hover:not(:disabled) {
           background: var(--bg-hover);
@@ -550,6 +553,7 @@ export function VscodeApp() {
           color: var(--text);
         }
         .vscode-workspace {
+          flex: 0 1 auto;
           margin-left: auto;
           min-width: 0;
           overflow: hidden;
@@ -559,6 +563,7 @@ export function VscodeApp() {
           font-family: var(--font-mono);
           font-size: 11px;
           padding-left: 12px;
+          text-align: right;
         }
         .vscode-content {
           position: relative;
