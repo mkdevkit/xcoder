@@ -2,10 +2,11 @@ import { useEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "../../i18n";
 import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
+import { SessionManagerPanel } from "../SessionManagerPanel/SessionManagerPanel";
 import { useChatStore } from "../../stores/chat";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
-import { isPreferencesTab } from "../../utils/virtualTabs";
+import { isPreferencesTab, isSessionsTab } from "../../utils/virtualTabs";
 import { startFileDrag } from "../../utils/chatFileReference";
 import { projectDisplayName } from "../../utils/recentProjects";
 import { useDropZone } from "../../hooks/useDropZone";
@@ -54,6 +55,7 @@ export function EditorPanel() {
   });
   const activeTab = getActiveTab();
   const showingPreferences = activeFile ? isPreferencesTab(activeFile) : false;
+  const showingSessions = activeFile ? isSessionsTab(activeFile) : false;
 
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
@@ -220,6 +222,7 @@ export function EditorPanel() {
 
   const tabLabel = (path: string) => {
     if (isPreferencesTab(path)) return t("panel.preferences");
+    if (isSessionsTab(path)) return t("chat.sessionManager");
     return path.split(/[\\/]/).pop() ?? path;
   };
 
@@ -235,7 +238,8 @@ export function EditorPanel() {
       <div className="editor-tabs">
         {openTabs.map((tab) => {
           const isActive = tab.path === activeFile;
-          const isFileTab = !isPreferencesTab(tab.path);
+          const isFileTab =
+            !isPreferencesTab(tab.path) && !isSessionsTab(tab.path);
           return (
             <div
               key={tab.path}
@@ -271,6 +275,8 @@ export function EditorPanel() {
       <div className="editor-body">
         {showingPreferences ? (
           <PreferencesPanel />
+        ) : showingSessions ? (
+          <SessionManagerPanel />
         ) : (
           <Editor
             key={activeFile}

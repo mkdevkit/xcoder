@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "../i18n";
 import { ChatPanel } from "../panels/ChatPanel/ChatPanel";
 import { PreferencesPanel } from "../panels/PreferencesPanel/PreferencesPanel";
+import { SessionManagerPanel } from "../panels/SessionManagerPanel/SessionManagerPanel";
 import { useChatStore } from "../stores/chat";
 import { createProviderChatSlice } from "../stores/providerChatSlice";
 import { useWorkspaceStore } from "../stores/workspace";
@@ -10,7 +11,7 @@ import { tauriInvoke } from "../utils/tauri";
 import { workspacesMatch } from "../utils/path";
 import type { ProjectConfigInfo } from "../types/projectConfig";
 
-type VscodeTab = "chat" | "preferences";
+type VscodeTab = "chat" | "sessions" | "preferences";
 
 interface InitMessage {
   type: "init" | "workspace";
@@ -411,6 +412,16 @@ export function VscodeApp() {
   }, [connected, init?.view]);
 
   useEffect(() => {
+    const openSessions = () => {
+      userSelectedTab.current = true;
+      setTab("sessions");
+    };
+    window.addEventListener("xcoder:open-sessions", openSessions);
+    return () =>
+      window.removeEventListener("xcoder:open-sessions", openSessions);
+  }, []);
+
+  useEffect(() => {
     const active = document.activeElement;
     if (active instanceof HTMLElement) active.blur();
   }, [tab]);
@@ -428,7 +439,13 @@ export function VscodeApp() {
   const tabs = useMemo(
     () => [
       ...(connected
-        ? [{ id: "chat" as const, label: t("vscode.chat") }]
+        ? [
+            { id: "chat" as const, label: t("vscode.chat") },
+            {
+              id: "sessions" as const,
+              label: t("chat.sessionManager"),
+            },
+          ]
         : []),
       { id: "preferences" as const, label: t("vscode.preferences") },
     ],
@@ -468,6 +485,15 @@ export function VscodeApp() {
             className={`vscode-pane ${tab === "chat" ? "active" : "hidden"}`}
           >
             <ChatPanel />
+          </div>
+        )}
+        {workspace && connected && (
+          <div
+            className={`vscode-pane ${
+              tab === "sessions" ? "active" : "hidden"
+            }`}
+          >
+            <SessionManagerPanel />
           </div>
         )}
         {preferencesMounted && (

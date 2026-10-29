@@ -130,6 +130,7 @@ export function ChatPanel() {
     })),
   );
   const rootPath = useWorkspaceStore((state) => state.rootPath);
+  const openSessionsTab = useWorkspaceStore((state) => state.openSessionsTab);
   const { t } = useTranslation();
   const generating = isGenerating({ streaming, activeTurn });
 
@@ -333,6 +334,21 @@ export function ChatPanel() {
             >
               +
             </button>
+            <button
+              type="button"
+              className="thread-manage-btn"
+              title={t("chat.sessionManager")}
+              disabled={!rootPath}
+              onClick={() => {
+                if (isVsCode) {
+                  window.dispatchEvent(new Event("xcoder:open-sessions"));
+                } else {
+                  openSessionsTab();
+                }
+              }}
+            >
+              ☰
+            </button>
             {isOpencode && (
               <button
                 type="button"
@@ -518,12 +534,14 @@ export function ChatPanel() {
         .thread-new-btn,
         .thread-delete-btn,
         .thread-migrate-btn,
+        .thread-manage-btn,
         .thread-attach-btn {
           width: 28px;
           padding: 0;
           flex-shrink: 0;
         }
-        .thread-delete-btn:disabled {
+        .thread-delete-btn:disabled,
+        .thread-manage-btn:disabled {
           opacity: 0.4;
         }
         .chat-panel .panel-resize-handle.vertical {

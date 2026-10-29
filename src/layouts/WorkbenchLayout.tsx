@@ -44,6 +44,7 @@ export function WorkbenchLayout() {
   const {
     openFolder,
     openPreferencesTab,
+    openSessionsTab,
     openRecentProject,
     closeProject,
     recentProjects,
@@ -54,6 +55,7 @@ export function WorkbenchLayout() {
     useShallow((state) => ({
       openFolder: state.openFolder,
       openPreferencesTab: state.openPreferencesTab,
+      openSessionsTab: state.openSessionsTab,
       openRecentProject: state.openRecentProject,
       closeProject: state.closeProject,
       recentProjects: state.recentProjects,
@@ -147,9 +149,14 @@ export function WorkbenchLayout() {
             onClick: () => closeProject().catch(console.error),
           },
           {
+            id: "sessions",
+            label: t("chat.sessionManager"),
+            dividerBefore: true,
+            onClick: () => openSessionsTab(),
+          },
+          {
             id: "preferences",
             label: t("menu.preferences"),
-            dividerBefore: true,
             onClick: () => openPreferencesTab(),
           },
         ],
@@ -166,7 +173,7 @@ export function WorkbenchLayout() {
         ],
       },
     ];
-  }, [closeProject, handleNewTerminal, openFolder, openPreferencesTab, openRecentProject, recentProjects, rootPath, t]);
+  }, [closeProject, handleNewTerminal, openFolder, openPreferencesTab, openSessionsTab, openRecentProject, recentProjects, rootPath, t]);
 
   const handleTerminalResize = (delta: number) => {
     const maxHeight = centerColumnRef.current

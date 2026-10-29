@@ -18,7 +18,10 @@ import {
   workspacesMatch,
 } from "../utils/path";
 import { resolveDroppedOpenPath } from "../utils/externalFileDrop";
-import { PREFERENCES_TAB_PATH } from "../utils/virtualTabs";
+import {
+  PREFERENCES_TAB_PATH,
+  SESSIONS_TAB_PATH,
+} from "../utils/virtualTabs";
 import type { FsEntry } from "../types/fs";
 import type { ProjectConfig, ProjectConfigInfo } from "../types/projectConfig";
 
@@ -26,7 +29,7 @@ export interface EditorTab {
   path: string;
   content: string;
   dirty: boolean;
-  kind?: "file" | "preferences";
+  kind?: "file" | "preferences" | "sessions";
 }
 
 export interface EditorRevealTarget {
@@ -84,6 +87,7 @@ interface WorkspaceState {
   refreshRecentProjects: () => void;
   openFile: (path: string) => Promise<void>;
   openPreferencesTab: () => void;
+  openSessionsTab: () => void;
   openFileAtLocation: (linkText: string) => Promise<void>;
   consumeEditorReveal: () => void;
   closeTab: (path: string) => void;
@@ -232,6 +236,15 @@ function createPreferencesTab(): EditorTab {
     content: "",
     dirty: false,
     kind: "preferences",
+  };
+}
+
+function createSessionsTab(): EditorTab {
+  return {
+    path: SESSIONS_TAB_PATH,
+    content: "",
+    dirty: false,
+    kind: "sessions",
   };
 }
 
@@ -749,6 +762,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     set((state) => ({
       openTabs: [...state.openTabs, createPreferencesTab()],
+      activeFile: path,
+    }));
+  },
+
+  openSessionsTab: () => {
+    const path = SESSIONS_TAB_PATH;
+    const existing = get().openTabs.find((tab) => tab.path === path);
+    if (existing) {
+      set({ activeFile: path });
+      return;
+    }
+
+    set((state) => ({
+      openTabs: [...state.openTabs, createSessionsTab()],
       activeFile: path,
     }));
   },
