@@ -105,6 +105,67 @@ export function pathsFromUriList(value: string): string[] {
   return paths;
 }
 
+function pathFromPayloadValue(value: unknown): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (trimmed.toLowerCase().startsWith("file:")) {
+      return uriToFilePath(trimmed);
+    }
+    if (/^\/[A-Za-z]:[\\/]/.test(trimmed)) return trimmed.slice(1);
+    return trimmed;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["fsPath", "external", "path", "uri"]) {
+      const nested = pathFromPayloadValue(record[key]);
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
+function pathsFromJsonPayload(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    return items
+      .map((item) => pathFromPayloadValue(item))
+      .filter((path) => path.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function isAbsolutePath(value: string): boolean {
+  return /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(value);
+}
+
+function pathsFromPayload(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+
+  const jsonPaths = pathsFromJsonPayload(trimmed);
+  if (jsonPaths.length > 0) return jsonPaths;
+
+  const uriPaths = pathsFromUriList(trimmed);
+  if (uriPaths.length > 0) return uriPaths;
+
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        !line.startsWith("#") &&
+        (isAbsolutePath(line) ||
+          line.includes("/") ||
+          line.includes("\\")),
+    );
+}
+
 export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
   const multi = dataTransfer.getData(XCODER_PATHS_MIME);
   if (multi) {
@@ -126,33 +187,80 @@ export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
     return [custom];
   }
 
-  const internalUris = pathsFromUriList(
-    dataTransfer.getData("application/vnd.code.uri-list"),
-  );
-  if (internalUris.length > 0) return internalUris;
-
-  const uriList = pathsFromUriList(dataTransfer.getData("text/uri-list"));
-  if (uriList.length > 0) return uriList;
+  for (const type of [
+    "application/vnd.code.uri-list",
+    "ResourceURLs",
+    "text/uri-list",
+    "Files",
+  ]) {
+    const paths = pathsFromPayload(dataTransfer.getData(type));
+    if (paths.length > 0) return paths;
+  }
 
   const plain = dataTransfer.getData("text/plain").trim();
   if (!plain) return [];
   if (plain.startsWith("@")) return [plain];
-  if (plain.toLowerCase().startsWith("file:")) {
-    const path = uriToFilePath(plain);
-    return path ? [path] : [];
-  }
-  if (plain.includes("/") || plain.includes("\\")) {
-    return [plain];
+  return pathsFromPayload(plain);
+}
+
+export async function pathsFromDataTransferItems(
+  dataTransfer: DataTransfer,
+): Promise<string[]> {
+  const items = Array.from(dataTransfer.items ?? []);
+  const payloads: string[] = [];
+
+  for (const item of items) {
+    if (item.kind !== "string") continue;
+    if (
+      ![
+        "application/vnd.code.uri-list",
+        "ResourceURLs",
+        "text/uri-list",
+        "Files",
+        "text/plain",
+      ].includes(item.type)
+    ) {
+      continue;
+    }
+    const value = await new Promise<string>((resolve) => {
+      try {
+        item.getAsString(resolve);
+      } catch {
+        resolve("");
+      }
+    });
+    if (value) payloads.push(value);
   }
 
-  return [];
+  for (const payload of payloads) {
+    const paths = pathsFromPayload(payload);
+    if (paths.length > 0) return paths;
+  }
+
+  return pathsFromFileList(dataTransfer.files);
 }
 
 export function pathsFromFileList(files: FileList | File[]): string[] {
   return Array.from(files)
     .map((file) => {
       const withPath = file as File & { path?: string };
-      return withPath.path?.trim() || file.name.trim();
+      const direct = withPath.path?.trim();
+      if (direct) return direct;
+
+      const webUtils = (
+        window as unknown as {
+          vscode?: { webUtils?: { getPathForFile?: (item: File) => string } };
+        }
+      ).vscode?.webUtils;
+      if (webUtils?.getPathForFile) {
+        try {
+          return webUtils.getPathForFile(file)?.trim() ?? "";
+        } catch {
+          // fall through to the empty path
+        }
+      }
+
+      return "";
     })
     .filter((path) => path.length > 0);
 }

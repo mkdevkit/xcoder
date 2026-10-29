@@ -253,6 +253,7 @@ export type TranslationKey =
   | "chat.modelProvider"
   | "vscode.chat"
   | "vscode.preferences"
+  | "chat.attachFiles"
   | "chat.migrateSession"
   | "chat.migrateTitle"
   | "chat.migrateHint"

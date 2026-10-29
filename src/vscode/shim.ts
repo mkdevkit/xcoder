@@ -1,3 +1,5 @@
+import { queueAttachmentPaths } from "./attachmentQueue";
+
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
   getState(): unknown;
@@ -101,7 +103,8 @@ window.addEventListener("message", (event: MessageEvent) => {
     | InvokeResult
     | EventMessage
     | { type: "init"; [key: string]: unknown }
-    | { type: "workspace"; workspace?: string | null };
+    | { type: "workspace"; workspace?: string | null }
+    | { type: "attach-paths"; paths?: string[] };
 
   if (!message || typeof message !== "object") return;
 
@@ -128,6 +131,11 @@ window.addEventListener("message", (event: MessageEvent) => {
     if (callback.once) {
       callbacks.delete(message.callbackId);
     }
+    return;
+  }
+
+  if (message.type === "attach-paths") {
+    queueAttachmentPaths(Array.isArray(message.paths) ? message.paths : []);
     return;
   }
 

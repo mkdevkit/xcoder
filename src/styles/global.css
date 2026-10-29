@@ -12,6 +12,8 @@
   --text-muted: #858585;
   --accent: #0078d4;
   --accent-hover: #1a86d9;
+  --user-bubble-bg: rgba(168, 130, 255, 0.16);
+  --user-bubble-border: rgba(168, 130, 255, 0.42);
   --success: #4ec9b0;
   --warning: #dcdcaa;
   --danger: #f48771;
@@ -30,6 +32,8 @@
   --text-muted: #616161;
   --accent: #0078d4;
   --accent-hover: #106ebe;
+  --user-bubble-bg: rgba(139, 92, 246, 0.12);
+  --user-bubble-border: rgba(139, 92, 246, 0.32);
   --success: #107c10;
   --warning: #8a6914;
   --danger: #c42b1c;
@@ -165,8 +169,8 @@ textarea {
 }
 
 .message-bubble.user {
-  background: rgba(0, 120, 212, 0.12);
-  border-color: rgba(0, 120, 212, 0.35);
+  background: var(--user-bubble-bg);
+  border-color: var(--user-bubble-border);
 }
 
 .message-meta {
@@ -429,8 +433,8 @@ textarea {
 .message-bubble.user .collapsible-message-fade {
   background: linear-gradient(
     to bottom,
-    color-mix(in srgb, var(--accent) 12%, var(--bg-elevated)) 0%,
-    color-mix(in srgb, var(--accent) 8%, transparent) 55%,
+    var(--user-bubble-bg) 0%,
+    color-mix(in srgb, var(--user-bubble-bg) 70%, transparent) 55%,
     transparent 100%
   );
 }

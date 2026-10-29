@@ -2,7 +2,7 @@
   "name": "xcoder-vscode",
   "displayName": "Xcoder",
   "description": "Xcoder chat and OpenCode preferences inside VS Code",
-  "version": "0.3.4",
+  "version": "0.3.9",
   "publisher": "mkdevkit",
   "license": "MIT",
   "engines": {
@@ -23,7 +23,8 @@
     "onView:xcoder-chat-right",
     "onCommand:xcoder.openChat",
     "onCommand:xcoder.openPreferences",
-    "onCommand:xcoder.restartRuntime"
+    "onCommand:xcoder.restartRuntime",
+    "onCommand:xcoder.attachToChat"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -39,8 +40,20 @@
       {
         "command": "xcoder.restartRuntime",
         "title": "Xcoder: Restart OpenCode Runtime"
+      },
+      {
+        "command": "xcoder.attachToChat",
+        "title": "Xcoder: Add to Chat"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "xcoder.attachToChat",
+          "group": "navigation@9"
+        }
+      ]
+    },
     "configuration": {
       "title": "Xcoder",
       "properties": {

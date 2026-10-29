@@ -33,6 +33,31 @@ function shouldAutoOpen() {
   return vscode.workspace.isTrusted && hasXcoderDir(workspacePath());
 }
 
+function collectUriPaths(values: unknown[]): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const visit = (value: unknown) => {
+    if (value instanceof vscode.Uri) {
+      const fsPath = value.fsPath;
+      if (fsPath && !seen.has(fsPath)) {
+        seen.add(fsPath);
+        paths.push(fsPath);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      visit(record.resourceUri ?? record.uri);
+    }
+  };
+  for (const value of values) visit(value);
+  return paths;
+}
+
 function buildWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
   const htmlPath = vscode.Uri.joinPath(
     extensionUri,
@@ -115,6 +140,8 @@ async function handleWebviewMessage(
 
 class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
+  private ready = false;
+  private pendingAttachments: string[] = [];
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -123,6 +150,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void | Thenable<void> {
     this.view = view;
+    this.ready = false;
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [
@@ -145,13 +173,40 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     webviews.set(view.webview, bridge);
 
     view.webview.onDidReceiveMessage((message) => {
+      if (
+        message &&
+        typeof message === "object" &&
+        (message as { type?: unknown }).type === "ready"
+      ) {
+        this.ready = true;
+        this.flushAttachments();
+      }
       void handleWebviewMessage(message, view.webview, bridge, "chat");
     });
     view.onDidDispose(() => {
       webviews.delete(view.webview);
+      this.ready = false;
       if (this.view === view) this.view = undefined;
     });
     postInit(view.webview, "chat");
+  }
+
+  async attach(paths: string[]) {
+    const unique = Array.from(
+      new Set(paths.filter((path) => typeof path === "string" && path)),
+    );
+    if (unique.length === 0) return;
+    this.pendingAttachments.push(...unique);
+    await this.show();
+    this.flushAttachments();
+  }
+
+  private flushAttachments() {
+    if (!this.ready || !this.view || this.pendingAttachments.length === 0) {
+      return;
+    }
+    const paths = this.pendingAttachments.splice(0);
+    void this.view.webview.postMessage({ type: "attach-paths", paths });
   }
 
   async show() {
@@ -165,6 +220,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.view) {
       this.view.show(false);
       postInit(this.view.webview, "chat");
+      this.flushAttachments();
       return;
     }
     try {
@@ -247,6 +303,13 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("xcoder.openPreferences", () => {
       openPreferences(context, sharedService);
     }),
+    vscode.commands.registerCommand(
+      "xcoder.attachToChat",
+      async (...args: unknown[]) => {
+        const paths = collectUriPaths(args);
+        if (paths.length > 0) await chatProvider.attach(paths);
+      },
+    ),
     vscode.commands.registerCommand("xcoder.restartRuntime", async () => {
       try {
         await sharedService.restart(workspacePath());

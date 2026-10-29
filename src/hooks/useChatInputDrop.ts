@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   normalizeDroppedReferences,
   pathsFromDataTransfer,
+  pathsFromDataTransferItems,
   pathsFromFileList,
 } from "../utils/chatFileReference";
 
@@ -67,8 +68,16 @@ export function useChatInputDrop({
     }
 
     if (transfer.files.length > 0) {
-      attachPaths(pathsFromFileList(transfer.files));
+      const filePaths = pathsFromFileList(transfer.files);
+      if (filePaths.length > 0) {
+        attachPaths(filePaths);
+        return;
+      }
     }
+
+    void pathsFromDataTransferItems(transfer)
+      .then((paths) => attachPaths(paths))
+      .catch(console.error);
   };
 
   return {

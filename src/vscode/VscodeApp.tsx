@@ -29,6 +29,146 @@ function readInitialMessage(): InitMessage | null {
   return window.__XCODER_INIT__ ?? null;
 }
 
+function editableTarget(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element)) return null;
+  const element = target.closest<HTMLElement>(
+    'input, textarea, [contenteditable="true"]',
+  );
+  if (!element) return null;
+  if (element instanceof HTMLInputElement) {
+    const type = element.type.toLowerCase();
+    if (
+      ![
+        "text",
+        "search",
+        "url",
+        "tel",
+        "email",
+        "password",
+        "number",
+      ].includes(type)
+    ) {
+      return null;
+    }
+  }
+  return element;
+}
+
+function selectedText(target: EventTarget | null): string {
+  const element = editableTarget(target);
+  if (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement
+  ) {
+    const start = element.selectionStart ?? 0;
+    const end = element.selectionEnd ?? 0;
+    return end > start ? element.value.slice(start, end) : "";
+  }
+  return window.getSelection()?.toString() ?? "";
+}
+
+function clipboardBridge<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> | null {
+  const internals = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: {
+        invoke?: (cmd: string, payload?: Record<string, unknown>) => Promise<T>;
+      };
+    }
+  ).__TAURI_INTERNALS__;
+  if (typeof internals?.invoke !== "function") return null;
+  return internals.invoke(command, args);
+}
+
+async function writeClipboardText(text: string) {
+  const bridge = clipboardBridge<void>("xcoder_clipboard_write", { text });
+  if (bridge) {
+    try {
+      await bridge;
+      return;
+    } catch {
+      // fall back to the browser clipboard
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.left = "-9999px";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      area.remove();
+    }
+  }
+}
+
+async function readClipboardText() {
+  const bridge = clipboardBridge<string>("xcoder_clipboard_read");
+  if (bridge) {
+    try {
+      const text = await bridge;
+      if (typeof text === "string") return text;
+    } catch {
+      // fall back to the browser clipboard
+    }
+  }
+
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return "";
+  }
+}
+
+function insertText(target: HTMLElement, text: string) {
+  target.focus();
+  if (document.execCommand("insertText", false, text)) return;
+
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement
+  ) {
+    const start = target.selectionStart ?? target.value.length;
+    const end = target.selectionEnd ?? start;
+    const next = target.value.slice(0, start) + text + target.value.slice(end);
+    const prototype =
+      target instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : HTMLTextAreaElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    setter?.call(target, next);
+    target.selectionStart = target.selectionEnd = start + text.length;
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  target.dispatchEvent(
+    new InputEvent("input", {
+      bubbles: true,
+      inputType: "insertText",
+      data: text,
+    }),
+  );
+}
+
 export function VscodeApp() {
   const { t } = useTranslation();
   const [init, setInit] = useState<InitMessage | null>(readInitialMessage);
@@ -47,6 +187,48 @@ export function VscodeApp() {
       createProviderChatSlice(state.providerId);
     return Boolean(slice.connectedIntent && slice.runtime.running);
   });
+
+  useEffect(() => {
+    const isMac = /Mac|iPhone|iPad/i.test(navigator.platform);
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.isComposing || event.altKey) return;
+      const modifier = isMac ? event.metaKey : event.ctrlKey;
+      if (!modifier) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        const text = selectedText(event.target);
+        if (!text) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void writeClipboardText(text);
+        return;
+      }
+
+      const element = editableTarget(event.target);
+      if (!element) return;
+
+      if (key === "v") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void readClipboardText().then((text) => {
+          if (text) insertText(element, text);
+        });
+        return;
+      }
+
+      if (key === "z" || key === "y") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        element.focus();
+        document.execCommand(key === "y" || event.shiftKey ? "redo" : "undo");
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut, true);
+    return () =>
+      window.removeEventListener("keydown", handleShortcut, true);
+  }, []);
 
   useEffect(() => {
     const storedInit = window.__XCODER_INIT__;

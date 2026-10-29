@@ -7,6 +7,7 @@ This extension embeds Xcoder's chat panel and OpenCode preferences inside VS Cod
 - Open a folder in VS Code.
 - If the opened folder contains a `.xcoder` directory, chat opens automatically on the right and connects to OpenCode.
 - Otherwise click the **Xcoder** status bar item or run `Xcoder: Open Chat` to open and connect the chat panel.
+- Attach files with the `@` button in the chat header, or right-click files/folders in Explorer and choose `Xcoder: Add to Chat`.
 - Run `Xcoder: Open Preferences` to edit general settings, OpenCode providers, OpenCode Go credentials, and project settings.
 - Project preferences are stored in `.xcoder/config.json`.
 - Local chat history is stored in `.opencode/history`.

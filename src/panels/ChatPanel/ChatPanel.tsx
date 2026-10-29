@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useShallow } from "zustand/react/shallow";
 import { PanelResizeHandle } from "../../components/PanelResizeHandle";
 import {
@@ -11,7 +12,11 @@ import { isGenerating } from "../../utils/turnState";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { useTranslation } from "../../i18n";
 import { useChatInputDrop } from "../../hooks/useChatInputDrop";
-import { isInternalPathDrag } from "../../utils/chatFileReference";
+import {
+  isInternalPathDrag,
+  normalizeDroppedReferences,
+} from "../../utils/chatFileReference";
+import { takeAttachmentPaths } from "../../vscode/attachmentQueue";
 import { getProviderLabel } from "../../utils/agentProvider";
 import {
   deriveOpencodeVendors,
@@ -138,6 +143,40 @@ export function ChatPanel() {
   const handleAttachReferences = useCallback((refs: string[]) => {
     composerRef.current?.insertReferences(refs);
   }, []);
+
+  useEffect(() => {
+    const drainAttachments = () => {
+      const paths = takeAttachmentPaths();
+      if (paths.length === 0) return;
+      const refs = normalizeDroppedReferences(paths, rootPath);
+      if (refs.length > 0) handleAttachReferences(refs);
+    };
+    drainAttachments();
+    window.addEventListener("xcoder:attachments-queued", drainAttachments);
+    return () =>
+      window.removeEventListener("xcoder:attachments-queued", drainAttachments);
+  }, [handleAttachReferences, rootPath]);
+
+  const handleAttachFiles = async () => {
+    if (!rootPath) return;
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: true,
+        title: t("chat.attachFiles"),
+      });
+      const paths = Array.isArray(selected)
+        ? selected
+        : selected
+          ? [selected]
+          : [];
+      if (paths.length > 0) {
+        handleAttachReferences(normalizeDroppedReferences(paths, rootPath));
+      }
+    } catch (error) {
+      console.error("Failed to attach files:", error);
+    }
+  };
 
   const {
     dropAreaRef,
@@ -305,6 +344,17 @@ export function ChatPanel() {
                 ⇄
               </button>
             )}
+            <button
+              type="button"
+              className="thread-attach-btn"
+              title={t("chat.attachFiles")}
+              disabled={!rootPath || controlsLocked}
+              onClick={() => {
+                void handleAttachFiles();
+              }}
+            >
+              @
+            </button>
           </div>
         )}
       </div>
@@ -467,7 +517,8 @@ export function ChatPanel() {
         }
         .thread-new-btn,
         .thread-delete-btn,
-        .thread-migrate-btn {
+        .thread-migrate-btn,
+        .thread-attach-btn {
           width: 28px;
           padding: 0;
           flex-shrink: 0;
