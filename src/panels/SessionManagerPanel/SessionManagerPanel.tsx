@@ -62,7 +62,9 @@ export function SessionManagerPanel() {
       <div className="session-manager-header">
         <div>
           <h3 className="session-manager-title">{t("chat.sessionManager")}</h3>
-          <p className="session-manager-hint">{t("chat.sessionManagerHint")}</p>
+          <p className="session-manager-hint">
+            {t("chat.sessionManagerHint")}
+          </p>
         </div>
         <button
           type="button"

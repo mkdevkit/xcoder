@@ -189,7 +189,7 @@ Right-click on empty/workbench area:
 - Paths: `<project>/.opencode/history/` or `<project>/.opencode/history/`.
 - **Auto-saved** on send, turn complete, or error.
 - Session list **merges** local and runtime records, preferring meaningful local titles.
-- Deleting a session removes local files and runtime records (when connected).
+- Deleting a session removes the runtime session only; local history files are kept.
 
 ---
 

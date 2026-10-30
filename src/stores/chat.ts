@@ -61,7 +61,6 @@ import {
   writeSavedThreadId,
 } from "../utils/threadStorage";
 import {
-  deleteLocalChatSession,
   loadLocalChatSession,
   mergeThreadLists,
   persistLocalChatSession,
@@ -225,7 +224,7 @@ function isRemoteSessionNotFound(error: unknown): boolean {
   );
 }
 
-async function clearDeletedThreadLocally(
+async function clearDeletedThreadAfterRemoteDelete(
   get: () => ChatState,
   set: (
     partial:
@@ -239,7 +238,6 @@ async function clearDeletedThreadLocally(
   if (readSavedThreadId(providerId, workspace) === threadId) {
     await clearRememberedSession(providerId, workspace);
   }
-  await deleteLocalChatSession(workspace, providerId, threadId);
 
   const slice = getProviderSlice(get, providerId);
   const wasCurrent = slice.thread?.id === threadId;
@@ -2674,7 +2672,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    await clearDeletedThreadLocally(
+    await clearDeletedThreadAfterRemoteDelete(
       get,
       set,
       providerId,
