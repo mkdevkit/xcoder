@@ -3,10 +3,15 @@ import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "../../i18n";
 import { PreferencesPanel } from "../PreferencesPanel/PreferencesPanel";
 import { SessionManagerPanel } from "../SessionManagerPanel/SessionManagerPanel";
+import { LocalHistoryPanel } from "../LocalHistoryPanel/LocalHistoryPanel";
 import { useChatStore } from "../../stores/chat";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { languageFromPath } from "../../utils/language";
-import { isPreferencesTab, isSessionsTab } from "../../utils/virtualTabs";
+import {
+  isLocalHistoryTab,
+  isPreferencesTab,
+  isSessionsTab,
+} from "../../utils/virtualTabs";
 import { startFileDrag } from "../../utils/chatFileReference";
 import { projectDisplayName } from "../../utils/recentProjects";
 import { useDropZone } from "../../hooks/useDropZone";
@@ -56,6 +61,7 @@ export function EditorPanel() {
   const activeTab = getActiveTab();
   const showingPreferences = activeFile ? isPreferencesTab(activeFile) : false;
   const showingSessions = activeFile ? isSessionsTab(activeFile) : false;
+  const showingLocalHistory = activeFile ? isLocalHistoryTab(activeFile) : false;
 
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
@@ -223,6 +229,7 @@ export function EditorPanel() {
   const tabLabel = (path: string) => {
     if (isPreferencesTab(path)) return t("panel.preferences");
     if (isSessionsTab(path)) return t("chat.sessionManager");
+    if (isLocalHistoryTab(path)) return t("chat.localHistory");
     return path.split(/[\\/]/).pop() ?? path;
   };
 
@@ -239,7 +246,9 @@ export function EditorPanel() {
         {openTabs.map((tab) => {
           const isActive = tab.path === activeFile;
           const isFileTab =
-            !isPreferencesTab(tab.path) && !isSessionsTab(tab.path);
+            !isPreferencesTab(tab.path) &&
+            !isSessionsTab(tab.path) &&
+            !isLocalHistoryTab(tab.path);
           return (
             <div
               key={tab.path}
@@ -277,6 +286,8 @@ export function EditorPanel() {
           <PreferencesPanel />
         ) : showingSessions ? (
           <SessionManagerPanel />
+        ) : showingLocalHistory ? (
+          <LocalHistoryPanel />
         ) : (
           <Editor
             key={activeFile}

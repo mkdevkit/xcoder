@@ -3,6 +3,7 @@ import { useTranslation } from "../i18n";
 import { ChatPanel } from "../panels/ChatPanel/ChatPanel";
 import { PreferencesPanel } from "../panels/PreferencesPanel/PreferencesPanel";
 import { SessionManagerPanel } from "../panels/SessionManagerPanel/SessionManagerPanel";
+import { LocalHistoryPanel } from "../panels/LocalHistoryPanel/LocalHistoryPanel";
 import { useChatStore } from "../stores/chat";
 import { createProviderChatSlice } from "../stores/providerChatSlice";
 import { useWorkspaceStore } from "../stores/workspace";
@@ -11,7 +12,7 @@ import { tauriInvoke } from "../utils/tauri";
 import { workspacesMatch } from "../utils/path";
 import type { ProjectConfigInfo } from "../types/projectConfig";
 
-type VscodeTab = "chat" | "sessions" | "preferences";
+type VscodeTab = "chat" | "sessions" | "localHistory" | "preferences";
 
 interface InitMessage {
   type: "init" | "workspace";
@@ -439,13 +440,19 @@ export function VscodeApp() {
   const tabs = useMemo(
     () => [
       ...(connected
-        ? [{ id: "chat" as const, label: t("vscode.chat") }]
+        ? [
+            { id: "chat" as const, label: t("vscode.chat") },
+            {
+              id: "sessions" as const,
+              label: t("chat.sessionManager"),
+            },
+          ]
         : []),
       ...(workspace
         ? [
             {
-              id: "sessions" as const,
-              label: t("chat.sessionManager"),
+              id: "localHistory" as const,
+              label: t("chat.localHistory"),
             },
           ]
         : []),
@@ -489,13 +496,22 @@ export function VscodeApp() {
             <ChatPanel />
           </div>
         )}
-        {workspace && (
+        {workspace && connected && (
           <div
             className={`vscode-pane ${
               tab === "sessions" ? "active" : "hidden"
             }`}
           >
             <SessionManagerPanel />
+          </div>
+        )}
+        {workspace && (
+          <div
+            className={`vscode-pane ${
+              tab === "localHistory" ? "active" : "hidden"
+            }`}
+          >
+            <LocalHistoryPanel />
           </div>
         )}
         {preferencesMounted && (

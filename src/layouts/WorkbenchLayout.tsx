@@ -45,6 +45,7 @@ export function WorkbenchLayout() {
     openFolder,
     openPreferencesTab,
     openSessionsTab,
+    openLocalHistoryTab,
     openRecentProject,
     closeProject,
     recentProjects,
@@ -56,6 +57,7 @@ export function WorkbenchLayout() {
       openFolder: state.openFolder,
       openPreferencesTab: state.openPreferencesTab,
       openSessionsTab: state.openSessionsTab,
+      openLocalHistoryTab: state.openLocalHistoryTab,
       openRecentProject: state.openRecentProject,
       closeProject: state.closeProject,
       recentProjects: state.recentProjects,
@@ -155,6 +157,11 @@ export function WorkbenchLayout() {
             onClick: () => openSessionsTab(),
           },
           {
+            id: "local-history",
+            label: t("chat.localHistory"),
+            onClick: () => openLocalHistoryTab(),
+          },
+          {
             id: "preferences",
             label: t("menu.preferences"),
             onClick: () => openPreferencesTab(),
@@ -173,7 +180,7 @@ export function WorkbenchLayout() {
         ],
       },
     ];
-  }, [closeProject, handleNewTerminal, openFolder, openPreferencesTab, openSessionsTab, openRecentProject, recentProjects, rootPath, t]);
+  }, [closeProject, handleNewTerminal, openFolder, openPreferencesTab, openSessionsTab, openLocalHistoryTab, openRecentProject, recentProjects, rootPath, t]);
 
   const handleTerminalResize = (delta: number) => {
     const maxHeight = centerColumnRef.current

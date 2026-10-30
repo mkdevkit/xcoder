@@ -61,7 +61,6 @@ export interface ThreadSummary {
   preview?: string;
   workspace?: string;
   updated_at?: string;
-  localOnly?: boolean;
 }
 
 export interface HistoryMessage {

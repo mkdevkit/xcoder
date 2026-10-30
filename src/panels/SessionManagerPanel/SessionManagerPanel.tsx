@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "../../stores/chat";
 import { createProviderChatSlice } from "../../stores/providerChatSlice";
@@ -37,14 +37,10 @@ export function SessionManagerPanel() {
   const deleteThread = useChatStore((state) => state.deleteThread);
   const rootPath = useWorkspaceStore((state) => state.rootPath);
 
-  const canManage = Boolean(rootPath);
-  const canUseRemote = Boolean(connectedIntent && runtime.running);
+  const canManage = Boolean(
+    rootPath && connectedIntent && runtime.running,
+  );
   const currentId = thread?.id ?? null;
-
-  useEffect(() => {
-    if (!rootPath) return;
-    loadThreads(rootPath, providerId).catch(console.error);
-  }, [loadThreads, providerId, rootPath]);
 
   const refresh = () => {
     if (!rootPath) return;
@@ -73,17 +69,17 @@ export function SessionManagerPanel() {
         <button
           type="button"
           className="session-manager-refresh"
-          disabled={!rootPath || threadsLoading}
+          disabled={!canManage || threadsLoading}
           onClick={refresh}
         >
           {t("chat.refreshSessions")}
         </button>
       </div>
 
-      {error && <div className="session-manager-error">{error}</div>}
-
       {!canManage ? (
-        <div className="session-manager-empty">{t("chat.openFolderFirst")}</div>
+        <div className="session-manager-empty">{t("chat.connectFirst")}</div>
+      ) : error ? (
+        <div className="session-manager-error">{error}</div>
       ) : threadsLoading && threads.length === 0 ? (
         <div className="session-manager-empty">{t("chat.migrateLoading")}</div>
       ) : threads.length === 0 ? (
@@ -96,27 +92,18 @@ export function SessionManagerPanel() {
           <ul className="session-manager-list">
             {threads.map((item) => {
               const isCurrent = item.id === currentId;
-              const isLocal = item.localOnly === true;
               const title =
                 localizeSessionTitle(item.title) ||
                 item.preview ||
                 item.id;
-              const displayTitle = isLocal
-                ? `${t("chat.localSessionTag")} ${title}`
-                : title;
               return (
                 <li
                   key={item.id}
-                  className={`session-manager-item ${
-                    isCurrent ? "current" : ""
-                  } ${isLocal ? "local" : ""}`}
+                  className={`session-manager-item ${isCurrent ? "current" : ""}`}
                 >
                   <div className="session-manager-info">
-                    <span
-                      className="session-manager-name"
-                      title={displayTitle}
-                    >
-                      {displayTitle}
+                    <span className="session-manager-name" title={title}>
+                      {title}
                     </span>
                     <span className="session-manager-id" title={item.id}>
                       {item.id}
@@ -132,10 +119,7 @@ export function SessionManagerPanel() {
                       className="session-manager-delete"
                       title={t("chat.deleteSession")}
                       aria-label={t("chat.deleteSession")}
-                      disabled={
-                        deletingId === item.id ||
-                        (!isLocal && !canUseRemote)
-                      }
+                      disabled={deletingId === item.id}
                       onClick={() => {
                         void remove(item.id);
                       }}
@@ -214,13 +198,6 @@ export function SessionManagerPanel() {
             var(--user-bubble-bg) 55%,
             var(--bg-elevated)
           );
-        }
-        .session-manager-item.local:not(.current) {
-          border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
-          background: color-mix(in srgb, var(--warning) 8%, var(--bg-elevated));
-        }
-        .session-manager-item.local .session-manager-name {
-          color: var(--warning);
         }
         .session-manager-info {
           flex: 1;

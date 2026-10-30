@@ -9,7 +9,7 @@ This extension embeds Xcoder's chat panel and OpenCode preferences inside VS Cod
 - Otherwise click the **Xcoder** status bar item or run `Xcoder: Open Chat` to open and connect the chat panel.
 - Attach files with the `@` button in the chat header, or right-click files/folders in Explorer and choose `Xcoder: Add to Chat`.
 - Use the `☰` button in the chat header to open the session manager and delete non-current sessions without opening them.
-- Local-only history appears as `[local]`; deleting a remote session keeps local history, and deleting the `[local]` row removes it.
+- Local history is managed in a separate **Local history** tab; deleting a session in the session manager keeps local history.
 - Run `Xcoder: Open Preferences` to edit general settings, OpenCode providers, OpenCode Go credentials, and project settings.
 - Project preferences are stored in `.xcoder/config.json`.
 - Local chat history is stored in `.opencode/history`.

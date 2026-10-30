@@ -61,7 +61,6 @@ import {
   writeSavedThreadId,
 } from "../utils/threadStorage";
 import {
-  deleteLocalChatSession,
   loadLocalChatSession,
   mergeThreadLists,
   persistLocalChatSession,
@@ -2497,30 +2496,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadThreads: async (workspace, providerId) => {
     const id = providerId ?? get().providerId;
     const slice = getProviderSlice(get, id);
-    const local = await listLocalChatSessions(workspace, id);
-
-    if (!slice.connectedIntent) {
-      patchProvider(set, id, {
-        threads: mergeThreadLists([], local),
-        threadsLoading: false,
-      });
-      return;
-    }
+    if (!slice.connectedIntent) return;
 
     const commands = getAgentCommands(id);
     patchProvider(set, id, { threadsLoading: true, error: null });
     try {
-      const remote = await tauriInvoke<ThreadSummary[]>(commands.listThreads, {
-        workspace,
-        limit: 50,
-      });
+      const [remote, local] = await Promise.all([
+        tauriInvoke<ThreadSummary[]>(commands.listThreads, {
+          workspace,
+          limit: 50,
+        }),
+        listLocalChatSessions(workspace, id),
+      ]);
       patchProvider(set, id, {
         threads: mergeThreadLists(remote, local),
         threadsLoading: false,
       });
     } catch (e) {
       patchProvider(set, id, {
-        threads: mergeThreadLists([], local),
         threadsLoading: false,
         error: String(e),
       });
@@ -2641,41 +2634,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { providerId } = get();
     const slice = getProviderSlice(get, providerId);
     const current = slice.threads.find((item) => item.id === threadId);
-    const localOnly = current?.localOnly === true;
     const label =
       current?.title ||
       current?.preview ||
       translate(useSettingsStore.getState().locale, "chat.sessionFallback");
     const confirmed = await safeConfirm(
-      translate(
-        useSettingsStore.getState().locale,
-        localOnly ? "chat.deleteLocalConfirm" : "chat.deleteConfirm",
-        { label },
-      ),
+      translate(useSettingsStore.getState().locale, "chat.deleteConfirm", {
+        label,
+      }),
     );
     if (!confirmed) return;
-
-    if (localOnly) {
-      await deleteLocalChatSession(workspace, providerId, threadId);
-      if (readSavedThreadId(providerId, workspace) === threadId) {
-        await clearRememberedSession(providerId, workspace);
-      }
-      const deletingCurrent = slice.thread?.id === threadId;
-      patchProvider(set, providerId, {
-        threads: slice.threads.filter((item) => item.id !== threadId),
-        ...(deletingCurrent
-          ? {
-              thread: null,
-              messages: [],
-              streaming: false,
-              pendingApproval: null,
-              pendingQuestion: null,
-              error: null,
-            }
-          : {}),
-      });
-      return;
-    }
 
     const commands = getAgentCommands(providerId);
     const deletingCurrent = slice.thread?.id === threadId;
