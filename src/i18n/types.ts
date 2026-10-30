@@ -248,6 +248,8 @@ export type TranslationKey =
   | "chat.hintNoSession"
   | "chat.hintReady"
   | "chat.deleteConfirm"
+  | "chat.deleteLocalConfirm"
+  | "chat.localSessionTag"
   | "chat.sessionFallback"
   | "chat.newSessionTitle"
   | "chat.modelProvider"

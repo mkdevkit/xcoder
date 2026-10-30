@@ -216,27 +216,39 @@ export function mergeThreadLists(
   local: LocalSessionMeta[],
 ): ThreadSummary[] {
   const localById = new Map(local.map((item) => [item.id, item]));
+  const remoteIds = new Set(remote.map((item) => item.id));
 
-  return remote
-    .map((item) => {
-      const localItem = localById.get(item.id);
-      const title =
-        localItem &&
-        isGenericSessionTitle(item.title) &&
-        !isGenericSessionTitle(localItem.title)
-          ? localItem.title
-          : item.title;
-      return {
-        ...item,
-        title,
-        preview: item.preview ?? localItem?.preview,
-      };
-    })
-    .sort((a, b) => {
-      const left = Date.parse(a.updated_at ?? "") || 0;
-      const right = Date.parse(b.updated_at ?? "") || 0;
-      return right - left;
-    });
+  const remoteRows = remote.map((item) => {
+    const localItem = localById.get(item.id);
+    const title =
+      localItem &&
+      isGenericSessionTitle(item.title) &&
+      !isGenericSessionTitle(localItem.title)
+        ? localItem.title
+        : item.title;
+    return {
+      ...item,
+      title,
+      preview: item.preview ?? localItem?.preview,
+      localOnly: false,
+    };
+  });
+
+  const localRows = local
+    .filter((item) => !remoteIds.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      preview: item.preview,
+      updated_at: item.updated_at,
+      localOnly: true,
+    }));
+
+  return [...remoteRows, ...localRows].sort((a, b) => {
+    const left = Date.parse(a.updated_at ?? "") || 0;
+    const right = Date.parse(b.updated_at ?? "") || 0;
+    return right - left;
+  });
 }
 
 export function sessionTitleFromMessages(messages: HistoryMessage[], fallback: string) {

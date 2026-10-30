@@ -304,6 +304,9 @@ export function ChatPanel() {
                   {!thread && <option value="">{t("chat.selectSession")}</option>}
                   {threads.map((item) => (
                     <option key={item.id} value={item.id}>
+                      {item.localOnly
+                        ? `${t("chat.localSessionTag")} `
+                        : ""}
                       {localizeSessionTitle(item.title) || item.preview || item.id}
                     </option>
                   ))}

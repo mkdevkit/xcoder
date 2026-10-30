@@ -439,8 +439,10 @@ export function VscodeApp() {
   const tabs = useMemo(
     () => [
       ...(connected
+        ? [{ id: "chat" as const, label: t("vscode.chat") }]
+        : []),
+      ...(workspace
         ? [
-            { id: "chat" as const, label: t("vscode.chat") },
             {
               id: "sessions" as const,
               label: t("chat.sessionManager"),
@@ -449,7 +451,7 @@ export function VscodeApp() {
         : []),
       { id: "preferences" as const, label: t("vscode.preferences") },
     ],
-    [connected, t],
+    [connected, t, workspace],
   );
 
   if (!init) {
@@ -487,7 +489,7 @@ export function VscodeApp() {
             <ChatPanel />
           </div>
         )}
-        {workspace && connected && (
+        {workspace && (
           <div
             className={`vscode-pane ${
               tab === "sessions" ? "active" : "hidden"
@@ -499,7 +501,7 @@ export function VscodeApp() {
         {preferencesMounted && (
           <div
             className={`vscode-pane preferences ${
-              tab === "preferences" || !connected ? "active" : "hidden"
+              tab === "preferences" ? "active" : "hidden"
             }`}
           >
             <PreferencesPanel
